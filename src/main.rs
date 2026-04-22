@@ -5,7 +5,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -67,12 +67,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
 
         if event::poll(timeout)? {
             if let Event::Key(key_event) = event::read()? {
-                match key_event.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        app.request_quit();
-                    }
-                    _ => {}
-                }
+                app.handle_key(key_event);
             }
         }
 

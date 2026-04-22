@@ -1,134 +1,194 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use crate::app::App;
+
+const BG: Color = Color::Rgb(10, 10, 12);
+const ACCENT: Color = Color::Rgb(200, 146, 88);
+const ACCENT_SOFT: Color = Color::Rgb(150, 110, 66);
+const TEXT: Color = Color::Rgb(236, 236, 238);
+const MUTED: Color = Color::Rgb(136, 136, 144);
+const MUTED_SOFT: Color = Color::Rgb(90, 98, 98);
+const PANEL: Color = Color::Rgb(22, 28, 28);
+const BORDER: Color = Color::Rgb(34, 65, 64);
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
+    frame.render_widget(
+        Block::default().style(Style::default().bg(BG)),
+        area,
+    );
+
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(0),
+            Constraint::Length(8),
             Constraint::Length(4),
             Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(0),
         ])
         .margin(1)
         .split(area);
 
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled("ALEPH", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw("  terminal and agent runtime for Strix"),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("boot"));
-    frame.render_widget(header, root[0]);
-
-    let status_line = Paragraph::new(Line::from(vec![
-        Span::styled("status ", Style::default().fg(Color::DarkGray)),
-        Span::styled("ready", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(app.spinner(), Style::default().fg(Color::Yellow)),
-        Span::raw("  "),
-        Span::styled(format!("uptime {}", app.uptime()), Style::default().fg(Color::Gray)),
-        Span::raw("  "),
-        Span::styled(
-            format!("tick {}", app.tick()),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("runtime"));
-    frame.render_widget(status_line, root[1]);
-
-    let body = Layout::default()
+    let logo = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-        .split(root[2]);
+        .constraints([Constraint::Length(22), Constraint::Min(0)])
+        .split(root[0]);
 
-    let left = Layout::default()
+    let emblem = Paragraph::new(vec![
+        Line::from(vec![
+            Span::raw("        "),
+            Span::styled("    ╭╲╱╲╮", Style::default().fg(ACCENT)),
+        ]),
+        Line::from(vec![
+            Span::raw("      "),
+            Span::styled("   ╱╲  ╱╲", Style::default().fg(ACCENT)),
+        ]),
+        Line::from(vec![
+            Span::raw("    "),
+            Span::styled("  ╱  ╲╱  ╲", Style::default().fg(ACCENT)),
+        ]),
+        Line::from(vec![
+            Span::raw("   "),
+            Span::styled(" ╱ ╭ℵ╮ ╲", Style::default().fg(ACCENT)),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("╱ ╱╯ ╰╲ ╲", Style::default().fg(ACCENT)),
+        ]),
+        Line::from(vec![
+            Span::raw("    "),
+            Span::styled("╲╱  ╳  ╲╱", Style::default().fg(ACCENT)),
+        ]),
+        Line::from(vec![
+            Span::raw("      "),
+            Span::styled("   ╲╱╲╱", Style::default().fg(ACCENT)),
+        ]),
+    ])
+    .alignment(Alignment::Left);
+    frame.render_widget(emblem, logo[0]);
+
+    let version = Paragraph::new(Line::from(vec![Span::styled(
+        "Aleph 0.1.0",
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    )]));
+    frame.render_widget(version, logo[1]);
+
+    let title_block = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(0)])
-        .split(body[0]);
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
+        .split(root[1]);
 
-    let tabs = Tabs::new(vec![
-        Line::from("Home"),
-        Line::from("Search"),
-        Line::from("Notes"),
-        Line::from("Memories"),
-        Line::from("Canvas"),
-        Line::from("Darwin"),
-    ])
-    .select(0)
-    .block(Block::default().borders(Borders::ALL).title("modes"))
-    .style(Style::default().fg(Color::Gray))
-    .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
-    frame.render_widget(tabs, left[0]);
+    let title = Paragraph::new(Line::from(vec![Span::styled(
+        "Aleph",
+        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+    )]));
+    frame.render_widget(title, title_block[0]);
 
-    let intro = Paragraph::new(vec![
-        Line::from("Base TUI scaffold for Aleph."),
-        Line::from(""),
-        Line::from("This shell proves the terminal surface and leaves room for CLI, MCP, and gateway work."),
-    ])
-    .wrap(Wrap { trim: true })
-    .block(Block::default().borders(Borders::ALL).title("welcome"));
-    frame.render_widget(intro, left[1]);
-
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(0)])
-        .split(body[1]);
-
-    let runtime_items = List::new(vec![
-        ListItem::new("- transport: terminal"),
-        ListItem::new("- ui: ratatui"),
-        ListItem::new("- backend: not wired"),
-        ListItem::new("- mcp: pending"),
-        ListItem::new("- cache: pending"),
-    ])
-    .block(Block::default().borders(Borders::ALL).title("surface"));
-    frame.render_widget(runtime_items, right[0]);
-
-    let checklist = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("[x]", Style::default().fg(Color::Green)),
-            Span::raw(" terminal shell boots"),
-        ]),
-        Line::from(vec![
-            Span::styled("[ ]", Style::default().fg(Color::DarkGray)),
-            Span::raw(" command entry"),
-        ]),
-        Line::from(vec![
-            Span::styled("[ ]", Style::default().fg(Color::DarkGray)),
-            Span::raw(" gateway client"),
-        ]),
-        Line::from(vec![
-            Span::styled("[ ]", Style::default().fg(Color::DarkGray)),
-            Span::raw(" streaming output"),
-        ]),
-    ])
-    .block(Block::default().borders(Borders::ALL).title("first milestones"));
-    frame.render_widget(checklist, right[1]);
-
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "aleph >",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" press q or Esc to quit"),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("command line"));
-    frame.render_widget(footer, root[3]);
+    let subtitle = Paragraph::new(Line::from(vec![Span::styled(
+        "terminal and agent runtime for Strix",
+        Style::default().fg(MUTED),
+    )]));
+    frame.render_widget(subtitle, title_block[1]);
 
     let help = Paragraph::new(Line::from(vec![
-        Span::styled("Tab", Style::default().fg(Color::Cyan)),
-        Span::raw(" modes  "),
-        Span::styled("Ctrl+R", Style::default().fg(Color::Cyan)),
-        Span::raw(" history  "),
-        Span::styled("Ctrl+J", Style::default().fg(Color::Cyan)),
-        Span::raw(" output  "),
-        Span::styled("q", Style::default().fg(Color::Cyan)),
+        Span::styled("Tab", Style::default().fg(ACCENT)),
+        Span::raw(" to autocomplete, "),
+        Span::styled("↑/↓", Style::default().fg(ACCENT)),
+        Span::raw(" cycle slash commands, "),
+        Span::styled("Enter", Style::default().fg(ACCENT)),
+        Span::raw(" run selected command, "),
+        Span::styled("Ctrl+C", Style::default().fg(ACCENT)),
         Span::raw(" quit"),
-    ]));
-    frame.render_widget(help, root[4]);
+    ]))
+    .style(Style::default().fg(MUTED));
+    frame.render_widget(help, title_block[2]);
+
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(BORDER)),
+        root[2],
+    );
+
+    let input_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(28)])
+        .split(root[3]);
+
+    let prompt_block = Paragraph::new(Line::from(vec![
+        Span::styled(
+            ">",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(app.prompt_before_cursor(), Style::default().fg(TEXT)),
+        Span::styled("█", Style::default().fg(ACCENT)),
+        Span::styled(app.prompt_after_cursor(), Style::default().fg(TEXT)),
+    ]))
+    .alignment(Alignment::Left)
+    .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(BORDER)));
+    frame.render_widget(prompt_block, input_row[0]);
+
+    let command_hint = if app.is_thinking() {
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                app.thinking_frame(),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" thinking"),
+        ]))
+        .style(Style::default().fg(MUTED))
+        .alignment(Alignment::Right)
+    } else {
+        Paragraph::new(Line::from(vec![
+            Span::styled("/login", Style::default().fg(ACCENT)),
+            Span::raw(" "),
+            Span::styled("/status", Style::default().fg(ACCENT)),
+            Span::raw(" "),
+            Span::styled("/search", Style::default().fg(ACCENT)),
+        ]))
+        .style(Style::default().fg(MUTED))
+        .alignment(Alignment::Right)
+    };
+    frame.render_widget(command_hint, input_row[1]);
+
+    let suggestions = app.visible_commands(8);
+    let remaining = app.total_command_matches().saturating_sub(suggestions.len());
+    let rows = suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, command)| {
+            let selected = index == app.selected_suggestion();
+            let row_style = if selected {
+                Style::default()
+                    .fg(TEXT)
+                    .bg(PANEL)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Rgb(122, 122, 128))
+            };
+
+            Row::new(vec![
+                Cell::from(Span::styled(App::command_label(command), row_style)),
+                Cell::from(Span::styled((*command).description, row_style)),
+            ])
+        })
+        .chain((remaining > 0).then(|| {
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    format!("+ {} more", remaining),
+                    Style::default().fg(MUTED_SOFT),
+                )),
+                Cell::from(Span::styled("", Style::default())),
+            ])
+        }))
+        .collect::<Vec<_>>();
+
+    let suggestions_table = Table::new(rows, [Constraint::Length(26), Constraint::Min(10)])
+        .column_spacing(3)
+        .style(Style::default().fg(Color::Rgb(122, 122, 128)));
+    frame.render_widget(suggestions_table, root[4]);
 }
