@@ -20,6 +20,7 @@ pub struct Note {
 pub enum PanelMode {
     Commands,
     NoteEditor,
+    FullEditor,
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
@@ -105,7 +106,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
 ];
 
-const THINKING_FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+const THINKING_FRAMES: [&str; 10] = [
+    "◡", "⊙", "◠", "⊙", "◡", "⊙", "◉", "●", "◉", "⊙",
+];
 
 #[allow(dead_code)]
 pub struct App {
@@ -129,6 +132,13 @@ pub struct App {
     editor_note_index: Option<usize>,
     editor_buffer: String,
     editor_cursor: usize,
+    thinking: bool,
+    thinking_ticks_remaining: u8,
+    ai_sidepanel_visible: bool,
+    ai_panel_focused: bool,
+    ai_input_buffer: String,
+    ai_input_cursor: usize,
+    suggestion_filter: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -188,11 +198,28 @@ impl App {
             editor_note_index: None,
             editor_buffer: String::new(),
             editor_cursor: 0,
+            thinking: false,
+            thinking_ticks_remaining: 0,
+            ai_sidepanel_visible: false,
+            ai_panel_focused: false,
+            ai_input_buffer: String::new(),
+            ai_input_cursor: 0,
+            suggestion_filter: None,
         }
     }
 
     pub fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
+        if self.thinking && self.thinking_ticks_remaining > 0 {
+            self.thinking_ticks_remaining -= 1;
+            if self.thinking_ticks_remaining == 0 {
+                self.thinking = false;
+                self.panel_lines = vec![
+                    String::from("AI response ready."),
+                    String::from("In the future, this will connect to the agent runtime."),
+                ];
+            }
+        }
     }
 
     pub fn request_quit(&mut self) {
@@ -230,7 +257,27 @@ impl App {
     }
 
     pub fn is_thinking(&self) -> bool {
-        !self.prompt.trim().is_empty()
+        self.thinking
+    }
+
+    pub fn is_full_editor(&self) -> bool {
+        self.panel_mode == PanelMode::FullEditor
+    }
+
+    pub fn ai_sidepanel_visible(&self) -> bool {
+        self.ai_sidepanel_visible
+    }
+
+    pub fn ai_panel_focused(&self) -> bool {
+        self.ai_panel_focused
+    }
+
+    pub fn ai_input_buffer(&self) -> &str {
+        &self.ai_input_buffer
+    }
+
+    pub fn ai_input_cursor(&self) -> usize {
+        self.ai_input_cursor
     }
 
     pub fn is_editing_note(&self) -> bool {
@@ -279,31 +326,86 @@ impl App {
         self.selected_suggestion
     }
 
+    pub fn visible_commands_window(&self, window_size: usize) -> (Vec<&'static CommandSpec>, usize) {
+        // Use suggestion_filter if initialized, otherwise fall back to prompt
+        let query = if let Some(ref filter) = self.suggestion_filter {
+            filter.clone()
+        } else {
+            self.normalized_prompt().to_lowercase()
+        };
+
+        // Get filtered or full list
+        let all: Vec<_> = if !query.is_empty() {
+            COMMANDS
+                .iter()
+                .filter(|cmd| {
+                    cmd.name.contains(&query)
+                        || cmd.description.to_lowercase().contains(&query)
+                })
+                .collect()
+        } else {
+            COMMANDS.iter().collect()
+        };
+
+        let total = all.len();
+
+        if total == 0 {
+            return (Vec::new(), 0);
+        }
+
+        let selected = self.selected_suggestion.min(total - 1);
+
+        // Calculate the window start index to keep selection visible
+        let mut start = 0;
+        if selected >= window_size {
+            start = selected.saturating_sub(window_size - 1);
+        }
+
+        // Ensure we don't go past the end
+        let end = (start + window_size).min(total);
+        let window: Vec<_> = all[start..end].iter().copied().collect();
+
+        (window, start)
+    }
+
     pub fn last_action(&self) -> &str {
         &self.last_action
     }
 
     pub fn visible_commands(&self, limit: usize) -> Vec<&'static CommandSpec> {
+        let raw = self.prompt.trim();
+        if !raw.starts_with('/') {
+            return Vec::new();
+        }
+
         let query = self.normalized_prompt().to_lowercase();
 
+        // Show all commands when query is empty
+        if query.is_empty() {
+            let mut all: Vec<_> = COMMANDS.iter().collect();
+            all.truncate(limit);
+            return all;
+        }
+
+        // Filter commands by query
         let mut matches: Vec<&'static CommandSpec> = COMMANDS
             .iter()
             .filter(|command| {
-                query.is_empty()
-                    || command.name.contains(&query)
+                command.name.contains(&query)
                     || command.description.to_lowercase().contains(&query)
             })
             .collect();
-
-        if matches.is_empty() {
-            matches = COMMANDS.iter().collect();
-        }
 
         matches.truncate(limit);
         matches
     }
 
     pub fn total_command_matches(&self) -> usize {
+        let raw = self.prompt.trim();
+        if !raw.starts_with('/') {
+            return 0;
+        }
+
         let query = self.normalized_prompt().to_lowercase();
 
         COMMANDS
@@ -317,6 +419,10 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key_event: KeyEvent) {
+        if self.is_full_editor() {
+            self.handle_full_editor_key(key_event);
+            return;
+        }
         if self.is_editing_note() {
             self.handle_editor_key(key_event);
             return;
@@ -419,6 +525,7 @@ impl App {
         self.prompt.insert(self.cursor, character);
         self.cursor += character.len_utf8();
         self.history_index = None;
+        self.suggestion_filter = None;
         self.sync_selection();
     }
 
@@ -435,6 +542,7 @@ impl App {
         self.prompt.drain(self.cursor - previous..self.cursor);
         self.cursor -= previous;
         self.history_index = None;
+        self.suggestion_filter = None;
         self.sync_selection();
     }
 
@@ -450,6 +558,7 @@ impl App {
             .unwrap_or(1);
         self.prompt.drain(self.cursor..self.cursor + next);
         self.history_index = None;
+        self.suggestion_filter = None;
         self.sync_selection();
     }
 
@@ -480,7 +589,27 @@ impl App {
     }
 
     fn cycle_suggestion(&mut self, direction: isize) {
-        let suggestions = self.visible_commands(16);
+        // Save the current query the first time we cycle
+        if self.suggestion_filter.is_none() {
+            let query = self.normalized_prompt().to_lowercase();
+            self.suggestion_filter = Some(query);
+        }
+
+        // Get filtered list based on suggestion_filter
+        let query = self.suggestion_filter.as_ref().unwrap().clone();
+
+        let suggestions: Vec<_> = if query.is_empty() {
+            COMMANDS.iter().collect()
+        } else {
+            COMMANDS
+                .iter()
+                .filter(|cmd| {
+                    cmd.name.contains(&query)
+                        || cmd.description.to_lowercase().contains(&query)
+                })
+                .collect()
+        };
+
         if suggestions.is_empty() {
             return;
         }
@@ -489,7 +618,11 @@ impl App {
         let current = self.selected_suggestion as isize;
         let next_index = (current + direction).rem_euclid(len) as usize;
         self.selected_suggestion = next_index;
-        self.last_action = format!("Selected: {}", suggestions[next_index].name);
+
+        let selected = suggestions[next_index];
+        self.prompt = format!("/{}", selected.name);
+        self.cursor = self.prompt.len();
+        self.last_action = format!("Selected: {}", selected.name);
     }
 
     fn autocomplete(&mut self) {
@@ -511,26 +644,31 @@ impl App {
     }
 
     fn submit_prompt(&mut self) {
-        let prompt = self.normalized_prompt();
-        if prompt.is_empty() {
-            let suggestions = self.visible_commands(16);
-            let command = suggestions
-                .get(self.selected_suggestion.min(suggestions.len().saturating_sub(1)))
-                .map(|command| command.name)
-                .unwrap_or("");
+        let raw = self.prompt.trim();
+        if raw.is_empty() {
+            self.last_action = String::from("Type a query, command, or press Ctrl+C to quit.");
+            return;
+        }
 
-            if command.is_empty() {
-                self.last_action = String::from("Type a command or press Ctrl+C to quit.");
-                return;
-            }
-
-            self.history.push(format!("/{}", command));
+        if !raw.starts_with('/') {
+            let query = raw.to_string();
+            self.history.push(query.clone());
             self.history_index = None;
-            self.execute_command(command, "");
+            self.thinking = true;
+            self.thinking_ticks_remaining = 15;
+            self.set_result_panel(
+                "AI Query",
+                vec![
+                    format!("Query: {}", query),
+                    String::from("Processing your request..."),
+                ],
+            );
+            self.last_action = format!("AI Query: {}", query);
             self.reset_prompt();
             return;
         }
 
+        let prompt = self.normalized_prompt();
         let Some((command, args)) = Self::parse_command(prompt.as_str()) else {
             self.set_result_panel(
                 "Unknown command",
@@ -554,6 +692,7 @@ impl App {
         self.prompt.clear();
         self.cursor = 0;
         self.selected_suggestion = 0;
+        self.suggestion_filter = None;
     }
 
     fn normalize_command_input(prompt: &str) -> String {
@@ -939,9 +1078,10 @@ impl App {
         self.editor_note_index = Some(index);
         self.editor_buffer = self.notes[index].content.clone();
         self.editor_cursor = self.editor_buffer.len();
-        self.panel_mode = PanelMode::NoteEditor;
-        self.panel_title = format!("Editing note: {}", self.notes[index].title);
+        self.panel_mode = PanelMode::FullEditor;
+        self.panel_title = format!("Editing: {}", self.notes[index].title);
         self.panel_lines.clear();
+        self.ai_sidepanel_visible = false;
         self.last_action = format!("Editing note: {}", self.notes[index].title);
     }
 
@@ -1113,6 +1253,147 @@ impl App {
 
         self.selected_suggestion = self.selected_suggestion.min(suggestions.len() - 1);
     }
+
+    fn handle_full_editor_key(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Char('c')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.save_editor();
+            }
+            KeyCode::Char('s')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.save_editor();
+            }
+            KeyCode::Esc if key_event.kind == KeyEventKind::Press => self.save_editor(),
+            KeyCode::Char('l')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                if self.ai_sidepanel_visible {
+                    self.ai_sidepanel_visible = false;
+                    self.ai_panel_focused = false;
+                } else {
+                    self.ai_sidepanel_visible = true;
+                    self.ai_panel_focused = true;
+                }
+            }
+            KeyCode::Tab if key_event.kind == KeyEventKind::Press && self.ai_sidepanel_visible => {
+                self.ai_panel_focused = !self.ai_panel_focused;
+            }
+            _ => {
+                if self.ai_panel_focused {
+                    self.handle_ai_input_key(key_event);
+                } else {
+                    self.handle_editor_content_key(key_event);
+                }
+            }
+        }
+    }
+
+    fn handle_editor_content_key(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
+                self.insert_editor_character('\n');
+            }
+            KeyCode::Tab if key_event.kind == KeyEventKind::Press => {
+                self.insert_editor_text("    ");
+            }
+            KeyCode::Backspace if key_event.kind == KeyEventKind::Press => self.editor_backspace(),
+            KeyCode::Delete if key_event.kind == KeyEventKind::Press => self.editor_delete(),
+            KeyCode::Left if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                self.editor_move_left()
+            }
+            KeyCode::Right
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
+                self.editor_move_right()
+            }
+            KeyCode::Home if key_event.kind == KeyEventKind::Press => self.editor_cursor = 0,
+            KeyCode::End if key_event.kind == KeyEventKind::Press => {
+                self.editor_cursor = self.editor_buffer.len()
+            }
+            KeyCode::Char(character)
+                if key_event.kind == KeyEventKind::Press
+                    && !key_event.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key_event.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.insert_editor_character(character);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_ai_input_key(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
+                // Send message to AI
+                if !self.ai_input_buffer.trim().is_empty() {
+                    self.thinking = true;
+                    self.thinking_ticks_remaining = 15;
+                    self.ai_input_buffer.clear();
+                    self.ai_input_cursor = 0;
+                }
+            }
+            KeyCode::Backspace if key_event.kind == KeyEventKind::Press => {
+                if self.ai_input_cursor > 0 {
+                    let prev = self.ai_input_buffer[..self.ai_input_cursor]
+                        .chars()
+                        .next_back()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    self.ai_input_buffer.drain(self.ai_input_cursor - prev..self.ai_input_cursor);
+                    self.ai_input_cursor -= prev;
+                }
+            }
+            KeyCode::Delete if key_event.kind == KeyEventKind::Press => {
+                if self.ai_input_cursor < self.ai_input_buffer.len() {
+                    let next = self.ai_input_buffer[self.ai_input_cursor..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    self.ai_input_buffer.drain(self.ai_input_cursor..self.ai_input_cursor + next);
+                }
+            }
+            KeyCode::Left if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                if self.ai_input_cursor > 0 {
+                    let prev = self.ai_input_buffer[..self.ai_input_cursor]
+                        .chars()
+                        .next_back()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    self.ai_input_cursor -= prev;
+                }
+            }
+            KeyCode::Right if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                if self.ai_input_cursor < self.ai_input_buffer.len() {
+                    let next = self.ai_input_buffer[self.ai_input_cursor..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    self.ai_input_cursor += next;
+                }
+            }
+            KeyCode::Home if key_event.kind == KeyEventKind::Press => self.ai_input_cursor = 0,
+            KeyCode::End if key_event.kind == KeyEventKind::Press => {
+                self.ai_input_cursor = self.ai_input_buffer.len()
+            }
+            KeyCode::Char(character)
+                if key_event.kind == KeyEventKind::Press
+                    && !key_event.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key_event.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.ai_input_buffer.insert(self.ai_input_cursor, character);
+                self.ai_input_cursor += character.len_utf8();
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1164,24 +1445,31 @@ mod tests {
     fn up_and_down_cycle_suggestions() {
         let mut app = App::new();
 
+        app.handle_key(press(KeyCode::Char('/')));
+
         let first = app.visible_commands(16)[0].name;
         let second = app.visible_commands(16)[1].name;
 
         assert_eq!(first, "login");
         assert_eq!(second, "status");
+        assert_eq!(app.prompt(), "/");
 
         app.handle_key(repeat(KeyCode::Down));
         assert_eq!(app.selected_suggestion(), 1);
+        assert_eq!(app.prompt(), "/status");
 
         app.handle_key(repeat(KeyCode::Up));
         assert_eq!(app.selected_suggestion(), 0);
+        assert_eq!(app.prompt(), "/login");
     }
 
     #[test]
-    fn enter_executes_selected_suggestion_when_prompt_is_empty() {
+    fn enter_executes_typed_command() {
         let mut app = App::new();
 
-        app.handle_key(repeat(KeyCode::Down));
+        for character in "/status".chars() {
+            app.handle_key(press(KeyCode::Char(character)));
+        }
         app.handle_key(press(KeyCode::Enter));
 
         assert_eq!(app.last_action(), "Refreshed status.");
@@ -1192,6 +1480,7 @@ mod tests {
     fn autocomplete_prepends_a_slash_command_prefix() {
         let mut app = App::new();
 
+        app.handle_key(press(KeyCode::Char('/')));
         app.handle_key(press(KeyCode::Tab));
 
         assert!(app.prompt().starts_with('/'));
@@ -1206,7 +1495,7 @@ mod tests {
         }
         app.handle_key(press(KeyCode::Enter));
 
-        assert!(app.is_editing_note());
+        assert!(app.is_full_editor());
 
         for character in "\nAdded from the editor".chars() {
             match character {
@@ -1222,7 +1511,7 @@ mod tests {
             state: KeyEventState::NONE,
         });
 
-        assert!(!app.is_editing_note());
+        assert!(!app.is_full_editor());
         assert!(app.notes[0].content.contains("Added from the editor"));
     }
 }
