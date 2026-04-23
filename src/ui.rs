@@ -3,12 +3,12 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 
 use crate::app::{App, PanelMode};
 
-const BG: Color = Color::Rgb(8, 8, 12);
-const ACCENT: Color = Color::Rgb(191, 138, 255);
-const ACCENT_SOFT: Color = Color::Rgb(135, 104, 191);
-const TEXT: Color = Color::Rgb(236, 236, 238);
-const MUTED: Color = Color::Rgb(136, 136, 144);
-const PANEL: Color = Color::Rgb(17, 17, 25);
+const BG: Color = Color::Rgb(25, 26, 34);
+const ACCENT: Color = Color::Rgb(156, 146, 201);
+const ACCENT_SOFT: Color = Color::Rgb(115, 106, 155);
+const TEXT: Color = Color::Rgb(198, 198, 210);
+const MUTED: Color = Color::Rgb(120, 122, 138);
+const PANEL: Color = Color::Rgb(35, 36, 48);
 const BORDER: Color = Color::Rgb(34, 65, 64);
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -37,34 +37,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .split(root[0]);
 
     let emblem = Paragraph::new(vec![
-        Line::from(vec![
-            Span::raw("     "),
-            Span::styled("   ◌◌◌◌◌   ", Style::default().fg(MUTED)),
-        ]),
-        Line::from(vec![
-            Span::raw("   "),
-            Span::styled("  ◌██████◌  ", Style::default().fg(ACCENT)),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(" ◌██◌  ◌██◌ ", Style::default().fg(ACCENT)),
-        ]),
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled("◌██◌    ◌██◌", Style::default().fg(ACCENT)),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(" ◌██◌  ◌██◌ ", Style::default().fg(ACCENT)),
-        ]),
-        Line::from(vec![
-            Span::raw("   "),
-            Span::styled("  ◌██████◌  ", Style::default().fg(ACCENT)),
-        ]),
-        Line::from(vec![
-            Span::raw("     "),
-            Span::styled("   ◌◌◌◌◌   ", Style::default().fg(MUTED)),
-        ]),
+        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⢀⢀⢀⡀", Style::default().fg(MUTED))]),
+        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⠀⠀⢀⠀⡴⠰⠞⠿⠛⠁⠓⠖⠲⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀", Style::default().fg(TEXT))]),
+        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⠀⢸⠆⢁⠶⠿⠇⠹⠁⠸⠷⠏⣈⡀⢰⠀⠈⠀⠀⠀⠀⠀⠀⠀", Style::default().fg(TEXT))]),
+        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⡁⠴⠛⢀⡀⠀⠀⢀⠀⠀⠀⠀⡀⠀⠀⠂⠄⠀⠀⠀⠀⠀⠀⠀", Style::default().fg(ACCENT))]),
+        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠠⠀⢠⣴⣿⠀⠄⠈⠉⠀⠀⢀⠀⢻⡗⠀⠀⠐⠡⣄⡀⠀⠀⠀⠀", Style::default().fg(ACCENT_SOFT))]),
+        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⣤⠒⢺⣿⣿⣆⠙⠄⢤⠠⠔⠘⢢⣞⠋⠀⢀⣰⣧⣬⡇⠀⠀⠀⠀", Style::default().fg(TEXT))]),
+        Line::from(vec![Span::styled("⠀⠀⠀⠀⠈⠪⡅⠲⢿⢽⣿⣿⣶⣶⣦⣶⣿⠇⠴⠋⠍⢉⣹⣿⠿⠀⠀⠀⠀⠀", Style::default().fg(TEXT))]),
+        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⠰⠆⠁⠀⢈⠉⠹⣹⠈⠁⠀⠆⢰⢆⢀⣾⣾⠉⠀⠀⠀⠀⠀⠀", Style::default().fg(MUTED))]),
+        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⠀⠀⠃⠷⠀⠄⣤⡀⠀⣠⠠⣤⠄⠼⠟⠉⠀⠀⠀⠀⠀⠀⠀⠀", Style::default().fg(MUTED))]),
+        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠁⠈⠀", Style::default().fg(MUTED))]),
     ])
     .alignment(Alignment::Left);
     frame.render_widget(emblem, logo[0]);
