@@ -154,6 +154,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         PanelMode::Commands => render_commands_panel(frame, app, root[4]),
         PanelMode::NoteEditor => render_note_editor_panel(frame, app, root[4]),
         PanelMode::FullEditor => {},
+        PanelMode::AiChat => render_chat_panel(frame, app, root[4]),
     }
 }
 
@@ -492,35 +493,39 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
     let has_status = !app.panel_lines().is_empty();
-    let inner = if has_status {
+
+    // If no status to show and prompt is empty, show minimalist ghost text
+    if !has_status && app.is_prompt_empty() {
         let block = Block::default()
             .title(Span::styled(
-                "Commands",
+                "Aleph",
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(BORDER));
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let parts = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Min(0)])
-            .split(inner);
 
-        let status_block = Paragraph::new(vec![
-            Line::from(vec![Span::styled(
-                app.panel_title(),
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(vec![Span::styled(
-                app.panel_lines().join(" "),
-                Style::default().fg(MUTED),
-            )]),
+        let ghost_text = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Type ", Style::default().fg(MUTED)),
+                Span::styled("/", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(" to see commands, or just ask a question", Style::default().fg(MUTED)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Recent: ", Style::default().fg(MUTED)),
+                Span::styled("/note list  /search  /ask", Style::default().fg(ACCENT_SOFT)),
+            ]),
         ])
-        .wrap(Wrap { trim: false });
-        frame.render_widget(status_block, parts[0]);
-        parts[1]
-    } else {
+        .style(Style::default().fg(MUTED));
+        frame.render_widget(ghost_text, inner);
+        return;
+    }
+
+    // If user is typing a command, show filtered commands
+    if app.is_typing_command() {
         let block = Block::default()
             .title(Span::styled(
                 "Commands",
@@ -530,49 +535,106 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(BORDER));
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        inner
+
+        let (suggestions, offset) = app.visible_commands_window(8);
+        let total = app.total_command_matches();
+        let remaining = total.saturating_sub(offset + suggestions.len());
+        let selected_global = app.selected_suggestion();
+
+        if suggestions.is_empty() {
+            let no_match = Paragraph::new(vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("  No commands match '", Style::default().fg(MUTED)),
+                    Span::styled(app.prompt(), Style::default().fg(TEXT)),
+                    Span::styled("'", Style::default().fg(MUTED)),
+                ]),
+            ]);
+            frame.render_widget(no_match, inner);
+        } else {
+            let rows = suggestions
+                .iter()
+                .enumerate()
+                .map(|(index, command)| {
+                    let global_index = offset + index;
+                    let selected = global_index == selected_global;
+                    let row_style = if selected {
+                        Style::default()
+                            .fg(TEXT)
+                            .bg(PANEL)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Rgb(122, 122, 128))
+                    };
+
+                    Row::new(vec![
+                        Cell::from(Span::styled(App::command_label(command), row_style)),
+                        Cell::from(Span::styled((*command).description, row_style)),
+                    ])
+                })
+                .chain((remaining > 0).then(|| {
+                    Row::new(vec![
+                        Cell::from(Span::styled(
+                            format!("+ {} more", remaining),
+                            Style::default().fg(MUTED),
+                        )),
+                        Cell::from(Span::styled("", Style::default())),
+                    ])
+                }))
+                .collect::<Vec<_>>();
+
+            let suggestions_table = Table::new(rows, [Constraint::Length(26), Constraint::Min(10)])
+                .column_spacing(3)
+                .style(Style::default().fg(Color::Rgb(122, 122, 128)));
+            frame.render_widget(suggestions_table, inner);
+        }
+    }
+
+    // Default: show status panel if there's content, otherwise empty
+    if has_status {
+        let block = Block::default()
+            .title(Span::styled(
+                app.panel_title(),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(BORDER));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let content: Vec<Line> = app
+            .panel_lines()
+            .iter()
+            .map(|line| render_markdown_line(line))
+            .collect();
+        let paragraph = Paragraph::new(content).wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, inner);
+        return;
+    } else {
+        // Empty state when typing non-command text
+        let block = Block::default()
+            .title(Span::styled(
+                "Aleph",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(BORDER));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let typing_hint = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Press ", Style::default().fg(MUTED)),
+                Span::styled("Enter", Style::default().fg(ACCENT)),
+                Span::styled(" to ask, or ", Style::default().fg(MUTED)),
+                Span::styled("/", Style::default().fg(ACCENT)),
+                Span::styled(" for commands", Style::default().fg(MUTED)),
+            ]),
+        ]);
+        frame.render_widget(typing_hint, inner);
+        return;
     };
-
-    let (suggestions, offset) = app.visible_commands_window(8);
-    let total = app.total_command_matches();
-    let remaining = total.saturating_sub(offset + suggestions.len());
-    let selected_global = app.selected_suggestion();
-
-    let rows = suggestions
-        .iter()
-        .enumerate()
-        .map(|(index, command)| {
-            let global_index = offset + index;
-            let selected = global_index == selected_global;
-            let row_style = if selected {
-                Style::default()
-                    .fg(TEXT)
-                    .bg(PANEL)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Rgb(122, 122, 128))
-            };
-
-            Row::new(vec![
-                Cell::from(Span::styled(App::command_label(command), row_style)),
-                Cell::from(Span::styled((*command).description, row_style)),
-            ])
-        })
-        .chain((remaining > 0).then(|| {
-            Row::new(vec![
-                Cell::from(Span::styled(
-                    format!("+ {} more", remaining),
-                    Style::default().fg(MUTED),
-                )),
-                Cell::from(Span::styled("", Style::default())),
-            ])
-        }))
-        .collect::<Vec<_>>();
-
-    let suggestions_table = Table::new(rows, [Constraint::Length(26), Constraint::Min(10)])
-        .column_spacing(3)
-        .style(Style::default().fg(Color::Rgb(122, 122, 128)));
-    frame.render_widget(suggestions_table, inner);
 }
 
 fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
@@ -727,4 +789,114 @@ fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
     .style(Style::default().fg(MUTED))
     .alignment(Alignment::Right);
     frame.render_widget(status, v_chunks[2]);
+}
+
+fn render_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            if app.is_thinking() {
+                format!("Chat {}", app.thinking_frame())
+            } else {
+                String::from("Chat")
+            },
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split area into messages (top) and input (bottom)
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .split(inner);
+
+    // Render messages
+    let messages_area = chunks[0];
+    let messages = app.chat_messages();
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for msg in messages.iter() {
+        let is_user = msg.role == "user";
+        let prefix = if is_user { "You" } else { "Aleph" };
+        let color = if is_user { ACCENT_SOFT } else { ACCENT };
+
+        // Add spacing between messages
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+
+        // Header with name and timestamp
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", prefix),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("({})", msg.timestamp),
+                Style::default().fg(MUTED),
+            ),
+        ]));
+
+        // Message content - wrap long lines
+        for content_line in msg.content.lines() {
+            if content_line.is_empty() {
+                lines.push(Line::from(""));
+            } else {
+                // Simple word wrap for display
+                let max_width = messages_area.width as usize - 4; // Account for borders and padding
+                let mut remaining = content_line;
+                while !remaining.is_empty() {
+                    let chunk_end = remaining.len().min(max_width);
+                    let chunk = &remaining[..chunk_end];
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", Style::default()),
+                        Span::styled(chunk, Style::default().fg(TEXT)),
+                    ]));
+                    remaining = &remaining[chunk_end..];
+                }
+            }
+        }
+    }
+
+    // Show hint if no messages yet
+    if messages.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                "Welcome to Aleph AI chat! Type a message below to start.",
+                Style::default().fg(MUTED),
+            ),
+        ]));
+    }
+
+    let messages_widget = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((0, 0)); // Could add scroll support here
+    frame.render_widget(messages_widget, messages_area);
+
+    // Render input area
+    let input_area = chunks[1];
+    let input_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(BORDER));
+    let input_inner = input_block.inner(input_area);
+    frame.render_widget(input_block, input_area);
+
+    // Input prompt with cursor
+    let input_buffer = app.chat_input_buffer();
+    let cursor = app.chat_input_cursor();
+    let before_cursor = &input_buffer[..cursor];
+    let after_cursor = &input_buffer[cursor..];
+
+    let input_line = Paragraph::new(Line::from(vec![
+        Span::styled("> ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(before_cursor, Style::default().fg(TEXT)),
+        Span::styled("█", Style::default().fg(MUTED)),
+        Span::styled(after_cursor, Style::default().fg(TEXT)),
+    ]));
+    frame.render_widget(input_line, input_inner);
 }

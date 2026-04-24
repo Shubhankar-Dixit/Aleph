@@ -10,11 +10,19 @@ pub struct CommandSpec {
 }
 
 #[derive(Clone)]
+pub struct Folder {
+    pub id: usize,
+    pub name: String,
+    pub parent_id: Option<usize>,
+}
+
+#[derive(Clone)]
 pub struct Note {
     pub id: usize,
     pub title: String,
     pub content: String,
     pub updated_at: String,
+    pub folder_id: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -22,6 +30,14 @@ pub enum PanelMode {
     Commands,
     NoteEditor,
     FullEditor,
+    AiChat,
+}
+
+#[derive(Clone)]
+pub struct ChatMessage {
+    pub role: String,  // "user" or "assistant"
+    pub content: String,
+    pub timestamp: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -95,6 +111,30 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Edit the selected note in the bottom pane",
     },
     CommandSpec {
+        name: "note move",
+        description: "Move a note to a folder",
+    },
+    CommandSpec {
+        name: "folder list",
+        description: "List all folders",
+    },
+    CommandSpec {
+        name: "folder create",
+        description: "Create a new folder",
+    },
+    CommandSpec {
+        name: "folder delete",
+        description: "Delete a folder",
+    },
+    CommandSpec {
+        name: "folder notes",
+        description: "List notes in a folder",
+    },
+    CommandSpec {
+        name: "folder tree",
+        description: "Show folder hierarchy",
+    },
+    CommandSpec {
         name: "memory list",
         description: "List local memories",
     },
@@ -145,9 +185,11 @@ pub struct App {
     last_action: String,
     connected: bool,
     notes: Vec<Note>,
+    folders: Vec<Folder>,
     memories: Vec<String>,
     canvases: Vec<String>,
     selected_note: usize,
+    current_folder_id: Option<usize>,
     panel_mode: PanelMode,
     panel_title: String,
     panel_lines: Vec<String>,
@@ -167,6 +209,9 @@ pub struct App {
     undo_stack: VecDeque<EditorState>,
     redo_stack: VecDeque<EditorState>,
     search_state: SearchState,
+    chat_messages: Vec<ChatMessage>,
+    chat_input_buffer: String,
+    chat_input_cursor: usize,
 }
 
 #[allow(dead_code)]
@@ -183,6 +228,23 @@ impl App {
             selected_suggestion: 0,
             last_action: String::from("Ready to accept input."),
             connected: false,
+            folders: vec![
+                Folder {
+                    id: 1,
+                    name: String::from("Projects"),
+                    parent_id: None,
+                },
+                Folder {
+                    id: 2,
+                    name: String::from("Ideas"),
+                    parent_id: None,
+                },
+                Folder {
+                    id: 3,
+                    name: String::from("Aleph"),
+                    parent_id: Some(1),
+                },
+            ],
             notes: vec![
                 Note {
                     id: 1,
@@ -191,6 +253,7 @@ impl App {
                         "Build a stable gateway that normalizes auth, streaming, and note operations.",
                     ),
                     updated_at: String::from("seed"),
+                    folder_id: Some(3),
                 },
                 Note {
                     id: 2,
@@ -199,6 +262,7 @@ impl App {
                         "Use a terminal editor for quick edits, then move larger writes into the Strix product.",
                     ),
                     updated_at: String::from("seed"),
+                    folder_id: Some(3),
                 },
                 Note {
                     id: 3,
@@ -207,6 +271,16 @@ impl App {
                         "Expose Aleph as an MCP bridge so external agents can use Strix knowledge.",
                     ),
                     updated_at: String::from("seed"),
+                    folder_id: None,
+                },
+                Note {
+                    id: 4,
+                    title: String::from("Feature ideas"),
+                    content: String::from(
+                        "Folder navigation, search within folders, nested folders like Strix.",
+                    ),
+                    updated_at: String::from("seed"),
+                    folder_id: Some(2),
                 },
             ],
             memories: vec![
@@ -220,6 +294,7 @@ impl App {
                 String::from("Agent lifecycle"),
             ],
             selected_note: 0,
+            current_folder_id: None,
             panel_mode: PanelMode::Commands,
             panel_title: String::from("Commands"),
             panel_lines: Vec::new(),
@@ -244,6 +319,9 @@ impl App {
                 current_match: None,
                 active: false,
             },
+            chat_messages: Vec::new(),
+            chat_input_buffer: String::new(),
+            chat_input_cursor: 0,
         }
     }
 
@@ -253,12 +331,59 @@ impl App {
             self.thinking_ticks_remaining -= 1;
             if self.thinking_ticks_remaining == 0 {
                 self.thinking = false;
-                self.panel_lines = vec![
-                    String::from("AI response ready."),
-                    String::from("In the future, this will connect to the agent runtime."),
-                ];
+                // Add mock AI response based on chat mode or regular mode
+                if self.panel_mode == PanelMode::AiChat {
+                    self.add_mock_ai_response();
+                } else {
+                    self.panel_lines = vec![
+                        String::from("AI response ready."),
+                        String::from("In the future, this will connect to the agent runtime."),
+                    ];
+                }
             }
         }
+    }
+
+    fn add_mock_ai_response(&mut self) {
+        let mock_responses = [
+            "I understand. Let me help you with that.",
+            "That's an interesting question. Here's what I think...",
+            "I can assist with that. What specific aspects would you like to explore?",
+            "Let me analyze this for you. Based on the context...",
+            "I see what you're getting at. Here's my perspective...",
+            "Good question. Let me break this down for you.",
+            "I have some thoughts on this. First, consider...",
+        ];
+
+        let response = if !self.chat_messages.is_empty() {
+            let last_user_msg = self.chat_messages.iter().rev().find(|m| m.role == "user");
+            if let Some(msg) = last_user_msg {
+                // Generate a contextual response based on keywords
+                let content_lower = msg.content.to_lowercase();
+                if content_lower.contains("hello") || content_lower.contains("hi") {
+                    String::from("Hello! I'm your AI assistant. How can I help you today?")
+                } else if content_lower.contains("help") {
+                    String::from("I can help you with notes, folders, searching, and general questions. Try commands like /note list, /folder tree, or just ask me anything!")
+                } else if content_lower.contains("note") {
+                    String::from("I see you're working with notes. You can create notes with /note create, edit them with /note edit, and organize them into folders with /folder create.")
+                } else if content_lower.contains("folder") {
+                    String::from("Folders help organize your notes hierarchically. Use /folder list to see all folders, /folder tree for the structure, and /folder notes to see what's inside.")
+                } else {
+                    let idx = (self.tick as usize) % mock_responses.len();
+                    format!("{}", mock_responses[idx])
+                }
+            } else {
+                String::from("I'm ready to help. What would you like to discuss?")
+            }
+        } else {
+            String::from("I'm ready to help. What would you like to discuss?")
+        };
+
+        self.chat_messages.push(ChatMessage {
+            role: String::from("assistant"),
+            content: response,
+            timestamp: self.uptime(),
+        });
     }
 
     pub fn request_quit(&mut self) {
@@ -285,6 +410,14 @@ impl App {
 
     pub fn prompt(&self) -> &str {
         &self.prompt
+    }
+
+    pub fn is_prompt_empty(&self) -> bool {
+        self.prompt.is_empty()
+    }
+
+    pub fn is_typing_command(&self) -> bool {
+        self.prompt.starts_with('/')
     }
 
     pub fn prompt_before_cursor(&self) -> &str {
@@ -325,6 +458,22 @@ impl App {
 
     pub fn panel_mode(&self) -> PanelMode {
         self.panel_mode
+    }
+
+    pub fn is_ai_chat(&self) -> bool {
+        self.panel_mode == PanelMode::AiChat
+    }
+
+    pub fn chat_messages(&self) -> &[ChatMessage] {
+        &self.chat_messages
+    }
+
+    pub fn chat_input_buffer(&self) -> &str {
+        &self.chat_input_buffer
+    }
+
+    pub fn chat_input_cursor(&self) -> usize {
+        self.chat_input_cursor
     }
 
     pub fn panel_title(&self) -> &str {
@@ -480,6 +629,10 @@ impl App {
         }
         if self.is_editing_note() {
             self.handle_editor_key(key_event);
+            return;
+        }
+        if self.is_ai_chat() {
+            self.handle_chat_key(key_event);
             return;
         }
 
@@ -640,6 +793,99 @@ impl App {
         }
     }
 
+    fn handle_chat_key(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Esc if key_event.kind == KeyEventKind::Press => {
+                // Exit chat mode and return to commands
+                self.panel_mode = PanelMode::Commands;
+                self.panel_title = String::from("Commands");
+                self.panel_lines.clear();
+                self.last_action = String::from("Exited AI chat.");
+            }
+            KeyCode::Char('c')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.request_quit();
+            }
+            KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
+                // Send chat message
+                let msg = self.chat_input_buffer.trim();
+                if !msg.is_empty() {
+                    self.chat_messages.push(ChatMessage {
+                        role: String::from("user"),
+                        content: msg.to_string(),
+                        timestamp: self.uptime(),
+                    });
+                    self.thinking = true;
+                    self.thinking_ticks_remaining = 20;
+                    self.chat_input_buffer.clear();
+                    self.chat_input_cursor = 0;
+                }
+            }
+            KeyCode::Backspace if key_event.kind == KeyEventKind::Press => {
+                if self.chat_input_cursor > 0 {
+                    let prev = self.chat_input_buffer[..self.chat_input_cursor]
+                        .chars()
+                        .next_back()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    self.chat_input_buffer
+                        .drain(self.chat_input_cursor - prev..self.chat_input_cursor);
+                    self.chat_input_cursor -= prev;
+                }
+            }
+            KeyCode::Delete if key_event.kind == KeyEventKind::Press => {
+                if self.chat_input_cursor < self.chat_input_buffer.len() {
+                    let next = self.chat_input_buffer[self.chat_input_cursor..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    self.chat_input_buffer
+                        .drain(self.chat_input_cursor..self.chat_input_cursor + next);
+                }
+            }
+            KeyCode::Left
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
+                if self.chat_input_cursor > 0 {
+                    let prev = self.chat_input_buffer[..self.chat_input_cursor]
+                        .chars()
+                        .next_back()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    self.chat_input_cursor -= prev;
+                }
+            }
+            KeyCode::Right
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
+                if self.chat_input_cursor < self.chat_input_buffer.len() {
+                    let next = self.chat_input_buffer[self.chat_input_cursor..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    self.chat_input_cursor += next;
+                }
+            }
+            KeyCode::Home if key_event.kind == KeyEventKind::Press => self.chat_input_cursor = 0,
+            KeyCode::End if key_event.kind == KeyEventKind::Press => {
+                self.chat_input_cursor = self.chat_input_buffer.len()
+            }
+            KeyCode::Char(character)
+                if key_event.kind == KeyEventKind::Press
+                    && !key_event.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key_event.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.chat_input_buffer.insert(self.chat_input_cursor, character);
+                self.chat_input_cursor += character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
     fn normalized_prompt(&self) -> String {
         Self::normalize_command_input(self.prompt.trim().trim_start_matches('/'))
     }
@@ -774,19 +1020,23 @@ impl App {
         }
 
         if !raw.starts_with('/') {
+            // Enter AI chat mode with the user's message
             let query = raw.to_string();
             self.history.push(query.clone());
             self.history_index = None;
+
+            // Add user message to chat
+            self.chat_messages.push(ChatMessage {
+                role: String::from("user"),
+                content: query.clone(),
+                timestamp: self.uptime(),
+            });
+
+            // Switch to chat mode and start thinking
+            self.panel_mode = PanelMode::AiChat;
             self.thinking = true;
-            self.thinking_ticks_remaining = 15;
-            self.set_result_panel(
-                "AI Query",
-                vec![
-                    format!("Query: {}", query),
-                    String::from("Processing your request..."),
-                ],
-            );
-            self.last_action = format!("AI Query: {}", query);
+            self.thinking_ticks_remaining = 20;
+            self.last_action = format!("AI Chat: {}", query);
             self.reset_prompt();
             return;
         }
@@ -940,22 +1190,38 @@ impl App {
                 self.last_action = String::from("Prepared an ask response.");
             }
             "note list" => {
+                let folder_id = self.current_folder_id;
+                let folder_name = folder_id
+                    .and_then(|id| self.get_folder_name(id))
+                    .unwrap_or_else(|| String::from("All notes"));
+
                 let lines = self
                     .notes
                     .iter()
                     .enumerate()
+                    .filter(|(_, note)| {
+                        // If we're in a folder, only show notes from that folder
+                        folder_id.is_none() || note.folder_id == folder_id
+                    })
                     .map(|(index, note)| {
+                        let folder_indicator = if let Some(fid) = note.folder_id {
+                            let fname = self.get_folder_name(fid).unwrap_or_default();
+                            format!("[{}] ", &fname[..fname.len().min(8)])
+                        } else {
+                            String::from("[—] ")
+                        };
                         format!(
-                            "{:>2}. #{} {:<18} {}",
+                            "{:>2}. #{} {:<14} {}{}",
                             index + 1,
                             note.id,
-                            note.title,
-                            Self::preview_text(&note.content, 42)
+                            if note.title.len() > 14 { format!("{}…", &note.title[..13]) } else { note.title.clone() },
+                            folder_indicator,
+                            Self::preview_text(&note.content, 32)
                         )
                     })
                     .collect::<Vec<_>>();
 
-                self.set_result_panel("Notes", lines);
+                self.set_result_panel(format!("Notes — {}", folder_name), lines);
                 self.last_action = String::from("Listed notes.");
             }
             "note read" => {
@@ -969,16 +1235,23 @@ impl App {
                 };
 
                 self.selected_note = index;
-                let (note_title, note_id, note_updated, note_content) = {
-                    let note = &self.notes[index];
-                    (
-                        note.title.clone(),
-                        note.id,
-                        note.updated_at.clone(),
-                        note.content.clone(),
-                    )
+                let note = &self.notes[index];
+                let note_title = note.title.clone();
+                let note_id = note.id;
+                let note_updated = note.updated_at.clone();
+                let note_content = note.content.clone();
+                let folder_info = if let Some(fid) = note.folder_id {
+                    format!("Folder: {}", self.get_folder_path(fid))
+                } else {
+                    String::from("Folder: Uncategorized")
                 };
-                let mut lines = vec![format!("ID: {}", note_id), format!("Updated: {}", note_updated), String::new()];
+
+                let mut lines = vec![
+                    format!("ID: {}", note_id),
+                    format!("Updated: {}", note_updated),
+                    folder_info,
+                    String::new(),
+                ];
                 lines.extend(note_content.lines().map(|line| line.to_string()));
                 self.set_result_panel(format!("Note: {}", note_title), lines);
                 self.last_action = format!("Opened note: {}", note_title);
@@ -989,12 +1262,13 @@ impl App {
                 } else {
                     args.trim().to_string()
                 };
-                let note_id = self.notes.len() + 1;
+                let note_id = self.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
                 self.notes.push(Note {
                     id: note_id,
                     title: title.clone(),
                     content: String::new(),
                     updated_at: String::from("draft"),
+                    folder_id: self.current_folder_id,
                 });
                 let index = self.notes.len() - 1;
                 self.open_note_editor(index);
@@ -1068,6 +1342,168 @@ impl App {
 
                 self.open_note_editor(index);
                 self.last_action = format!("Editing note: {}", self.notes[index].title);
+            }
+            "note move" => {
+                let args = args.trim();
+                let parts: Vec<&str> = args.splitn(2, " to ").collect();
+                if parts.len() != 2 {
+                    self.set_result_panel(
+                        "Move failed",
+                        vec![String::from("Usage: /note move <note> to <folder>")],
+                    );
+                    self.last_action = String::from("Invalid note move syntax.");
+                    return;
+                }
+
+                let note_ref = parts[0].trim();
+                let folder_ref = parts[1].trim();
+
+                let Some(note_index) = self.resolve_note_index(note_ref) else {
+                    self.set_result_panel(
+                        "Move failed",
+                        vec![format!("Note '{}' not found.", note_ref)],
+                    );
+                    self.last_action = String::from("Note not found for move.");
+                    return;
+                };
+
+                let Some(folder_id) = self.resolve_folder_id(folder_ref) else {
+                    self.set_result_panel(
+                        "Move failed",
+                        vec![format!("Folder '{}' not found.", folder_ref)],
+                    );
+                    self.last_action = String::from("Folder not found for move.");
+                    return;
+                };
+
+                let note_title = self.notes[note_index].title.clone();
+                let folder_name = self.get_folder_name(folder_id).unwrap_or_default();
+                self.notes[note_index].folder_id = Some(folder_id);
+                self.notes[note_index].updated_at = self.uptime();
+
+                self.set_result_panel(
+                    "Note moved",
+                    vec![format!("Moved '{}' to folder '{}'.", note_title, folder_name)],
+                );
+                self.last_action = format!("Moved note to folder: {}", folder_name);
+            }
+            "folder list" => {
+                let lines = self.list_folders();
+                self.set_result_panel("Folders", lines);
+                self.last_action = String::from("Listed folders.");
+            }
+            "folder create" => {
+                let name = args.trim();
+                if name.is_empty() {
+                    self.set_result_panel(
+                        "Create failed",
+                        vec![String::from("Provide a folder name after /folder create.")],
+                    );
+                    self.last_action = String::from("Folder name was empty.");
+                    return;
+                }
+
+                let new_id = self.folders.iter().map(|f| f.id).max().unwrap_or(0) + 1;
+                self.folders.push(Folder {
+                    id: new_id,
+                    name: name.to_string(),
+                    parent_id: self.current_folder_id,
+                });
+                self.set_result_panel(
+                    "Folder created",
+                    vec![format!("Created folder '{}' with ID #{}.", name, new_id)],
+                );
+                self.last_action = format!("Created folder: {}", name);
+            }
+            "folder delete" => {
+                let folder_ref = args.trim();
+                if folder_ref.is_empty() {
+                    self.set_result_panel(
+                        "Delete failed",
+                        vec![String::from("Provide a folder ID or name after /folder delete.")],
+                    );
+                    self.last_action = String::from("Folder reference was empty.");
+                    return;
+                }
+
+                let Some(folder_id) = self.resolve_folder_id(folder_ref) else {
+                    self.set_result_panel(
+                        "Delete failed",
+                        vec![format!("Folder '{}' not found.", folder_ref)],
+                    );
+                    self.last_action = String::from("Folder not found for deletion.");
+                    return;
+                };
+
+                let folder_name = self.get_folder_name(folder_id).unwrap_or_default();
+
+                // Move notes to parent or make them uncategorized
+                for note in &mut self.notes {
+                    if note.folder_id == Some(folder_id) {
+                        note.folder_id = None;
+                    }
+                }
+
+                // Remove subfolders by making them root folders
+                for folder in &mut self.folders {
+                    if folder.parent_id == Some(folder_id) {
+                        folder.parent_id = None;
+                    }
+                }
+
+                self.folders.retain(|f| f.id != folder_id);
+                if self.current_folder_id == Some(folder_id) {
+                    self.current_folder_id = None;
+                }
+
+                self.set_result_panel(
+                    "Folder deleted",
+                    vec![format!("Deleted folder '{}'.", folder_name)],
+                );
+                self.last_action = format!("Deleted folder: {}", folder_name);
+            }
+            "folder notes" => {
+                let folder_ref = args.trim();
+                let folder_id = if folder_ref.is_empty() {
+                    self.current_folder_id
+                } else {
+                    self.resolve_folder_id(folder_ref)
+                };
+
+                let folder_name = folder_id
+                    .and_then(|id| self.get_folder_name(id))
+                    .unwrap_or_else(|| String::from("Uncategorized"));
+
+                let lines: Vec<String> = self
+                    .notes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, note)| note.folder_id == folder_id)
+                    .map(|(index, note)| {
+                        format!(
+                            "{:>2}. #{} {:<18} {}",
+                            index + 1,
+                            note.id,
+                            note.title,
+                            Self::preview_text(&note.content, 42)
+                        )
+                    })
+                    .collect();
+
+                if lines.is_empty() {
+                    self.set_result_panel(
+                        format!("Notes in: {}", folder_name),
+                        vec![String::from("No notes in this folder.")],
+                    );
+                } else {
+                    self.set_result_panel(format!("Notes in: {}", folder_name), lines);
+                }
+                self.last_action = format!("Listed notes in folder: {}", folder_name);
+            }
+            "folder tree" => {
+                let lines = self.build_folder_tree();
+                self.set_result_panel("Folder tree", lines);
+                self.last_action = String::from("Displayed folder tree.");
             }
             "memory list" => {
                 let lines = self
@@ -1236,7 +1672,18 @@ impl App {
             return vec![String::from("No note available.")];
         };
 
-        let mut lines = vec![format!("ID: {}", note.id), format!("Updated: {}", note.updated_at), String::new()];
+        let folder_info = if let Some(fid) = note.folder_id {
+            format!("Folder: {}", self.get_folder_path(fid))
+        } else {
+            String::from("Folder: Uncategorized")
+        };
+
+        let mut lines = vec![
+            format!("ID: {}", note.id),
+            format!("Updated: {}", note.updated_at),
+            folder_info,
+            String::new(),
+        ];
         lines.extend(note.content.lines().map(|line| line.to_string()));
         lines
     }
@@ -1301,6 +1748,151 @@ impl App {
         }
 
         preview.chars().take(limit.saturating_sub(1)).collect::<String>() + "…"
+    }
+
+    fn resolve_folder_id(&self, target: &str) -> Option<usize> {
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            return self.current_folder_id;
+        }
+
+        // Try to parse as ID first (supports #1 or just 1)
+        let normalized = trimmed.trim_start_matches('#');
+        if let Ok(id) = normalized.parse::<usize>() {
+            if self.folders.iter().any(|f| f.id == id) {
+                return Some(id);
+            }
+        }
+
+        // Search by name (case-insensitive)
+        let lower = trimmed.to_lowercase();
+        self.folders.iter().find_map(|folder| {
+            if folder.name.eq_ignore_ascii_case(trimmed)
+                || folder.name.to_lowercase().contains(&lower)
+            {
+                Some(folder.id)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn get_folder_name(&self, folder_id: usize) -> Option<String> {
+        self.folders
+            .iter()
+            .find(|f| f.id == folder_id)
+            .map(|f| f.name.clone())
+    }
+
+    fn get_folder_path(&self, folder_id: usize) -> String {
+        let mut path = Vec::new();
+        let mut current_id = Some(folder_id);
+
+        while let Some(id) = current_id {
+            if let Some(folder) = self.folders.iter().find(|f| f.id == id) {
+                path.push(folder.name.clone());
+                current_id = folder.parent_id;
+            } else {
+                break;
+            }
+        }
+
+        path.reverse();
+        if path.is_empty() {
+            String::from("/")
+        } else {
+            format!("/{}", path.join("/"))
+        }
+    }
+
+    fn list_folders(&self) -> Vec<String> {
+        if self.folders.is_empty() {
+            return vec![String::from("No folders created yet. Use /folder create <name>")];
+        }
+
+        self.folders
+            .iter()
+            .map(|folder| {
+                let prefix = if folder.parent_id.is_some() {
+                    "  "
+                } else {
+                    ""
+                };
+                let note_count = self
+                    .notes
+                    .iter()
+                    .filter(|n| n.folder_id == Some(folder.id))
+                    .count();
+                format!(
+                    "{}{}. #{} {:<18} ({} notes) {}",
+                    prefix,
+                    folder.id,
+                    folder.id,
+                    folder.name,
+                    note_count,
+                    if let Some(parent_id) = folder.parent_id {
+                        format!("[in #{}]", parent_id)
+                    } else {
+                        String::new()
+                    }
+                )
+            })
+            .collect()
+    }
+
+    fn build_folder_tree(&self) -> Vec<String> {
+        if self.folders.is_empty() {
+            return vec![String::from("No folders created yet.")];
+        }
+
+        let mut lines = Vec::new();
+        let root_folders: Vec<&Folder> = self
+            .folders
+            .iter()
+            .filter(|f| f.parent_id.is_none())
+            .collect();
+
+        for (i, folder) in root_folders.iter().enumerate() {
+            self.render_folder_node(folder, "", i == root_folders.len() - 1, &mut lines);
+        }
+
+        let uncategorized_count = self.notes.iter().filter(|n| n.folder_id.is_none()).count();
+        if uncategorized_count > 0 {
+            lines.push(format!("└── Uncategorized ({} notes)", uncategorized_count));
+        }
+
+        lines
+    }
+
+    fn render_folder_node(
+        &self,
+        folder: &Folder,
+        prefix: &str,
+        is_last: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let note_count = self
+            .notes
+            .iter()
+            .filter(|n| n.folder_id == Some(folder.id))
+            .count();
+
+        let connector = if is_last { "└── " } else { "├── " };
+        lines.push(format!(
+            "{}{}#{} {} ({} notes)",
+            prefix, connector, folder.id, folder.name, note_count
+        ));
+
+        let child_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+        let children: Vec<&Folder> = self
+            .folders
+            .iter()
+            .filter(|f| f.parent_id == Some(folder.id))
+            .collect();
+
+        for (i, child) in children.iter().enumerate() {
+            self.render_folder_node(child, &child_prefix, i == children.len() - 1, lines);
+        }
     }
 
     fn save_undo_state(&mut self) {
