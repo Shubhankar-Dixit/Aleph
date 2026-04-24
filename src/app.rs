@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -21,6 +22,27 @@ pub enum PanelMode {
     Commands,
     NoteEditor,
     FullEditor,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CursorStyle {
+    Block,
+    Line,
+}
+
+#[derive(Clone)]
+pub struct EditorState {
+    pub buffer: String,
+    pub cursor: usize,
+    pub scroll_offset: usize,
+}
+
+#[derive(Clone)]
+pub struct SearchState {
+    pub query: String,
+    pub matches: Vec<usize>,
+    pub current_match: Option<usize>,
+    pub active: bool,
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
@@ -139,6 +161,12 @@ pub struct App {
     ai_input_buffer: String,
     ai_input_cursor: usize,
     suggestion_filter: Option<String>,
+    editor_scroll_offset: usize,
+    editor_word_wrap: bool,
+    editor_cursor_style: CursorStyle,
+    undo_stack: VecDeque<EditorState>,
+    redo_stack: VecDeque<EditorState>,
+    search_state: SearchState,
 }
 
 #[allow(dead_code)]
@@ -205,6 +233,17 @@ impl App {
             ai_input_buffer: String::new(),
             ai_input_cursor: 0,
             suggestion_filter: None,
+            editor_scroll_offset: 0,
+            editor_word_wrap: true,
+            editor_cursor_style: CursorStyle::Block,
+            undo_stack: VecDeque::with_capacity(100),
+            redo_stack: VecDeque::with_capacity(100),
+            search_state: SearchState {
+                query: String::new(),
+                matches: Vec::new(),
+                current_match: None,
+                active: false,
+            },
         }
     }
 
@@ -302,6 +341,22 @@ impl App {
 
     pub fn editor_cursor(&self) -> usize {
         self.editor_cursor
+    }
+
+    pub fn editor_scroll_offset(&self) -> usize {
+        self.editor_scroll_offset
+    }
+
+    pub fn editor_word_wrap(&self) -> bool {
+        self.editor_word_wrap
+    }
+
+    pub fn editor_cursor_style(&self) -> CursorStyle {
+        self.editor_cursor_style
+    }
+
+    pub fn search_state(&self) -> &SearchState {
+        &self.search_state
     }
 
     pub fn editor_note_title(&self) -> Option<&str> {
@@ -472,6 +527,10 @@ impl App {
     }
 
     fn handle_editor_key(&mut self, key_event: KeyEvent) {
+        if self.search_state.active {
+            self.handle_search_key(key_event);
+            return;
+        }
         match key_event.code {
             KeyCode::Char('c')
                 if key_event.kind == KeyEventKind::Press
@@ -487,6 +546,7 @@ impl App {
             }
             KeyCode::Esc if key_event.kind == KeyEventKind::Press => self.save_editor(),
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
+                self.save_undo_state();
                 self.insert_editor_character('\n');
             }
             KeyCode::Tab if key_event.kind == KeyEventKind::Press => {
@@ -502,9 +562,72 @@ impl App {
             {
                 self.editor_move_right()
             }
+            KeyCode::Up
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                    && !key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.editor_move_up()
+            }
+            KeyCode::Down
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                    && !key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.editor_move_down()
+            }
+            KeyCode::Up
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.scroll_up(1)
+            }
+            KeyCode::Down
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.scroll_down(1)
+            }
+            KeyCode::PageUp if key_event.kind == KeyEventKind::Press => self.scroll_up(10),
+            KeyCode::PageDown if key_event.kind == KeyEventKind::Press => self.scroll_down(10),
             KeyCode::Home if key_event.kind == KeyEventKind::Press => self.editor_cursor = 0,
             KeyCode::End if key_event.kind == KeyEventKind::Press => {
                 self.editor_cursor = self.editor_buffer.len()
+            }
+            KeyCode::Char('z')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.undo();
+            }
+            KeyCode::Char('y')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.redo();
+            }
+            KeyCode::Char('f')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.start_search();
+            }
+            KeyCode::F(3) if key_event.kind == KeyEventKind::Press => {
+                if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.search_prev();
+                } else {
+                    self.search_next();
+                }
+            }
+            KeyCode::Char('w')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.toggle_word_wrap();
+            }
+            KeyCode::Char('b')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.toggle_cursor_style();
             }
             KeyCode::Char(character)
                 if key_event.kind == KeyEventKind::Press
@@ -1180,7 +1303,52 @@ impl App {
         preview.chars().take(limit.saturating_sub(1)).collect::<String>() + "…"
     }
 
+    fn save_undo_state(&mut self) {
+        if self.undo_stack.len() >= 100 {
+            self.undo_stack.pop_back();
+        }
+        self.undo_stack.push_front(EditorState {
+            buffer: self.editor_buffer.clone(),
+            cursor: self.editor_cursor,
+            scroll_offset: self.editor_scroll_offset,
+        });
+        self.redo_stack.clear();
+    }
+
+    fn undo(&mut self) {
+        if let Some(state) = self.undo_stack.pop_front() {
+            if self.redo_stack.len() >= 100 {
+                self.redo_stack.pop_back();
+            }
+            self.redo_stack.push_front(EditorState {
+                buffer: self.editor_buffer.clone(),
+                cursor: self.editor_cursor,
+                scroll_offset: self.editor_scroll_offset,
+            });
+            self.editor_buffer = state.buffer;
+            self.editor_cursor = state.cursor;
+            self.editor_scroll_offset = state.scroll_offset;
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(state) = self.redo_stack.pop_front() {
+            if self.undo_stack.len() >= 100 {
+                self.undo_stack.pop_back();
+            }
+            self.undo_stack.push_front(EditorState {
+                buffer: self.editor_buffer.clone(),
+                cursor: self.editor_cursor,
+                scroll_offset: self.editor_scroll_offset,
+            });
+            self.editor_buffer = state.buffer;
+            self.editor_cursor = state.cursor;
+            self.editor_scroll_offset = state.scroll_offset;
+        }
+    }
+
     fn insert_editor_text(&mut self, text: &str) {
+        self.save_undo_state();
         for character in text.chars() {
             self.insert_editor_character(character);
         }
@@ -1195,7 +1363,7 @@ impl App {
         if self.editor_cursor == 0 {
             return;
         }
-
+        self.save_undo_state();
         let previous = self.editor_buffer[..self.editor_cursor]
             .chars()
             .next_back()
@@ -1209,13 +1377,120 @@ impl App {
         if self.editor_cursor >= self.editor_buffer.len() {
             return;
         }
-
+        self.save_undo_state();
         let next = self.editor_buffer[self.editor_cursor..]
             .chars()
             .next()
             .map(|character| character.len_utf8())
             .unwrap_or(1);
         self.editor_buffer.drain(self.editor_cursor..self.editor_cursor + next);
+    }
+
+    fn toggle_word_wrap(&mut self) {
+        self.editor_word_wrap = !self.editor_word_wrap;
+    }
+
+    fn toggle_cursor_style(&mut self) {
+        self.editor_cursor_style = match self.editor_cursor_style {
+            CursorStyle::Block => CursorStyle::Line,
+            CursorStyle::Line => CursorStyle::Block,
+        };
+    }
+
+    fn scroll_up(&mut self, lines: usize) {
+        self.editor_scroll_offset = self.editor_scroll_offset.saturating_sub(lines);
+    }
+
+    fn scroll_down(&mut self, lines: usize) {
+        self.editor_scroll_offset = self.editor_scroll_offset.saturating_add(lines);
+    }
+
+    fn start_search(&mut self) {
+        self.search_state.active = true;
+        self.search_state.query.clear();
+        self.search_state.matches.clear();
+        self.search_state.current_match = None;
+    }
+
+    fn cancel_search(&mut self) {
+        self.search_state.active = false;
+        self.search_state.query.clear();
+        self.search_state.matches.clear();
+        self.search_state.current_match = None;
+    }
+
+    fn search_next(&mut self) {
+        if self.search_state.matches.is_empty() {
+            return;
+        }
+        let current = self.search_state.current_match.unwrap_or(0);
+        let next = if current + 1 >= self.search_state.matches.len() {
+            0
+        } else {
+            current + 1
+        };
+        self.search_state.current_match = Some(next);
+        if let Some(&pos) = self.search_state.matches.get(next) {
+            self.editor_cursor = pos;
+        }
+    }
+
+    fn search_prev(&mut self) {
+        if self.search_state.matches.is_empty() {
+            return;
+        }
+        let current = self.search_state.current_match.unwrap_or(0);
+        let prev = if current == 0 {
+            self.search_state.matches.len() - 1
+        } else {
+            current - 1
+        };
+        self.search_state.current_match = Some(prev);
+        if let Some(&pos) = self.search_state.matches.get(prev) {
+            self.editor_cursor = pos;
+        }
+    }
+
+    fn update_search(&mut self) {
+        self.search_state.matches.clear();
+        if self.search_state.query.is_empty() {
+            self.search_state.current_match = None;
+            return;
+        }
+        let query = self.search_state.query.to_lowercase();
+        let buffer_lower = self.editor_buffer.to_lowercase();
+        let mut start = 0;
+        while let Some(pos) = buffer_lower[start..].find(&query) {
+            let absolute_pos = start + pos;
+            self.search_state.matches.push(absolute_pos);
+            start = absolute_pos + 1;
+        }
+        if !self.search_state.matches.is_empty() {
+            self.search_state.current_match = Some(0);
+            self.editor_cursor = self.search_state.matches[0];
+        } else {
+            self.search_state.current_match = None;
+        }
+    }
+
+    fn handle_search_key(&mut self, key_event: KeyEvent) {
+        if key_event.kind != KeyEventKind::Press {
+            return;
+        }
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                self.cancel_search();
+            }
+            KeyCode::Backspace => {
+                self.search_state.query.pop();
+                self.update_search();
+            }
+            KeyCode::Char(c) => {
+                self.search_state.query.push(c);
+                self.update_search();
+            }
+            _ => {}
+        }
     }
 
     fn editor_move_left(&mut self) {
@@ -1244,6 +1519,68 @@ impl App {
         self.editor_cursor += next;
     }
 
+    fn editor_move_up(&mut self) {
+        // Find the start of the current line
+        let current_pos = self.editor_cursor;
+        let line_start = self.editor_buffer[..current_pos]
+            .rfind('\n')
+            .map(|pos| pos + 1)
+            .unwrap_or(0);
+
+        // If we're on the first line, can't move up
+        if line_start == 0 {
+            return;
+        }
+
+        // Calculate column position within current line
+        let column = current_pos - line_start;
+
+        // Find the start of the previous line
+        let prev_line_end = line_start - 1;
+        let prev_line_start = self.editor_buffer[..prev_line_end]
+            .rfind('\n')
+            .map(|pos| pos + 1)
+            .unwrap_or(0);
+
+        // Move cursor to the same column in the previous line (or end of line if shorter)
+        let prev_line_len = prev_line_end - prev_line_start;
+        let new_column = column.min(prev_line_len);
+        self.editor_cursor = prev_line_start + new_column;
+    }
+
+    fn editor_move_down(&mut self) {
+        // Find the end of the current line
+        let current_pos = self.editor_cursor;
+        let line_end = self.editor_buffer[current_pos..]
+            .find('\n')
+            .map(|pos| current_pos + pos)
+            .unwrap_or(self.editor_buffer.len());
+
+        // If we're on the last line, can't move down
+        if line_end >= self.editor_buffer.len() {
+            return;
+        }
+
+        // Calculate column position within current line
+        let line_start = self.editor_buffer[..current_pos]
+            .rfind('\n')
+            .map(|pos| pos + 1)
+            .unwrap_or(0);
+        let column = current_pos - line_start;
+
+        // Find the end of the next line
+        let next_line_start = line_end + 1;
+        let next_line_end = self.editor_buffer[next_line_start..]
+            .find('\n')
+            .map(|pos| next_line_start + pos)
+            .unwrap_or(self.editor_buffer.len());
+
+        // Move cursor to the same column in the next line (or end of line if shorter)
+        let next_line_len = next_line_end - next_line_start;
+        let new_column = column.min(next_line_len);
+        self.editor_cursor = next_line_start + new_column;
+    }
+
     fn sync_selection(&mut self) {
         let suggestions = self.visible_commands(16);
         if suggestions.is_empty() {
@@ -1255,6 +1592,10 @@ impl App {
     }
 
     fn handle_full_editor_key(&mut self, key_event: KeyEvent) {
+        if self.search_state.active && !self.ai_panel_focused {
+            self.handle_search_key(key_event);
+            return;
+        }
         match key_event.code {
             KeyCode::Char('c')
                 if key_event.kind == KeyEventKind::Press
@@ -1281,6 +1622,19 @@ impl App {
                     self.ai_panel_focused = true;
                 }
             }
+            KeyCode::Char('f')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.start_search();
+            }
+            KeyCode::F(3) if key_event.kind == KeyEventKind::Press => {
+                if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.search_prev();
+                } else {
+                    self.search_next();
+                }
+            }
             KeyCode::Tab if key_event.kind == KeyEventKind::Press && self.ai_sidepanel_visible => {
                 self.ai_panel_focused = !self.ai_panel_focused;
             }
@@ -1297,6 +1651,7 @@ impl App {
     fn handle_editor_content_key(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
+                self.save_undo_state();
                 self.insert_editor_character('\n');
             }
             KeyCode::Tab if key_event.kind == KeyEventKind::Press => {
@@ -1312,9 +1667,59 @@ impl App {
             {
                 self.editor_move_right()
             }
+            KeyCode::Up
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                    && !key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.editor_move_up()
+            }
+            KeyCode::Down
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                    && !key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.editor_move_down()
+            }
+            KeyCode::Up
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.scroll_up(1)
+            }
+            KeyCode::Down
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.scroll_down(1)
+            }
+            KeyCode::PageUp if key_event.kind == KeyEventKind::Press => self.scroll_up(10),
+            KeyCode::PageDown if key_event.kind == KeyEventKind::Press => self.scroll_down(10),
             KeyCode::Home if key_event.kind == KeyEventKind::Press => self.editor_cursor = 0,
             KeyCode::End if key_event.kind == KeyEventKind::Press => {
                 self.editor_cursor = self.editor_buffer.len()
+            }
+            KeyCode::Char('z')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.undo();
+            }
+            KeyCode::Char('y')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.redo();
+            }
+            KeyCode::Char('w')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.toggle_word_wrap();
+            }
+            KeyCode::Char('b')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.toggle_cursor_style();
             }
             KeyCode::Char(character)
                 if key_event.kind == KeyEventKind::Press

@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Wrap};
 
 use crate::app::{App, PanelMode};
 
@@ -157,6 +157,136 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
+fn parse_markdown_spans(text: &str) -> Vec<Span<'_>> {
+    let mut spans = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if let Some(pos) = remaining.find("**") {
+            if pos > 0 {
+                spans.push(Span::raw(&remaining[..pos]));
+            }
+            remaining = &remaining[pos + 2..];
+            if let Some(end_pos) = remaining.find("**") {
+                spans.push(Span::styled(&remaining[..end_pos], Style::default().add_modifier(Modifier::BOLD)));
+                remaining = &remaining[end_pos + 2..];
+            } else {
+                spans.push(Span::raw("**"));
+                spans.push(Span::raw(remaining));
+                break;
+            }
+        } else if let Some(pos) = remaining.find('*') {
+            if pos > 0 {
+                spans.push(Span::raw(&remaining[..pos]));
+            }
+            remaining = &remaining[pos + 1..];
+            if let Some(end_pos) = remaining.find('*') {
+                spans.push(Span::styled(&remaining[..end_pos], Style::default().add_modifier(Modifier::ITALIC)));
+                remaining = &remaining[end_pos + 1..];
+            } else {
+                spans.push(Span::raw("*"));
+                spans.push(Span::raw(remaining));
+                break;
+            }
+        } else if let Some(pos) = remaining.find('`') {
+            if pos > 0 {
+                spans.push(Span::raw(&remaining[..pos]));
+            }
+            remaining = &remaining[pos + 1..];
+            if let Some(end_pos) = remaining.find('`') {
+                spans.push(Span::styled(&remaining[..end_pos], Style::default().fg(ACCENT_SOFT)));
+                remaining = &remaining[end_pos + 1..];
+            } else {
+                spans.push(Span::raw("`"));
+                spans.push(Span::raw(remaining));
+                break;
+            }
+        } else {
+            spans.push(Span::raw(remaining));
+            break;
+        }
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::raw(text));
+    }
+
+    spans
+}
+
+fn render_markdown_line(line: &str) -> Line<'_> {
+    let mut spans = Vec::new();
+    let mut remaining = line;
+
+    // Handle headers - H1 is underlined+bold, H2 is bold, H3 is italic+bold
+    if line.starts_with("# ") {
+        spans.push(Span::styled("# ", Style::default().fg(ACCENT_SOFT)));
+        spans.push(Span::styled(&line[2..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)));
+        return Line::from(spans);
+    } else if line.starts_with("## ") {
+        spans.push(Span::styled("## ", Style::default().fg(MUTED)));
+        spans.push(Span::styled(&line[3..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD)));
+        return Line::from(spans);
+    } else if line.starts_with("### ") {
+        spans.push(Span::styled("### ", Style::default().fg(MUTED)));
+        spans.push(Span::styled(&line[4..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD | Modifier::ITALIC)));
+        return Line::from(spans);
+    }
+
+    // Handle inline formatting
+    while !remaining.is_empty() {
+        if let Some(pos) = remaining.find("**") {
+            if pos > 0 {
+                spans.push(Span::raw(&remaining[..pos]));
+            }
+            remaining = &remaining[pos + 2..];
+            if let Some(end_pos) = remaining.find("**") {
+                spans.push(Span::styled(&remaining[..end_pos], Style::default().add_modifier(Modifier::BOLD)));
+                remaining = &remaining[end_pos + 2..];
+            } else {
+                spans.push(Span::raw("**"));
+                spans.push(Span::raw(remaining));
+                break;
+            }
+        } else if let Some(pos) = remaining.find('*') {
+            if pos > 0 {
+                spans.push(Span::raw(&remaining[..pos]));
+            }
+            remaining = &remaining[pos + 1..];
+            if let Some(end_pos) = remaining.find('*') {
+                spans.push(Span::styled(&remaining[..end_pos], Style::default().add_modifier(Modifier::ITALIC)));
+                remaining = &remaining[end_pos + 1..];
+            } else {
+                spans.push(Span::raw("*"));
+                spans.push(Span::raw(remaining));
+                break;
+            }
+        } else if let Some(pos) = remaining.find('`') {
+            if pos > 0 {
+                spans.push(Span::raw(&remaining[..pos]));
+            }
+            remaining = &remaining[pos + 1..];
+            if let Some(end_pos) = remaining.find('`') {
+                spans.push(Span::styled(&remaining[..end_pos], Style::default().fg(ACCENT_SOFT)));
+                remaining = &remaining[end_pos + 1..];
+            } else {
+                spans.push(Span::raw("`"));
+                spans.push(Span::raw(remaining));
+                break;
+            }
+        } else {
+            spans.push(Span::raw(remaining));
+            break;
+        }
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::raw(line));
+    }
+
+    Line::from(spans)
+}
+
 fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let main_chunks = if app.ai_sidepanel_visible() {
         Layout::default()
@@ -175,44 +305,136 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let editor_area = main_chunks[0];
 
     let title = app.editor_note_title().unwrap_or("Untitled");
+
+    let mut title_spans = vec![
+        Span::styled(format!("Editing: {}", title), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+    ];
+
+    if app.search_state().active {
+        title_spans.push(Span::raw("  "));
+        title_spans.push(Span::styled(
+            format!("Find: {}", app.search_state().query),
+            Style::default().fg(ACCENT_SOFT).add_modifier(Modifier::BOLD),
+        ));
+        if let Some(current) = app.search_state().current_match {
+            let total = app.search_state().matches.len();
+            title_spans.push(Span::styled(
+                format!(" ({}/{})", current + 1, total),
+                Style::default().fg(MUTED),
+            ));
+        }
+    }
+
     let block = Block::default()
-        .title(Span::styled(
-            format!("Editing: {}", title),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
+        .title(Line::from(title_spans))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(BORDER));
     let inner = block.inner(editor_area);
     frame.render_widget(block, editor_area);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(inner);
 
-    let mut editor_text = String::with_capacity(app.editor_buffer().len() + 1);
-    let cursor = app.editor_cursor().min(app.editor_buffer().len());
-    editor_text.push_str(&app.editor_buffer()[..cursor]);
-    editor_text.push('█');
-    editor_text.push_str(&app.editor_buffer()[cursor..]);
+    let v_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(h_chunks[0]);
 
-    frame.render_widget(
-        Paragraph::new(editor_text)
-            .style(Style::default().fg(TEXT))
-            .wrap(Wrap { trim: false }),
-        chunks[0],
-    );
+    let editor_content_area = v_chunks[0];
+
+    let cursor = app.editor_cursor().min(app.editor_buffer().len());
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut char_pos = 0;
+
+    for line_text in app.editor_buffer().lines() {
+        let line_len = line_text.len();
+        let line_start = char_pos;
+        let line_end = char_pos + line_len;
+
+        // Add visual spacing before H1 headers (except at start of document)
+        if line_text.starts_with("# ") && line_start > 0 {
+            lines.push(Line::from(""));
+        }
+
+        if cursor >= line_start && cursor <= line_end {
+            let cursor_in_line = cursor - line_start;
+            let before_cursor = &line_text[..cursor_in_line];
+            let after_cursor = &line_text[cursor_in_line..];
+
+            let mut spans = parse_markdown_spans(before_cursor);
+            spans.push(Span::styled("█", Style::default().fg(TEXT)));
+            spans.extend(parse_markdown_spans(after_cursor));
+
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(render_markdown_line(line_text));
+        }
+
+        // Add visual spacing after H1 headers
+        if line_text.starts_with("# ") {
+            lines.push(Line::from(""));
+        }
+
+        char_pos += line_len + 1;
+    }
+
+    // Calculate which line the cursor is on (for auto-scrolling)
+    let cursor_line = app.editor_buffer()[..cursor.min(app.editor_buffer().len())]
+        .chars()
+        .filter(|&c| c == '\n')
+        .count();
+
+    let total_lines = app.editor_buffer().lines().count().max(1);
+    let visible_lines = editor_content_area.height as usize;
+
+    // Auto-scroll: ensure cursor is within visible viewport
+    let mut effective_scroll_offset = app.editor_scroll_offset();
+    if cursor_line < effective_scroll_offset {
+        // Cursor above viewport - scroll up to show it
+        effective_scroll_offset = cursor_line;
+    } else if cursor_line >= effective_scroll_offset + visible_lines {
+        // Cursor below viewport - scroll down to show it
+        effective_scroll_offset = cursor_line.saturating_sub(visible_lines - 1);
+    }
+    // Clamp to valid range
+    effective_scroll_offset = effective_scroll_offset.min(total_lines.saturating_sub(visible_lines));
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((effective_scroll_offset as u16, 0));
+    frame.render_widget(paragraph, editor_content_area);
+
+    let scrollbar_needed = total_lines > visible_lines;
+
+    if scrollbar_needed {
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+        let mut scroll_state = ScrollbarState::new(total_lines.saturating_sub(visible_lines))
+            .position(effective_scroll_offset);
+        frame.render_stateful_widget(scrollbar, h_chunks[1], &mut scroll_state);
+    }
 
     let status = Paragraph::new(Line::from(vec![
         Span::styled("Ctrl+S", Style::default().fg(ACCENT)),
         Span::raw(" save  "),
         Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
-        Span::raw(" save & exit  "),
+        Span::raw(" exit  "),
         Span::styled("Ctrl+L", Style::default().fg(ACCENT)),
-        Span::raw(" toggle AI"),
+        Span::raw(" AI  "),
+        Span::styled("Ctrl+Z", Style::default().fg(ACCENT)),
+        Span::raw(" undo  "),
+        Span::styled("Ctrl+F", Style::default().fg(ACCENT)),
+        Span::raw(" find  "),
     ]))
     .style(Style::default().fg(MUTED));
-    frame.render_widget(status, chunks[1]);
+    frame.render_widget(status, v_chunks[1]);
 
     if app.ai_sidepanel_visible() && main_chunks.len() > 1 {
         let ai_area = main_chunks[1];
@@ -354,43 +576,155 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let title = app
+    let base_title = app
         .editor_note_title()
         .map(|note| format!("Editing: {}", note))
         .unwrap_or_else(|| String::from("Editing note"));
 
+    let mut title_spans = vec![
+        Span::styled(base_title, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+    ];
+
+    if app.search_state().active {
+        title_spans.push(Span::raw("  "));
+        title_spans.push(Span::styled(
+            format!("Find: {}", app.search_state().query),
+            Style::default().fg(ACCENT_SOFT).add_modifier(Modifier::BOLD),
+        ));
+        if let Some(current) = app.search_state().current_match {
+            let total = app.search_state().matches.len();
+            title_spans.push(Span::styled(
+                format!(" ({}/{})", current + 1, total),
+                Style::default().fg(MUTED),
+            ));
+        }
+    }
+
     let block = Block::default()
-        .title(Span::styled(title, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
+        .title(Line::from(title_spans))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(BORDER));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(inner);
+
+    let v_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
+        .split(h_chunks[0]);
 
     let helper = Paragraph::new(Line::from(vec![
         Span::styled("Ctrl+S", Style::default().fg(ACCENT)),
         Span::raw(" save, "),
         Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
-        Span::raw(" save & exit"),
+        Span::raw(" exit, "),
+        Span::styled("Ctrl+Z", Style::default().fg(ACCENT)),
+        Span::raw(" undo, "),
+        Span::styled("Ctrl+F", Style::default().fg(ACCENT)),
+        Span::raw(" find"),
+    ]))
+    .style(Style::default().fg(MUTED));
+    frame.render_widget(helper, v_chunks[0]);
+
+    let editor_content_area = v_chunks[1];
+    let cursor = app.editor_cursor().min(app.editor_buffer().len());
+
+    let wrap_setting = if app.editor_word_wrap() {
+        Wrap { trim: false }
+    } else {
+        Wrap { trim: true }
+    };
+
+    // Build lines with cursor inserted at correct position
+    let mut lines: Vec<Line> = Vec::new();
+    let mut char_pos = 0;
+
+    for line_text in app.editor_buffer().lines() {
+        let line_len = line_text.len();
+        let line_start = char_pos;
+        let line_end = char_pos + line_len;
+
+        // Add visual spacing before H1 headers (except at start of document)
+        if line_text.starts_with("# ") && line_start > 0 {
+            lines.push(Line::from(""));
+        }
+
+        if cursor >= line_start && cursor <= line_end {
+            // Cursor is on this line
+            let cursor_in_line = cursor - line_start;
+            let before_cursor = &line_text[..cursor_in_line];
+            let after_cursor = &line_text[cursor_in_line..];
+
+            let mut spans = parse_markdown_spans(before_cursor);
+            spans.push(Span::styled("█", Style::default().fg(TEXT)));
+            spans.extend(parse_markdown_spans(after_cursor));
+
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(render_markdown_line(line_text));
+        }
+
+        // Add visual spacing after H1 headers
+        if line_text.starts_with("# ") {
+            lines.push(Line::from(""));
+        }
+
+        char_pos += line_len + 1;
+    }
+
+    // Calculate which line the cursor is on (for auto-scrolling)
+    let cursor_line = app.editor_buffer()[..cursor.min(app.editor_buffer().len())]
+        .chars()
+        .filter(|&c| c == '\n')
+        .count();
+
+    let total_lines = app.editor_buffer().lines().count().max(1);
+    let visible_lines = editor_content_area.height as usize;
+
+    // Auto-scroll: ensure cursor is within visible viewport
+    let mut effective_scroll_offset = app.editor_scroll_offset();
+    if cursor_line < effective_scroll_offset {
+        // Cursor above viewport - scroll up to show it
+        effective_scroll_offset = cursor_line;
+    } else if cursor_line >= effective_scroll_offset + visible_lines {
+        // Cursor below viewport - scroll down to show it
+        effective_scroll_offset = cursor_line.saturating_sub(visible_lines - 1);
+    }
+    // Clamp to valid range
+    effective_scroll_offset = effective_scroll_offset.min(total_lines.saturating_sub(visible_lines));
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(wrap_setting)
+        .scroll((effective_scroll_offset as u16, 0));
+    frame.render_widget(paragraph, editor_content_area);
+
+    let scrollbar_needed = total_lines > visible_lines;
+
+    if scrollbar_needed {
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+        let mut scroll_state = ScrollbarState::new(total_lines.saturating_sub(visible_lines))
+            .position(effective_scroll_offset);
+        frame.render_stateful_widget(scrollbar, h_chunks[1], &mut scroll_state);
+    }
+
+    let status = Paragraph::new(Line::from(vec![
+        Span::styled("PgUp/Dn", Style::default().fg(ACCENT)),
+        Span::raw(" scroll, "),
+        Span::styled("Ctrl+W", Style::default().fg(ACCENT)),
+        Span::raw(" wrap, "),
+        Span::styled("Ctrl+B", Style::default().fg(ACCENT)),
+        Span::raw(" cursor"),
     ]))
     .style(Style::default().fg(MUTED))
-    .alignment(Alignment::Left);
-    frame.render_widget(helper, chunks[0]);
-
-    let mut editor_text = String::with_capacity(app.editor_buffer().len() + 1);
-    let cursor = app.editor_cursor().min(app.editor_buffer().len());
-    editor_text.push_str(&app.editor_buffer()[..cursor]);
-    editor_text.push('█');
-    editor_text.push_str(&app.editor_buffer()[cursor..]);
-
-    frame.render_widget(
-        Paragraph::new(editor_text)
-            .style(Style::default().fg(TEXT))
-            .wrap(Wrap { trim: false }),
-        chunks[1],
-    );
+    .alignment(Alignment::Right);
+    frame.render_widget(status, v_chunks[2]);
 }
