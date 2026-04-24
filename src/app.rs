@@ -64,7 +64,7 @@ pub struct SearchState {
 pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "login",
-        description: "Connect Aleph to a Strix session",
+        description: "Authenticate with Strix",
     },
     CommandSpec {
         name: "status",
@@ -77,6 +77,14 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "config",
         description: "Inspect the local command config",
+    },
+    CommandSpec {
+        name: "logout",
+        description: "Clear the active Strix session",
+    },
+    CommandSpec {
+        name: "obsidian pair",
+        description: "Pair a local Obsidian vault",
     },
     CommandSpec {
         name: "search",
@@ -1121,10 +1129,10 @@ impl App {
             "login" => {
                 self.connected = true;
                 self.set_result_panel(
-                    "Login",
+                    "Strix sign-in",
                     vec![
-                        String::from("Connected to the local Aleph session."),
-                        String::from("Strix gateway integration is still a local mock."),
+                        String::from("Use this screen to finish the Strix sign-in flow."),
+                        String::from("The final gateway and token wiring will land here next."),
                     ],
                 );
                 self.last_action = String::from("Connected to Strix.");
@@ -1132,10 +1140,23 @@ impl App {
             "logout" => {
                 self.connected = false;
                 self.set_result_panel(
-                    "Logout",
-                    vec![String::from("Disconnected the current session.")],
+                    "Signed out",
+                    vec![
+                        String::from("The current Strix session has been cleared."),
+                        String::from("Use /login to bring the connection back."),
+                    ],
                 );
                 self.last_action = String::from("Disconnected.");
+            }
+            "obsidian pair" => {
+                self.set_result_panel(
+                    "Obsidian pairing",
+                    vec![
+                        String::from("Pair a local Obsidian vault so Aleph can read notes."),
+                        String::from("This is a UI placeholder for the future vault picker and sync flow."),
+                    ],
+                );
+                self.last_action = String::from("Opened Obsidian pairing.");
             }
             "status" => {
                 self.set_result_panel(

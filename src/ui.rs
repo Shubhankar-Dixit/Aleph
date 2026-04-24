@@ -148,9 +148,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .alignment(Alignment::Right)
     } else {
         Paragraph::new(Line::from(vec![
-            Span::styled("/note list", Style::default().fg(TEXT)),
+            Span::styled("/login", Style::default().fg(TEXT)),
             Span::raw(" "),
-            Span::styled("/note edit", Style::default().fg(MUTED)),
+            Span::styled("/obsidian pair", Style::default().fg(MUTED)),
         ]))
         .style(Style::default().fg(MUTED))
         .alignment(Alignment::Right)
@@ -697,6 +697,7 @@ fn render_ai_overlay(frame: &mut Frame, app: &App, area: Rect, cursor_row: u16, 
 
 fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
     let has_status = !app.panel_lines().is_empty();
+    let panel_title = app.panel_title();
 
     // If no status to show and prompt is empty, show minimalist ghost text
     if !has_status && app.is_prompt_empty() {
@@ -720,11 +721,21 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(""),
             Line::from(vec![
                 Span::styled("  Recent: ", Style::default().fg(MUTED)),
-                Span::styled("/note list  /search  /ask", Style::default().fg(ACCENT_SOFT)),
+                Span::styled("/login  /obsidian pair  /ask", Style::default().fg(ACCENT_SOFT)),
             ]),
         ])
         .style(Style::default().fg(MUTED));
         frame.render_widget(ghost_text, inner);
+        return;
+    }
+
+    if has_status && panel_title == "Strix sign-in" {
+        render_strix_sign_in_panel(frame, app, area);
+        return;
+    }
+
+    if has_status && panel_title == "Obsidian pairing" {
+        render_obsidian_pairing_panel(frame, app, area);
         return;
     }
 
@@ -838,6 +849,126 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(typing_hint, inner);
         return;
     };
+}
+
+fn render_connection_panel(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    accent: Color,
+    intro: Vec<Line<'static>>,
+    rows: Vec<(&'static str, &'static str)>,
+    footer_left: &'static str,
+    footer_right: &'static str,
+) {
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER))
+        .style(Style::default().bg(PANEL));
+
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    let header = Paragraph::new(intro)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(TEXT));
+    frame.render_widget(header, sections[0]);
+
+    let table_rows = rows
+        .into_iter()
+        .map(|(label, value)| {
+            Row::new(vec![
+                Cell::from(Span::styled(label, Style::default().fg(MUTED))),
+                Cell::from(Span::styled(value, Style::default().fg(TEXT))),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    let table = Table::new(table_rows, [Constraint::Length(16), Constraint::Min(0)])
+        .column_spacing(2)
+        .style(Style::default().fg(TEXT));
+    frame.render_widget(table, sections[1]);
+
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled(footer_left, Style::default().fg(accent)),
+        Span::raw(" · "),
+        Span::styled(footer_right, Style::default().fg(MUTED)),
+    ]))
+    .alignment(Alignment::Right)
+    .style(Style::default().fg(MUTED));
+    frame.render_widget(footer, sections[2]);
+}
+
+fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
+    render_connection_panel(
+        frame,
+        area,
+        app.panel_title(),
+        ACCENT,
+        vec![
+            Line::from(vec![Span::styled(
+                "Authenticate with Strix",
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::styled(
+                "Use a personal access token or device-code login. The real flow will live in the gateway layer.",
+                Style::default().fg(MUTED),
+            )]),
+            Line::from(vec![Span::styled(
+                "Press Enter to continue the sign-in flow, or Esc to close this panel.",
+                Style::default().fg(MUTED),
+            )]),
+        ],
+        vec![
+            ("Status", "Disconnected"),
+            ("Method", "Device code or token"),
+            ("Scope", "notes, memory, canvas, darwin"),
+            ("Storage", "OS keychain or encrypted config"),
+        ],
+        "Enter",
+        "continue",
+    );
+}
+
+fn render_obsidian_pairing_panel(frame: &mut Frame, app: &App, area: Rect) {
+    render_connection_panel(
+        frame,
+        area,
+        app.panel_title(),
+        ACCENT_SOFT,
+        vec![
+            Line::from(vec![Span::styled(
+                "Pair a local Obsidian vault",
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::styled(
+                "Use a running vault as the source for imported notes and folder context.",
+                Style::default().fg(MUTED),
+            )]),
+            Line::from(vec![Span::styled(
+                "Press Enter to choose a vault path, or Esc to back out.",
+                Style::default().fg(MUTED),
+            )]),
+        ],
+        vec![
+            ("Status", "Not paired"),
+            ("Vault", "Choose a local vault folder"),
+            ("Mode", "Import-first, read-mostly"),
+            ("Pull", "Notes, folders, backlinks"),
+        ],
+        "Enter",
+        "pair vault",
+    );
 }
 
 fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
