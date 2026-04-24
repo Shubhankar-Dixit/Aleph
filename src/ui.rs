@@ -25,6 +25,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
         render_full_editor(frame, app, area);
         return;
     }
+    
+    if app.is_ai_chat() {
+        render_full_chat(frame, app, area);
+        return;
+    }
 
     let root = Layout::default()
         .direction(Direction::Vertical)
@@ -155,8 +160,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     match app.panel_mode() {
         PanelMode::Commands => render_commands_panel(frame, app, root[4]),
         PanelMode::NoteEditor => render_note_editor_panel(frame, app, root[4]),
-        PanelMode::FullEditor => {},
-        PanelMode::AiChat => render_chat_panel(frame, app, root[4]),
+        PanelMode::FullEditor | PanelMode::AiChat => {},
     }
 }
 
@@ -220,19 +224,41 @@ fn parse_markdown_spans(text: &str) -> Vec<Span<'_>> {
 fn render_markdown_line(line: &str) -> Line<'_> {
     let mut spans = Vec::new();
     let mut remaining = line;
+    let trimmed = line.trim_start();
+    let indent_len = line.len() - trimmed.len();
 
-    if line.starts_with("# ") {
-        spans.push(Span::styled("# ", Style::default().fg(ACCENT_SOFT)));
-        spans.push(Span::styled(&line[2..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)));
+    if trimmed.starts_with("# ") {
+        spans.push(Span::styled(&line[..indent_len + 2], Style::default().fg(ACCENT_SOFT)));
+        spans.push(Span::styled(&trimmed[2..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)));
         return Line::from(spans);
-    } else if line.starts_with("## ") {
-        spans.push(Span::styled("## ", Style::default().fg(MUTED)));
-        spans.push(Span::styled(&line[3..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD)));
+    } else if trimmed.starts_with("## ") {
+        spans.push(Span::styled(&line[..indent_len + 3], Style::default().fg(MUTED)));
+        spans.push(Span::styled(&trimmed[3..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD)));
         return Line::from(spans);
-    } else if line.starts_with("### ") {
-        spans.push(Span::styled("### ", Style::default().fg(MUTED)));
-        spans.push(Span::styled(&line[4..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD | Modifier::ITALIC)));
+    } else if trimmed.starts_with("### ") {
+        spans.push(Span::styled(&line[..indent_len + 4], Style::default().fg(MUTED)));
+        spans.push(Span::styled(&trimmed[4..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD | Modifier::ITALIC)));
         return Line::from(spans);
+    } else if let Some(stripped) = trimmed.strip_prefix("- ") {
+        if indent_len > 0 {
+            spans.push(Span::raw(&line[..indent_len]));
+        }
+        spans.push(Span::styled("• ", Style::default().fg(ACCENT)));
+        remaining = stripped;
+    } else if let Some(stripped) = trimmed.strip_prefix("* ") {
+        if indent_len > 0 {
+            spans.push(Span::raw(&line[..indent_len]));
+        }
+        spans.push(Span::styled("• ", Style::default().fg(ACCENT)));
+        remaining = stripped;
+    } else if let Some(pos) = trimmed.find(". ") {
+        if pos > 0 && trimmed[..pos].chars().all(|c| c.is_ascii_digit()) {
+            if indent_len > 0 {
+                spans.push(Span::raw(&line[..indent_len]));
+            }
+            spans.push(Span::styled(&trimmed[..=pos + 1], Style::default().fg(ACCENT)));
+            remaining = &trimmed[pos + 2..];
+        }
     }
 
     while !remaining.is_empty() {
@@ -288,6 +314,84 @@ fn render_markdown_line(line: &str) -> Line<'_> {
     Line::from(spans)
 }
 
+fn render_markdown_line_with_cursor(line: &str, cursor_in_line: usize, cursor_style: CursorStyle) -> Line<'_> {
+    let cursor_glyph = if cursor_style == CursorStyle::Block {
+        "█"
+    } else {
+        CURSOR
+    };
+
+    let mut spans = Vec::new();
+    let trimmed = line.trim_start();
+    let indent_len = line.len() - trimmed.len();
+    
+    let mut text_start = 0;
+
+    if trimmed.starts_with("# ") {
+        text_start = indent_len + 2;
+    } else if trimmed.starts_with("## ") {
+        text_start = indent_len + 3;
+    } else if trimmed.starts_with("### ") {
+        text_start = indent_len + 4;
+    } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+        text_start = indent_len + 2;
+    } else if let Some(pos) = trimmed.find(". ") {
+        if pos > 0 && trimmed[..pos].chars().all(|c| c.is_ascii_digit()) {
+            text_start = indent_len + pos + 2;
+        }
+    }
+
+    if cursor_in_line < text_start {
+        // Cursor is within the prefix. Render it simply to avoid complex prefix splitting.
+        let mut before_cursor = parse_markdown_spans(&line[..cursor_in_line]);
+        before_cursor.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
+        before_cursor.extend(parse_markdown_spans(&line[cursor_in_line..]));
+        return Line::from(before_cursor);
+    }
+
+    // Apply prefix styling up to text_start
+    let mut remaining = line;
+    let mut prefix_spans = Vec::new();
+
+    if text_start > 0 {
+        if trimmed.starts_with("# ") {
+            prefix_spans.push(Span::styled(&line[..text_start], Style::default().fg(ACCENT_SOFT)));
+        } else if trimmed.starts_with("## ") || trimmed.starts_with("### ") {
+            prefix_spans.push(Span::styled(&line[..text_start], Style::default().fg(MUTED)));
+        } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+            if indent_len > 0 {
+                prefix_spans.push(Span::raw(&line[..indent_len]));
+            }
+            prefix_spans.push(Span::styled("• ", Style::default().fg(ACCENT)));
+        } else if let Some(pos) = trimmed.find(". ") {
+            if indent_len > 0 {
+                prefix_spans.push(Span::raw(&line[..indent_len]));
+            }
+            prefix_spans.push(Span::styled(&trimmed[..=pos + 1], Style::default().fg(ACCENT)));
+        }
+        remaining = &line[text_start..];
+    }
+
+    // Normal markdown parsing for the rest, injecting the cursor
+    let adjusted_cursor = cursor_in_line - text_start;
+    spans.extend(prefix_spans);
+
+    let before_cursor = &remaining[..adjusted_cursor];
+    let after_cursor = &remaining[adjusted_cursor..];
+
+    if trimmed.starts_with("# ") || trimmed.starts_with("## ") || trimmed.starts_with("### ") {
+        spans.push(Span::styled(before_cursor, Style::default().fg(TEXT).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
+        spans.push(Span::styled(after_cursor, Style::default().fg(TEXT).add_modifier(Modifier::BOLD)));
+    } else {
+        spans.extend(parse_markdown_spans(before_cursor));
+        spans.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
+        spans.extend(parse_markdown_spans(after_cursor));
+    }
+
+    Line::from(spans)
+}
+
 fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let max_width = 80;
     let center_width = area.width.saturating_sub(8).min(max_width);
@@ -317,7 +421,7 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let editor_content_area = h_chunks[1];
 
     let title = app.editor_note_title().unwrap_or("Untitled");
-    let word_count = app.editor_buffer().split_whitespace().count();
+    let word_count = editor_word_count(app.editor_buffer());
 
     let meta_style = if app.save_shimmer_ticks() > 0 {
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
@@ -376,19 +480,8 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
             let cursor_in_line = cursor - line_start;
             cursor_visual_row = Some(visual_row);
             cursor_visual_col = line_text[..cursor_in_line].chars().count() as u16;
-            let before_cursor = &line_text[..cursor_in_line];
-            let after_cursor = &line_text[cursor_in_line..];
-
-            let mut spans = parse_markdown_spans(before_cursor);
-            let cursor_glyph = if app.editor_cursor_style() == CursorStyle::Block {
-                "█"
-            } else {
-                CURSOR
-            };
-            spans.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
-            spans.extend(parse_markdown_spans(after_cursor));
-
-            lines.push(Line::from(spans));
+            
+            lines.push(render_markdown_line_with_cursor(line_text, cursor_in_line, app.editor_cursor_style()));
         } else {
             lines.push(render_markdown_line(line_text));
         }
@@ -643,8 +736,10 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(BORDER));
+            .border_style(Style::default().fg(BORDER))
+            .style(Style::default().bg(PANEL));
         let inner = block.inner(area);
+        frame.render_widget(Clear, area);
         frame.render_widget(block, area);
 
         let (suggestions, offset) = app.visible_commands_window(8);
@@ -699,10 +794,7 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
                 .style(Style::default().fg(Color::Rgb(122, 122, 128)));
             frame.render_widget(suggestions_table, inner);
         }
-    }
-
-    // Default: show status panel if there's content, otherwise empty
-    if has_status {
+    } else if has_status {
         let block = Block::default()
             .title(Span::styled(
                 app.panel_title(),
@@ -829,19 +921,7 @@ fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
         if cursor >= line_start && cursor <= line_end {
             // Cursor is on this line
             let cursor_in_line = cursor - line_start;
-            let before_cursor = &line_text[..cursor_in_line];
-            let after_cursor = &line_text[cursor_in_line..];
-
-            let mut spans = parse_markdown_spans(before_cursor);
-            let cursor_glyph = if app.editor_cursor_style() == CursorStyle::Block {
-                "█"
-            } else {
-                CURSOR
-            };
-            spans.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
-            spans.extend(parse_markdown_spans(after_cursor));
-
-            lines.push(Line::from(spans));
+            lines.push(render_markdown_line_with_cursor(line_text, cursor_in_line, app.editor_cursor_style()));
         } else {
             lines.push(render_markdown_line(line_text));
         }
@@ -907,29 +987,60 @@ fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(status, v_chunks[2]);
 }
 
-fn render_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .title(Span::styled(
-            if app.is_thinking() {
-                format!("Chat {}", app.thinking_frame())
-            } else {
-                String::from("Chat")
-            },
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(BORDER));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+fn editor_word_count(text: &str) -> usize {
+    text.split_whitespace()
+        .filter(|token| token.chars().any(|character| character.is_alphanumeric()))
+        .count()
+}
 
-    let chunks = Layout::default()
+fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
+    let max_width = 80;
+    let center_width = area.width.saturating_sub(8).min(max_width);
+    let left_padding = area.width.saturating_sub(center_width) / 2;
+
+    let v_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3)])
-        .split(inner);
+        .constraints([
+            Constraint::Length(1), // Top meta
+            Constraint::Length(1), // Spacer
+            Constraint::Min(0),    // Chat messages
+            Constraint::Length(1), // Spacer
+            Constraint::Length(1), // Input area
+            Constraint::Length(1), // Bottom hints
+        ])
+        .margin(1)
+        .split(area);
 
-    let messages_area = chunks[0];
+    let top_h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(left_padding),
+            Constraint::Length(center_width),
+            Constraint::Min(0),
+        ]);
+
+    let meta_area = top_h_chunks.split(v_chunks[0])[1];
+    let chat_area = top_h_chunks.split(v_chunks[2])[1];
+    let input_area = top_h_chunks.split(v_chunks[4])[1];
+    let hints_area = top_h_chunks.split(v_chunks[5])[1];
+
+    let meta_style = if app.is_thinking() {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(MUTED)
+    };
+
+    let title = if app.is_thinking() {
+        format!("Aleph {} focusing...", app.thinking_frame())
+    } else {
+        String::from("Aleph Chat")
+    };
+
+    let top_meta = Paragraph::new(Line::from(vec![Span::styled(title, meta_style)]))
+        .alignment(Alignment::Left);
+    frame.render_widget(top_meta, meta_area);
+
     let messages = app.chat_messages();
-
     let mut lines: Vec<Line> = Vec::new();
 
     for msg in messages.iter() {
@@ -956,17 +1067,7 @@ fn render_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
             if content_line.is_empty() {
                 lines.push(Line::from(""));
             } else {
-                let max_width = messages_area.width as usize - 4;
-                let mut remaining = content_line;
-                while !remaining.is_empty() {
-                    let chunk_end = remaining.len().min(max_width);
-                    let chunk = &remaining[..chunk_end];
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", Style::default()),
-                        Span::styled(chunk, Style::default().fg(TEXT)),
-                    ]));
-                    remaining = &remaining[chunk_end..];
-                }
+                lines.push(render_markdown_line(content_line));
             }
         }
     }
@@ -974,39 +1075,60 @@ fn render_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
     if messages.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                "Welcome to Aleph AI chat! Type a message below to start.",
-                Style::default().fg(MUTED),
-            ),
+            Span::styled("Welcome to Aleph AI chat! Type a message below to start.", Style::default().fg(MUTED)),
         ]));
     }
 
-    let messages_widget = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((0, 0));
-    frame.render_widget(messages_widget, messages_area);
+    let wrap_setting = Wrap { trim: false };
+    let scroll_y = lines
+        .len()
+        .saturating_sub(chat_area.height as usize)
+        .min(u16::MAX as usize) as u16;
 
-    let input_area = chunks[1];
-    let input_block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(BORDER));
-    let input_inner = input_block.inner(input_area);
-    frame.render_widget(input_block, input_area);
+    let messages_widget = Paragraph::new(lines)
+        .wrap(wrap_setting)
+        .scroll((scroll_y, 0));
+    frame.render_widget(messages_widget, chat_area);
 
     let input_buffer = app.chat_input_buffer();
-    let cursor = app.chat_input_cursor();
+    let cursor = app.chat_input_cursor().min(input_buffer.len());
     let before_cursor = &input_buffer[..cursor];
     let after_cursor = &input_buffer[cursor..];
 
     let input_line = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "> ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("> ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
         Span::styled(before_cursor, Style::default().fg(TEXT)),
         Span::styled(CURSOR, Style::default().fg(MUTED)),
         Span::styled(after_cursor, Style::default().fg(TEXT)),
     ]));
-    frame.render_widget(input_line, input_inner);
+    frame.render_widget(input_line, input_area);
+
+    let hints_spans = vec![
+        Span::styled("Enter", Style::default().fg(ACCENT)),
+        Span::raw(" send · "),
+        Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
+        Span::raw(" exit · "),
+        Span::styled("Ctrl+C", Style::default().fg(ACCENT)),
+        Span::raw(" quit"),
+    ];
+    let bottom_hints = Paragraph::new(Line::from(hints_spans)).alignment(Alignment::Right).style(Style::default().fg(MUTED));
+    frame.render_widget(bottom_hints, hints_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::editor_word_count;
+
+    #[test]
+    fn editor_word_count_ignores_punctuation_only_tokens() {
+        assert_eq!(editor_word_count("."), 0);
+        assert_eq!(editor_word_count("...   !"), 0);
+    }
+
+    #[test]
+    fn editor_word_count_still_counts_text_tokens() {
+        assert_eq!(editor_word_count("hello"), 1);
+        assert_eq!(editor_word_count("hello . world"), 2);
+        assert_eq!(editor_word_count("note-1"), 1);
+    }
 }
