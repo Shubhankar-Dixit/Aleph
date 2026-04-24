@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 
 #[derive(Clone, Copy)]
 pub struct CommandSpec {
@@ -198,8 +198,9 @@ pub struct App {
     editor_cursor: usize,
     thinking: bool,
     thinking_ticks_remaining: u8,
-    ai_sidepanel_visible: bool,
-    ai_panel_focused: bool,
+    ai_overlay_visible: bool,
+    ai_overlay_pulse_ticks: u8,
+    save_shimmer_ticks: u8,
     ai_input_buffer: String,
     ai_input_cursor: usize,
     suggestion_filter: Option<String>,
@@ -303,14 +304,15 @@ impl App {
             editor_cursor: 0,
             thinking: false,
             thinking_ticks_remaining: 0,
-            ai_sidepanel_visible: false,
-            ai_panel_focused: false,
+            ai_overlay_visible: false,
+            ai_overlay_pulse_ticks: 0,
+            save_shimmer_ticks: 0,
             ai_input_buffer: String::new(),
             ai_input_cursor: 0,
             suggestion_filter: None,
             editor_scroll_offset: 0,
             editor_word_wrap: true,
-            editor_cursor_style: CursorStyle::Block,
+            editor_cursor_style: CursorStyle::Line,
             undo_stack: VecDeque::with_capacity(100),
             redo_stack: VecDeque::with_capacity(100),
             search_state: SearchState {
@@ -332,7 +334,7 @@ impl App {
             if self.thinking_ticks_remaining == 0 {
                 self.thinking = false;
                 // Add mock AI response based on chat mode or regular mode
-                if self.panel_mode == PanelMode::AiChat {
+                if self.panel_mode == PanelMode::AiChat || self.ai_overlay_visible {
                     self.add_mock_ai_response();
                 } else {
                     self.panel_lines = vec![
@@ -341,6 +343,13 @@ impl App {
                     ];
                 }
             }
+        }
+
+        if self.ai_overlay_visible && self.ai_overlay_pulse_ticks > 0 {
+            self.ai_overlay_pulse_ticks -= 1;
+        }
+        if self.save_shimmer_ticks > 0 {
+            self.save_shimmer_ticks -= 1;
         }
     }
 
@@ -436,12 +445,16 @@ impl App {
         self.panel_mode == PanelMode::FullEditor
     }
 
-    pub fn ai_sidepanel_visible(&self) -> bool {
-        self.ai_sidepanel_visible
+    pub fn ai_overlay_visible(&self) -> bool {
+        self.ai_overlay_visible
     }
 
-    pub fn ai_panel_focused(&self) -> bool {
-        self.ai_panel_focused
+    pub fn ai_overlay_pulse_ticks(&self) -> u8 {
+        self.ai_overlay_pulse_ticks
+    }
+
+    pub fn save_shimmer_ticks(&self) -> u8 {
+        self.save_shimmer_ticks
     }
 
     pub fn ai_input_buffer(&self) -> &str {
@@ -679,6 +692,16 @@ impl App {
         }
     }
 
+    pub fn handle_mouse(&mut self, mouse_event: MouseEvent) {
+        if !self.is_full_editor() || !self.ai_overlay_visible {
+            return;
+        }
+
+        if matches!(mouse_event.kind, MouseEventKind::Down(_)) {
+            self.close_ai_overlay();
+        }
+    }
+
     fn handle_editor_key(&mut self, key_event: KeyEvent) {
         if self.search_state.active {
             self.handle_search_key(key_event);
@@ -689,7 +712,7 @@ impl App {
                 if key_event.kind == KeyEventKind::Press
                     && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                self.save_editor();
+                self.exit_editor();
             }
             KeyCode::Char('s')
                 if key_event.kind == KeyEventKind::Press
@@ -697,7 +720,7 @@ impl App {
             {
                 self.save_editor();
             }
-            KeyCode::Esc if key_event.kind == KeyEventKind::Press => self.save_editor(),
+            KeyCode::Esc if key_event.kind == KeyEventKind::Press => self.exit_editor(),
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
                 self.save_undo_state();
                 self.insert_editor_character('\n');
@@ -1640,7 +1663,7 @@ impl App {
         self.panel_mode = PanelMode::FullEditor;
         self.panel_title = format!("Editing: {}", self.notes[index].title);
         self.panel_lines.clear();
-        self.ai_sidepanel_visible = false;
+        self.close_ai_overlay();
         self.last_action = format!("Editing note: {}", self.notes[index].title);
     }
 
@@ -1650,20 +1673,24 @@ impl App {
         };
 
         let updated_at = self.uptime();
-        let note_title = if let Some(note) = self.notes.get_mut(index) {
+        if let Some(note) = self.notes.get_mut(index) {
             note.content = self.editor_buffer.clone();
             note.updated_at = updated_at;
-            note.title.clone()
-        } else {
-            return;
-        };
+        }
+        self.save_shimmer_ticks = 4;
+    }
 
+    fn exit_editor(&mut self) {
+        self.save_editor();
+        let index = self.editor_note_index.unwrap_or(0);
+        let note_title = self.notes.get(index).map(|n| n.title.clone()).unwrap_or_default();
+        
         self.selected_note = index;
         self.set_result_panel(
             format!("Saved note: {}", note_title),
             self.note_detail_lines(index),
         );
-        self.last_action = format!("Saved note: {}", note_title);
+        self.last_action = format!("Exited note: {}", note_title);
         self.editor_note_index = None;
     }
 
@@ -2184,16 +2211,85 @@ impl App {
     }
 
     fn handle_full_editor_key(&mut self, key_event: KeyEvent) {
-        if self.search_state.active && !self.ai_panel_focused {
+        if self.search_state.active {
             self.handle_search_key(key_event);
             return;
         }
+
+        if self.ai_overlay_visible {
+            match key_event.code {
+                KeyCode::Esc if key_event.kind == KeyEventKind::Press => {
+                    self.close_ai_overlay();
+                    return;
+                }
+                KeyCode::Char(' ') if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.toggle_ai_overlay();
+                    return;
+                }
+                KeyCode::Char('c')
+                    if key_event.kind == KeyEventKind::Press
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.exit_editor();
+                    return;
+                }
+                KeyCode::Char('s')
+                    if key_event.kind == KeyEventKind::Press
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.save_editor();
+                    return;
+                }
+                KeyCode::Char('f')
+                    if key_event.kind == KeyEventKind::Press
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.start_search();
+                    return;
+                }
+                KeyCode::Char('z')
+                    if key_event.kind == KeyEventKind::Press
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.undo();
+                    return;
+                }
+                KeyCode::Char('y')
+                    if key_event.kind == KeyEventKind::Press
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.redo();
+                    return;
+                }
+                KeyCode::Char('w')
+                    if key_event.kind == KeyEventKind::Press
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.toggle_word_wrap();
+                    return;
+                }
+                KeyCode::Char('b')
+                    if key_event.kind == KeyEventKind::Press
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.toggle_cursor_style();
+                    return;
+                }
+                _ => {
+                    self.handle_ai_input_key(key_event);
+                    return;
+                }
+            }
+        }
+
         match key_event.code {
             KeyCode::Char('c')
                 if key_event.kind == KeyEventKind::Press
                     && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                self.save_editor();
+                self.exit_editor();
             }
             KeyCode::Char('s')
                 if key_event.kind == KeyEventKind::Press
@@ -2201,18 +2297,12 @@ impl App {
             {
                 self.save_editor();
             }
-            KeyCode::Esc if key_event.kind == KeyEventKind::Press => self.save_editor(),
-            KeyCode::Char('l')
+            KeyCode::Esc if key_event.kind == KeyEventKind::Press => self.exit_editor(),
+            KeyCode::Char(' ')
                 if key_event.kind == KeyEventKind::Press
                     && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                if self.ai_sidepanel_visible {
-                    self.ai_sidepanel_visible = false;
-                    self.ai_panel_focused = false;
-                } else {
-                    self.ai_sidepanel_visible = true;
-                    self.ai_panel_focused = true;
-                }
+                self.toggle_ai_overlay();
             }
             KeyCode::Char('f')
                 if key_event.kind == KeyEventKind::Press
@@ -2227,16 +2317,7 @@ impl App {
                     self.search_next();
                 }
             }
-            KeyCode::Tab if key_event.kind == KeyEventKind::Press && self.ai_sidepanel_visible => {
-                self.ai_panel_focused = !self.ai_panel_focused;
-            }
-            _ => {
-                if self.ai_panel_focused {
-                    self.handle_ai_input_key(key_event);
-                } else {
-                    self.handle_editor_content_key(key_event);
-                }
-            }
+            _ => self.handle_editor_content_key(key_event),
         }
     }
 
@@ -2327,8 +2408,12 @@ impl App {
     fn handle_ai_input_key(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
-                // Send message to AI
                 if !self.ai_input_buffer.trim().is_empty() {
+                    self.chat_messages.push(ChatMessage {
+                        role: String::from("user"),
+                        content: self.ai_input_buffer.clone(),
+                        timestamp: self.uptime(),
+                    });
                     self.thinking = true;
                     self.thinking_ticks_remaining = 15;
                     self.ai_input_buffer.clear();
@@ -2389,6 +2474,31 @@ impl App {
                 self.ai_input_cursor += character.len_utf8();
             }
             _ => {}
+        }
+    }
+
+    fn open_ai_overlay(&mut self) {
+        self.ai_overlay_visible = true;
+        self.ai_overlay_pulse_ticks = 6;
+        self.thinking = false;
+        self.thinking_ticks_remaining = 0;
+        self.ai_input_buffer.clear();
+        self.ai_input_cursor = 0;
+        self.last_action = String::from("Summoned the Ghost.");
+    }
+
+    fn close_ai_overlay(&mut self) {
+        self.ai_overlay_visible = false;
+        self.ai_overlay_pulse_ticks = 0;
+        self.thinking = false;
+        self.thinking_ticks_remaining = 0;
+    }
+
+    fn toggle_ai_overlay(&mut self) {
+        if self.ai_overlay_visible {
+            self.close_ai_overlay();
+        } else {
+            self.open_ai_overlay();
         }
     }
 }
@@ -2508,7 +2618,16 @@ mod tests {
             state: KeyEventState::NONE,
         });
 
-        assert!(!app.is_full_editor());
+        assert!(app.is_full_editor());
         assert!(app.notes[0].content.contains("Added from the editor"));
+
+        app.handle_key(KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        });
+
+        assert!(!app.is_full_editor());
     }
 }

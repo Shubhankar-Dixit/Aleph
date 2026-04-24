@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Wrap};
 
-use crate::app::{App, PanelMode};
+use crate::app::{App, CursorStyle, PanelMode};
 
 const BG: Color = Color::Rgb(25, 26, 34);
 const ACCENT: Color = Color::Rgb(156, 146, 201);
@@ -10,6 +10,8 @@ const TEXT: Color = Color::Rgb(198, 198, 210);
 const MUTED: Color = Color::Rgb(120, 122, 138);
 const PANEL: Color = Color::Rgb(35, 36, 48);
 const BORDER: Color = Color::Rgb(34, 65, 64);
+const GHOST_FRAMES: [&str; 4] = ["◌", "◎", "◍", "◉"];
+const CURSOR: &str = "│";
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -113,7 +115,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ),
         Span::raw("  "),
         Span::styled(app.prompt_before_cursor(), Style::default().fg(TEXT)),
-        Span::styled("█", Style::default().fg(MUTED)),
+        Span::styled(CURSOR, Style::default().fg(MUTED)),
         Span::styled(app.prompt_after_cursor(), Style::default().fg(TEXT)),
     ]))
     .alignment(Alignment::Left)
@@ -219,7 +221,6 @@ fn render_markdown_line(line: &str) -> Line<'_> {
     let mut spans = Vec::new();
     let mut remaining = line;
 
-    // Handle headers - H1 is underlined+bold, H2 is bold, H3 is italic+bold
     if line.starts_with("# ") {
         spans.push(Span::styled("# ", Style::default().fg(ACCENT_SOFT)));
         spans.push(Span::styled(&line[2..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)));
@@ -234,7 +235,6 @@ fn render_markdown_line(line: &str) -> Line<'_> {
         return Line::from(spans);
     }
 
-    // Handle inline formatting
     while !remaining.is_empty() {
         if let Some(pos) = remaining.find("**") {
             if pos > 0 {
@@ -289,100 +289,119 @@ fn render_markdown_line(line: &str) -> Line<'_> {
 }
 
 fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
-    let main_chunks = if app.ai_sidepanel_visible() {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .margin(1)
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(100)])
-            .margin(1)
-            .split(area)
-    };
+    let max_width = 80;
+    let center_width = area.width.saturating_sub(8).min(max_width);
+    let left_padding = area.width.saturating_sub(center_width) / 2;
 
-    let editor_area = main_chunks[0];
+    let v_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Top meta
+            Constraint::Length(1), // Spacer
+            Constraint::Min(0),    // Editor content
+            Constraint::Length(1), // Spacer
+            Constraint::Length(1), // Bottom hints
+        ])
+        .margin(1)
+        .split(area);
+
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(left_padding),
+            Constraint::Length(center_width),
+            Constraint::Min(0),
+        ])
+        .split(v_chunks[2]);
+
+    let editor_content_area = h_chunks[1];
 
     let title = app.editor_note_title().unwrap_or("Untitled");
+    let word_count = app.editor_buffer().split_whitespace().count();
 
-    let mut title_spans = vec![
-        Span::styled(format!("Editing: {}", title), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-    ];
+    let meta_style = if app.save_shimmer_ticks() > 0 {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(MUTED)
+    };
+
+    let mut meta_spans = vec![Span::styled(
+        format!("{} / Draft / {} words", title, word_count),
+        meta_style,
+    )];
 
     if app.search_state().active {
-        title_spans.push(Span::raw("  "));
-        title_spans.push(Span::styled(
+        meta_spans.push(Span::raw("  "));
+        meta_spans.push(Span::styled(
             format!("Find: {}", app.search_state().query),
             Style::default().fg(ACCENT_SOFT).add_modifier(Modifier::BOLD),
         ));
         if let Some(current) = app.search_state().current_match {
             let total = app.search_state().matches.len();
-            title_spans.push(Span::styled(
+            meta_spans.push(Span::styled(
                 format!(" ({}/{})", current + 1, total),
                 Style::default().fg(MUTED),
             ));
         }
     }
 
-    let block = Block::default()
-        .title(Line::from(title_spans))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(BORDER));
-    let inner = block.inner(editor_area);
-    frame.render_widget(block, editor_area);
-
-    let h_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(inner);
-
-    let v_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(h_chunks[0]);
-
-    let editor_content_area = v_chunks[0];
+    let top_meta = Paragraph::new(Line::from(meta_spans)).alignment(Alignment::Left);
+    frame.render_widget(top_meta, v_chunks[0]);
 
     let cursor = app.editor_cursor().min(app.editor_buffer().len());
 
+    let wrap_setting = if app.editor_word_wrap() {
+        Wrap { trim: false }
+    } else {
+        Wrap { trim: true }
+    };
+
     let mut lines: Vec<Line> = Vec::new();
     let mut char_pos = 0;
+    let mut cursor_visual_row: Option<u16> = None;
+    let mut cursor_visual_col: u16 = 0;
+    let mut visual_row: u16 = 0;
 
     for line_text in app.editor_buffer().lines() {
         let line_len = line_text.len();
         let line_start = char_pos;
         let line_end = char_pos + line_len;
 
-        // Add visual spacing before H1 headers (except at start of document)
         if line_text.starts_with("# ") && line_start > 0 {
             lines.push(Line::from(""));
+            visual_row = visual_row.saturating_add(1);
         }
 
         if cursor >= line_start && cursor <= line_end {
             let cursor_in_line = cursor - line_start;
+            cursor_visual_row = Some(visual_row);
+            cursor_visual_col = line_text[..cursor_in_line].chars().count() as u16;
             let before_cursor = &line_text[..cursor_in_line];
             let after_cursor = &line_text[cursor_in_line..];
 
             let mut spans = parse_markdown_spans(before_cursor);
-            spans.push(Span::styled("█", Style::default().fg(TEXT)));
+            let cursor_glyph = if app.editor_cursor_style() == CursorStyle::Block {
+                "█"
+            } else {
+                CURSOR
+            };
+            spans.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
             spans.extend(parse_markdown_spans(after_cursor));
 
             lines.push(Line::from(spans));
         } else {
             lines.push(render_markdown_line(line_text));
         }
+        visual_row = visual_row.saturating_add(1);
 
-        // Add visual spacing after H1 headers
         if line_text.starts_with("# ") {
             lines.push(Line::from(""));
+            visual_row = visual_row.saturating_add(1);
         }
 
         char_pos += line_len + 1;
     }
 
-    // Calculate which line the cursor is on (for auto-scrolling)
     let cursor_line = app.editor_buffer()[..cursor.min(app.editor_buffer().len())]
         .chars()
         .filter(|&c| c == '\n')
@@ -391,26 +410,29 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let total_lines = app.editor_buffer().lines().count().max(1);
     let visible_lines = editor_content_area.height as usize;
 
-    // Auto-scroll: ensure cursor is within visible viewport
     let mut effective_scroll_offset = app.editor_scroll_offset();
     if cursor_line < effective_scroll_offset {
-        // Cursor above viewport - scroll up to show it
         effective_scroll_offset = cursor_line;
     } else if cursor_line >= effective_scroll_offset + visible_lines {
-        // Cursor below viewport - scroll down to show it
         effective_scroll_offset = cursor_line.saturating_sub(visible_lines - 1);
     }
-    // Clamp to valid range
     effective_scroll_offset = effective_scroll_offset.min(total_lines.saturating_sub(visible_lines));
 
     let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
+        .wrap(wrap_setting)
         .scroll((effective_scroll_offset as u16, 0));
     frame.render_widget(paragraph, editor_content_area);
 
-    let scrollbar_needed = total_lines > visible_lines;
+    if total_lines > visible_lines {
+        let scroll_area = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(left_padding + center_width),
+                Constraint::Length(1),
+                Constraint::Min(0)
+            ])
+            .split(v_chunks[2])[1];
 
-    if scrollbar_needed {
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
@@ -419,76 +441,165 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
             .thumb_symbol("█");
         let mut scroll_state = ScrollbarState::new(total_lines.saturating_sub(visible_lines))
             .position(effective_scroll_offset);
-        frame.render_stateful_widget(scrollbar, h_chunks[1], &mut scroll_state);
+        frame.render_stateful_widget(scrollbar, scroll_area, &mut scroll_state);
     }
 
-    let status = Paragraph::new(Line::from(vec![
-        Span::styled("Ctrl+S", Style::default().fg(ACCENT)),
-        Span::raw(" save  "),
-        Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
-        Span::raw(" exit  "),
-        Span::styled("Ctrl+L", Style::default().fg(ACCENT)),
-        Span::raw(" AI  "),
-        Span::styled("Ctrl+Z", Style::default().fg(ACCENT)),
-        Span::raw(" undo  "),
-        Span::styled("Ctrl+F", Style::default().fg(ACCENT)),
-        Span::raw(" find  "),
-    ]))
-    .style(Style::default().fg(MUTED));
-    frame.render_widget(status, v_chunks[1]);
+    let hints = Span::styled(
+        "Ctrl+S save · Ctrl+F find · Ctrl+Space ghost",
+        Style::default().fg(MUTED),
+    );
+    let bottom_hints = Paragraph::new(Line::from(hints))
+        .alignment(Alignment::Right);
+    frame.render_widget(bottom_hints, v_chunks[4]);
 
-    if app.ai_sidepanel_visible() && main_chunks.len() > 1 {
-        let ai_area = main_chunks[1];
-        let ai_block = Block::default()
-            .title(Span::styled(
-                if app.ai_panel_focused() { "AI [FOCUSED]" } else { "AI" },
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ))
-            .borders(Borders::ALL)
-            .border_style(if app.ai_panel_focused() {
-                Style::default().fg(ACCENT)
-            } else {
-                Style::default().fg(BORDER)
-            });
-        let ai_inner = ai_block.inner(ai_area);
-        frame.render_widget(ai_block, ai_area);
+    if app.ai_overlay_visible() {
+        let cursor_row = cursor_visual_row
+            .unwrap_or(0)
+            .saturating_sub(effective_scroll_offset as u16);
+        render_ai_overlay(frame, app, editor_content_area, cursor_row, cursor_visual_col);
+    }
+}
 
-        let ai_layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
-            .split(ai_inner);
+fn render_ai_overlay(frame: &mut Frame, app: &App, area: Rect, cursor_row: u16, cursor_col: u16) {
+    let messages = app.chat_messages();
+    
+    // Expand significantly if there's a long conversation
+    let is_extended = messages.len() > 3;
+    
+    let base_width = if is_extended { 60 } else { 42 };
+    let base_height = if is_extended { 20 } else { 10 };
+    
+    let width = area.width.saturating_sub(4).min(base_width);
+    let height = area.height.saturating_sub(4).min(base_height);
 
-        let chat_content = Paragraph::new(vec![
-            Line::from(Span::styled("Ask anything", Style::default().fg(TEXT))),
-            Line::from(""),
-            Line::from(Span::styled(
-                "AI assistant is ready.",
-                Style::default().fg(MUTED),
-            )),
-        ])
+    if width < 28 || height < 8 {
+        return;
+    }
+
+    let max_x = area.x + area.width.saturating_sub(width + 1);
+    let max_y = area.y + area.height.saturating_sub(height + 1);
+    let side_gap = 2;
+
+    let desired_x = if is_extended {
+        // If extended, anchor to the right
+        area.x + area.width.saturating_sub(width + 2)
+    } else if cursor_col + width + side_gap < area.width {
+        area.x + cursor_col + side_gap
+    } else if cursor_col > width + side_gap {
+        area.x + cursor_col - width - side_gap
+    } else {
+        area.x + area.width.saturating_sub(width + 1)
+    };
+
+    let desired_y = if is_extended {
+        // If extended, anchor to the center-bottom
+        area.y + area.height.saturating_sub(height + 2)
+    } else if cursor_row + height + side_gap < area.height {
+        area.y + cursor_row + side_gap
+    } else if cursor_row > height + side_gap {
+        area.y + cursor_row - height - side_gap
+    } else {
+        area.y + 1
+    };
+
+    let x = desired_x.min(max_x).max(area.x + 1);
+    let y = desired_y.min(max_y).max(area.y + 1);
+    let overlay_area = Rect::new(x, y, width, height);
+
+    let glow = if app.ai_overlay_pulse_ticks() > 0 {
+        match app.tick() % 3 {
+            0 => ACCENT,
+            1 => ACCENT_SOFT,
+            _ => BORDER,
+        }
+    } else {
+        ACCENT_SOFT
+    };
+    let ripple = GHOST_FRAMES[(app.tick() as usize) % GHOST_FRAMES.len()];
+
+    let block = Block::default()
+        .title(Span::styled(
+            format!("The Ghost {}", ripple),
+            Style::default().fg(glow).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(glow))
+        .style(Style::default().bg(PANEL));
+    frame.render_widget(Clear, overlay_area);
+    let inner = block.inner(overlay_area);
+    frame.render_widget(block, overlay_area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .split(inner);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if messages.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  Ctrl+Space", Style::default().fg(ACCENT)),
+            Span::raw(" summon  "),
+            Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
+            Span::raw(" dismiss"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  Click anywhere", Style::default().fg(MUTED)),
+            Span::raw(" to banish the overlay."),
+        ]));
+    } else {
+        // If extended, show more messages, otherwise show latest 2
+        let take_count = if is_extended { 6 } else { 2 };
+        for message in messages.iter().rev().take(take_count).collect::<Vec<_>>().into_iter().rev() {
+            let speaker = if message.role == "user" { "You:" } else { "Ghost:" };
+            let color = if message.role == "user" { ACCENT_SOFT } else { ACCENT };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    speaker,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+
+            for content_line in message.content.lines() {
+                if content_line.is_empty() {
+                    lines.push(Line::from(""));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", Style::default()),
+                        Span::styled(content_line, Style::default().fg(TEXT)),
+                    ]));
+                }
+            }
+
+            lines.push(Line::from(""));
+        }
+    }
+
+    let transcript = Paragraph::new(lines)
+        .style(Style::default().bg(PANEL))
         .wrap(Wrap { trim: false });
-        frame.render_widget(chat_content, ai_layout[0]);
+    frame.render_widget(transcript, sections[0]);
 
-        let input_block = Block::default()
-            .title(Span::styled(
-                ">",
-                Style::default().fg(if app.ai_panel_focused() { ACCENT } else { MUTED }),
-            ))
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(BORDER));
-        let input_inner = input_block.inner(ai_layout[1]);
-        frame.render_widget(input_block, ai_layout[1]);
+    let input_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(glow))
+        .style(Style::default().bg(PANEL));
+    let input_inner = input_block.inner(sections[1]);
+    frame.render_widget(input_block, sections[1]);
 
-        let mut input_text = String::with_capacity(app.ai_input_buffer().len() + 1);
-        let cursor = app.ai_input_cursor().min(app.ai_input_buffer().len());
-        input_text.push_str(&app.ai_input_buffer()[..cursor]);
-        input_text.push('█');
-        input_text.push_str(&app.ai_input_buffer()[cursor..]);
-
-        let input_para = Paragraph::new(input_text)
-            .style(Style::default().fg(TEXT));
-        frame.render_widget(input_para, input_inner);
+    let mut input_text = String::with_capacity(app.ai_input_buffer().len() + 1);
+    let cursor = app.ai_input_cursor().min(app.ai_input_buffer().len());
+    input_text.push_str(&app.ai_input_buffer()[..cursor]);
+    if app.is_thinking() {
+        input_text.push_str(app.thinking_frame());
+    } else {
+        input_text.push_str(CURSOR);
     }
+    input_text.push_str(&app.ai_input_buffer()[cursor..]);
+
+    let input_para = Paragraph::new(input_text).style(Style::default().fg(TEXT));
+    frame.render_widget(input_para, input_inner);
 }
 
 fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
@@ -722,7 +833,12 @@ fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
             let after_cursor = &line_text[cursor_in_line..];
 
             let mut spans = parse_markdown_spans(before_cursor);
-            spans.push(Span::styled("█", Style::default().fg(TEXT)));
+            let cursor_glyph = if app.editor_cursor_style() == CursorStyle::Block {
+                "█"
+            } else {
+                CURSOR
+            };
+            spans.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
             spans.extend(parse_markdown_spans(after_cursor));
 
             lines.push(Line::from(spans));
@@ -806,13 +922,11 @@ fn render_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Split area into messages (top) and input (bottom)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(3)])
         .split(inner);
 
-    // Render messages
     let messages_area = chunks[0];
     let messages = app.chat_messages();
 
@@ -823,12 +937,10 @@ fn render_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
         let prefix = if is_user { "You" } else { "Aleph" };
         let color = if is_user { ACCENT_SOFT } else { ACCENT };
 
-        // Add spacing between messages
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
 
-        // Header with name and timestamp
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{} ", prefix),
@@ -840,13 +952,11 @@ fn render_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
             ),
         ]));
 
-        // Message content - wrap long lines
         for content_line in msg.content.lines() {
             if content_line.is_empty() {
                 lines.push(Line::from(""));
             } else {
-                // Simple word wrap for display
-                let max_width = messages_area.width as usize - 4; // Account for borders and padding
+                let max_width = messages_area.width as usize - 4;
                 let mut remaining = content_line;
                 while !remaining.is_empty() {
                     let chunk_end = remaining.len().min(max_width);
@@ -861,7 +971,6 @@ fn render_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Show hint if no messages yet
     if messages.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
@@ -875,10 +984,9 @@ fn render_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     let messages_widget = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((0, 0)); // Could add scroll support here
+        .scroll((0, 0));
     frame.render_widget(messages_widget, messages_area);
 
-    // Render input area
     let input_area = chunks[1];
     let input_block = Block::default()
         .borders(Borders::TOP)
@@ -886,16 +994,18 @@ fn render_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
     let input_inner = input_block.inner(input_area);
     frame.render_widget(input_block, input_area);
 
-    // Input prompt with cursor
     let input_buffer = app.chat_input_buffer();
     let cursor = app.chat_input_cursor();
     let before_cursor = &input_buffer[..cursor];
     let after_cursor = &input_buffer[cursor..];
 
     let input_line = Paragraph::new(Line::from(vec![
-        Span::styled("> ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "> ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(before_cursor, Style::default().fg(TEXT)),
-        Span::styled("█", Style::default().fg(MUTED)),
+        Span::styled(CURSOR, Style::default().fg(MUTED)),
         Span::styled(after_cursor, Style::default().fg(TEXT)),
     ]));
     frame.render_widget(input_line, input_inner);

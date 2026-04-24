@@ -5,11 +5,9 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
@@ -35,7 +33,7 @@ impl TerminalSession {
         enable_raw_mode()?;
 
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
             let _ = disable_raw_mode();
             return Err(error.into());
         }
@@ -49,7 +47,7 @@ impl Drop for TerminalSession {
         let _ = disable_raw_mode();
 
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
     }
 }
 
@@ -66,8 +64,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             .unwrap_or(Duration::ZERO);
 
         if event::poll(timeout)? {
-            if let Event::Key(key_event) = event::read()? {
-                app.handle_key(key_event);
+            match event::read()? {
+                Event::Key(key_event) => app.handle_key(key_event),
+                Event::Mouse(mouse_event) => app.handle_mouse(mouse_event),
+                _ => {}
             }
         }
 
