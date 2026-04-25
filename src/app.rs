@@ -1,7 +1,25 @@
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+use std::process::Command;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
+use keyring::Entry;
+use rand::{rngs::OsRng, RngCore};
+use ratatui::prelude::{Color, Line, Modifier, Span, Style};
+use reqwest::blocking::Client;
+use sha2::{Digest, Sha256};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AiProvider {
+    OpenRouter,
+    Strix,
+}
 
 #[derive(Clone, Copy)]
 pub struct CommandSpec {
@@ -31,6 +49,7 @@ pub enum PanelMode {
     NoteEditor,
     FullEditor,
     AiChat,
+    LoginPicker,
 }
 
 #[derive(Clone)]
@@ -64,7 +83,7 @@ pub struct SearchState {
 pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "login",
-        description: "Authenticate with Strix",
+        description: "Authenticate with OpenRouter in the browser or Strix (usage: /login openrouter | /login openrouter <token> | /login strix <token>)",
     },
     CommandSpec {
         name: "status",
@@ -80,7 +99,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "logout",
-        description: "Clear the active Strix session",
+        description: "Clear the active OpenRouter login",
     },
     CommandSpec {
         name: "obsidian pair",
@@ -96,7 +115,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "ask",
-        description: "Ask Strix a question",
+        description: "Ask OpenRouter a question",
     },
     CommandSpec {
         name: "note list",
@@ -176,9 +195,26 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
 ];
 
-const THINKING_FRAMES: [&str; 10] = [
+pub const THINKING_FRAMES: [&str; 10] = [
     "◡", "⊙", "◠", "⊙", "◡", "⊙", "◉", "●", "◉", "⊙",
 ];
+
+const OPENROUTER_CHAT_MODEL: &str = "nvidia/nemotron-3-nano-30b-a3b:free";
+const OPENROUTER_SERVICE: &str = "Aleph";
+const OPENROUTER_ACCOUNT: &str = "openrouter_api_key";
+const OPENROUTER_AUTH_CALLBACK: &str = "/aleph/openrouter/callback";
+const OPENROUTER_AUTH_PORT: u16 = 3000;
+const MAX_CHAT_MESSAGES: usize = 24;
+const CHAT_TEXT: Color = Color::Rgb(198, 198, 210);
+const CHAT_MUTED: Color = Color::Rgb(120, 122, 138);
+const CHAT_ACCENT: Color = Color::Rgb(156, 146, 201);
+const CHAT_ACCENT_SOFT: Color = Color::Rgb(115, 106, 155);
+
+enum ChatStreamUpdate {
+    Delta(String),
+    Done,
+    Error(String),
+}
 
 #[allow(dead_code)]
 pub struct App {
@@ -221,12 +257,31 @@ pub struct App {
     chat_messages: Vec<ChatMessage>,
     chat_input_buffer: String,
     chat_input_cursor: usize,
+    chat_scroll_offset: usize,
+    openrouter_api_key: Option<String>,
+    chat_stream_rx: Option<Receiver<ChatStreamUpdate>>,
+    openrouter_login_rx: Option<Receiver<Result<String, String>>>,
+    openrouter_login_cancel: Option<Arc<AtomicBool>>,
+    ai_provider: AiProvider,
+    strix_logs: Vec<String>,
+    streaming_buffer: String,
+    streaming_active: bool,
+    chat_render_cache: Vec<Line<'static>>,
+    chat_render_dirty: bool,
+    chat_cache_stable_len: usize,
+    login_picker_selected: usize,
+    ghost_stream_rx: Option<Receiver<ChatStreamUpdate>>,
+    ghost_streaming: bool,
+    ghost_result: Option<String>,
 }
 
 #[allow(dead_code)]
 impl App {
     pub fn new() -> Self {
-        Self {
+        let openrouter_api_key = Self::load_openrouter_api_key();
+        let connected = openrouter_api_key.is_some();
+
+        let mut app = Self {
             started_at: Instant::now(),
             tick: 0,
             quit: false,
@@ -236,7 +291,7 @@ impl App {
             history_index: None,
             selected_suggestion: 0,
             last_action: String::from("Ready to accept input."),
-            connected: false,
+            connected,
             folders: vec![
                 Folder {
                     id: 1,
@@ -332,26 +387,198 @@ impl App {
             chat_messages: Vec::new(),
             chat_input_buffer: String::new(),
             chat_input_cursor: 0,
-        }
+            chat_scroll_offset: 0,
+            openrouter_api_key,
+            chat_stream_rx: None,
+            openrouter_login_rx: None,
+            openrouter_login_cancel: None,
+            ai_provider: AiProvider::OpenRouter, // Default to OpenRouter
+            strix_logs: Vec::new(),
+            streaming_buffer: String::new(),
+            streaming_active: false,
+            chat_render_cache: Vec::new(),
+            chat_render_dirty: false,
+            chat_cache_stable_len: 0,
+            login_picker_selected: 0,
+            ghost_stream_rx: None,
+            ghost_streaming: false,
+            ghost_result: None,
+        };
+
+        app.rebuild_chat_render_cache();
+        app
     }
 
     pub fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
-        if self.thinking && self.thinking_ticks_remaining > 0 {
+        if self.thinking_ticks_remaining > 0 {
             self.thinking_ticks_remaining -= 1;
-            if self.thinking_ticks_remaining == 0 {
-                self.thinking = false;
-                // Add mock AI response based on chat mode or regular mode
-                if self.panel_mode == PanelMode::AiChat || self.ai_overlay_visible {
-                    self.add_mock_ai_response();
-                } else {
-                    self.panel_lines = vec![
-                        String::from("AI response ready."),
-                        String::from("In the future, this will connect to the agent runtime."),
-                    ];
+        }
+
+        let mut login_finished = false;
+        while !login_finished {
+            let result = match self.openrouter_login_rx.as_ref() {
+                Some(receiver) => receiver.try_recv(),
+                None => break,
+            };
+
+            match result {
+                Ok(Ok(api_key)) => {
+                    self.set_ai_provider(AiProvider::OpenRouter);
+                    match self.store_openrouter_api_key(&api_key) {
+                        Ok(()) => {
+                            self.connected = true;
+                            self.openrouter_api_key = Some(api_key);
+                            self.rebuild_chat_render_cache();
+                            self.set_result_panel(
+                                "OpenRouter login",
+                                vec![
+                                    String::from("OpenRouter browser login completed successfully."),
+                                    String::from("The API key has been stored locally."),
+                                    String::from("You can start chatting right away."),
+                                ],
+                            );
+                            self.last_action = String::from("Connected to OpenRouter via browser login.");
+                        }
+                        Err(error) => {
+                            self.connected = false;
+                            self.openrouter_api_key = None;
+                            self.set_result_panel("OpenRouter login failed", vec![error]);
+                            self.last_action = String::from("OpenRouter login failed.");
+                        }
+                    }
+
+                    self.openrouter_login_rx = None;
+                    self.openrouter_login_cancel = None;
+                    login_finished = true;
+                }
+                Ok(Err(error)) => {
+                    self.connected = false;
+                    self.set_result_panel("OpenRouter login failed", vec![error]);
+                    self.last_action = String::from("OpenRouter login failed.");
+                    self.openrouter_login_rx = None;
+                    self.openrouter_login_cancel = None;
+                    login_finished = true;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.connected = false;
+                    self.set_result_panel(
+                        "OpenRouter login failed",
+                        vec![String::from("The browser login flow disconnected before completion.")],
+                    );
+                    self.last_action = String::from("OpenRouter login disconnected.");
+                    self.openrouter_login_rx = None;
+                    self.openrouter_login_cancel = None;
+                    login_finished = true;
                 }
             }
         }
+
+        let mut stream_finished = false;
+        while !stream_finished {
+            let result = match self.chat_stream_rx.as_ref() {
+                Some(receiver) => receiver.try_recv(),
+                None => break,
+            };
+
+            match result {
+                Ok(ChatStreamUpdate::Delta(chunk)) => {
+                    self.streaming_active = true;
+                    self.streaming_buffer.push_str(&chunk);
+                    if let Some(message) = self
+                        .chat_messages
+                        .iter_mut()
+                        .rev()
+                        .find(|message| message.role == "assistant")
+                    {
+                        message.content.push_str(&chunk);
+                    }
+                    self.chat_render_dirty = true;
+                    self.thinking = true;
+                }
+                Ok(ChatStreamUpdate::Done) => {
+                    if self.streaming_buffer.trim().is_empty() {
+                        if let Some(message) = self
+                            .chat_messages
+                            .iter_mut()
+                            .rev()
+                            .find(|message| message.role == "assistant")
+                        {
+                            message.content = String::from("OpenRouter returned no content.");
+                        }
+                    }
+
+                    self.streaming_buffer.clear();
+                    self.streaming_active = false;
+                    self.rebuild_chat_render_cache();
+                    self.chat_render_dirty = false;
+                    self.thinking = false;
+                    self.thinking_ticks_remaining = 0;
+                    self.chat_stream_rx = None;
+                    self.last_action = String::from("OpenRouter response received.");
+                    stream_finished = true;
+                }
+                Ok(ChatStreamUpdate::Error(error)) => {
+                    if let Some(message) = self
+                        .chat_messages
+                        .iter_mut()
+                        .rev()
+                        .find(|message| message.role == "assistant")
+                    {
+                        if message.content.trim().is_empty() {
+                            message.content = format!("OpenRouter chat failed: {}", error);
+                        } else {
+                            message.content.push_str("\n\n");
+                            message.content.push_str(&format!("[OpenRouter error: {}]", error));
+                        }
+                    } else {
+                        self.push_chat_message("assistant", format!("OpenRouter chat failed: {}", error));
+                    }
+
+                    self.streaming_buffer.clear();
+                    self.streaming_active = false;
+                    self.rebuild_chat_render_cache();
+                    self.chat_render_dirty = false;
+                    self.thinking = false;
+                    self.thinking_ticks_remaining = 0;
+                    self.chat_stream_rx = None;
+                    self.last_action = String::from("OpenRouter request failed.");
+                    stream_finished = true;
+                }
+                Err(TryRecvError::Empty) => {
+                    self.thinking = true;
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    if let Some(message) = self
+                        .chat_messages
+                        .iter_mut()
+                        .rev()
+                        .find(|message| message.role == "assistant")
+                    {
+                        message.content = String::from("OpenRouter chat disconnected before a response arrived.");
+                    }
+
+                    self.streaming_buffer.clear();
+                    self.streaming_active = false;
+                    self.rebuild_chat_render_cache();
+                    self.chat_render_dirty = false;
+                    self.thinking = false;
+                    self.thinking_ticks_remaining = 0;
+                    self.chat_stream_rx = None;
+                    self.last_action = String::from("OpenRouter request disconnected.");
+                    stream_finished = true;
+                }
+            }
+        }
+
+        if self.chat_render_dirty {
+            self.rebuild_chat_render_cache_streaming();
+            self.chat_render_dirty = false;
+        }
+
+        self.process_ghost_stream();
 
         if self.ai_overlay_visible && self.ai_overlay_pulse_ticks > 0 {
             self.ai_overlay_pulse_ticks -= 1;
@@ -359,48 +586,6 @@ impl App {
         if self.save_shimmer_ticks > 0 {
             self.save_shimmer_ticks -= 1;
         }
-    }
-
-    fn add_mock_ai_response(&mut self) {
-        let mock_responses = [
-            "I understand. Let me help you with that.",
-            "That's an interesting question. Here's what I think...",
-            "I can assist with that. What specific aspects would you like to explore?",
-            "Let me analyze this for you. Based on the context...",
-            "I see what you're getting at. Here's my perspective...",
-            "Good question. Let me break this down for you.",
-            "I have some thoughts on this. First, consider...",
-        ];
-
-        let response = if !self.chat_messages.is_empty() {
-            let last_user_msg = self.chat_messages.iter().rev().find(|m| m.role == "user");
-            if let Some(msg) = last_user_msg {
-                // Generate a contextual response based on keywords
-                let content_lower = msg.content.to_lowercase();
-                if content_lower.contains("hello") || content_lower.contains("hi") {
-                    String::from("Hello! I'm your AI assistant. How can I help you today?")
-                } else if content_lower.contains("help") {
-                    String::from("I can help you with notes, folders, searching, and general questions. Try commands like /note list, /folder tree, or just ask me anything!")
-                } else if content_lower.contains("note") {
-                    String::from("I see you're working with notes. You can create notes with /note create, edit them with /note edit, and organize them into folders with /folder create.")
-                } else if content_lower.contains("folder") {
-                    String::from("Folders help organize your notes hierarchically. Use /folder list to see all folders, /folder tree for the structure, and /folder notes to see what's inside.")
-                } else {
-                    let idx = (self.tick as usize) % mock_responses.len();
-                    format!("{}", mock_responses[idx])
-                }
-            } else {
-                String::from("I'm ready to help. What would you like to discuss?")
-            }
-        } else {
-            String::from("I'm ready to help. What would you like to discuss?")
-        };
-
-        self.chat_messages.push(ChatMessage {
-            role: String::from("assistant"),
-            content: response,
-            timestamp: self.uptime(),
-        });
     }
 
     pub fn request_quit(&mut self) {
@@ -497,6 +682,14 @@ impl App {
         self.chat_input_cursor
     }
 
+    pub fn chat_scroll_offset(&self) -> usize {
+        self.chat_scroll_offset
+    }
+
+    pub fn chat_render_lines(&self) -> &[Line<'static>] {
+        &self.chat_render_cache
+    }
+
     pub fn panel_title(&self) -> &str {
         &self.panel_title
     }
@@ -537,6 +730,42 @@ impl App {
 
     pub fn active_note(&self) -> Option<&Note> {
         self.notes.get(self.selected_note)
+    }
+
+    pub fn ai_provider(&self) -> AiProvider {
+        self.ai_provider
+    }
+
+    pub fn strix_logs(&self) -> &[String] {
+        &self.strix_logs
+    }
+
+    pub fn streaming_buffer(&self) -> &str {
+        &self.streaming_buffer
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        self.streaming_active
+    }
+
+    pub fn login_picker_selected(&self) -> usize {
+        self.login_picker_selected
+    }
+
+    pub fn is_login_picker(&self) -> bool {
+        self.panel_mode == PanelMode::LoginPicker
+    }
+
+    pub fn is_ghost_streaming(&self) -> bool {
+        self.ghost_streaming
+    }
+
+    pub fn ghost_result(&self) -> Option<&str> {
+        self.ghost_result.as_deref()
+    }
+
+    pub fn is_openrouter_login_pending(&self) -> bool {
+        self.openrouter_login_rx.is_some()
     }
 
     pub fn thinking_frame(&self) -> &'static str {
@@ -656,6 +885,10 @@ impl App {
             self.handle_chat_key(key_event);
             return;
         }
+        if self.is_login_picker() {
+            self.handle_login_picker_key(key_event);
+            return;
+        }
 
         match key_event.code {
             KeyCode::Char('c')
@@ -701,11 +934,16 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, mouse_event: MouseEvent) {
-        if !self.is_full_editor() || !self.ai_overlay_visible {
+        if self.is_ai_chat() {
+            match mouse_event.kind {
+                MouseEventKind::ScrollUp => self.scroll_chat_up(3),
+                MouseEventKind::ScrollDown => self.scroll_chat_down(3),
+                _ => {}
+            }
             return;
         }
 
-        if matches!(mouse_event.kind, MouseEventKind::Down(_)) {
+        if self.is_full_editor() && self.ai_overlay_visible && matches!(mouse_event.kind, MouseEventKind::Down(_)) {
             self.close_ai_overlay();
         }
     }
@@ -843,17 +1081,14 @@ impl App {
                 // Send chat message
                 let msg = self.chat_input_buffer.trim();
                 if !msg.is_empty() {
-                    self.chat_messages.push(ChatMessage {
-                        role: String::from("user"),
-                        content: msg.to_string(),
-                        timestamp: self.uptime(),
-                    });
-                    self.thinking = true;
-                    self.thinking_ticks_remaining = 20;
-                    self.chat_input_buffer.clear();
-                    self.chat_input_cursor = 0;
+                    if self.start_chat_turn(msg.to_string()) {
+                        self.chat_input_buffer.clear();
+                        self.chat_input_cursor = 0;
+                    }
                 }
             }
+            KeyCode::PageUp if key_event.kind == KeyEventKind::Press => self.scroll_chat_up(10),
+            KeyCode::PageDown if key_event.kind == KeyEventKind::Press => self.scroll_chat_down(10),
             KeyCode::Backspace if key_event.kind == KeyEventKind::Press => {
                 if self.chat_input_cursor > 0 {
                     let prev = self.chat_input_buffer[..self.chat_input_cursor]
@@ -1044,31 +1279,19 @@ impl App {
     }
 
     fn submit_prompt(&mut self) {
-        let raw = self.prompt.trim();
+        let raw = self.prompt.trim().to_string();
         if raw.is_empty() {
             self.last_action = String::from("Type a query, command, or press Ctrl+C to quit.");
             return;
         }
 
         if !raw.starts_with('/') {
-            // Enter AI chat mode with the user's message
-            let query = raw.to_string();
-            self.history.push(query.clone());
-            self.history_index = None;
-
-            // Add user message to chat
-            self.chat_messages.push(ChatMessage {
-                role: String::from("user"),
-                content: query.clone(),
-                timestamp: self.uptime(),
-            });
-
-            // Switch to chat mode and start thinking
-            self.panel_mode = PanelMode::AiChat;
-            self.thinking = true;
-            self.thinking_ticks_remaining = 20;
-            self.last_action = format!("AI Chat: {}", query);
-            self.reset_prompt();
+            let query = raw.clone();
+            if self.start_chat_turn(query) {
+                self.history.push(raw);
+                self.history_index = None;
+                self.reset_prompt();
+            }
             return;
         }
 
@@ -1127,26 +1350,127 @@ impl App {
     fn execute_command(&mut self, command: &str, args: &str) {
         match command {
             "login" => {
-                self.connected = true;
-                self.set_result_panel(
-                    "Strix sign-in",
-                    vec![
-                        String::from("Use this screen to finish the Strix sign-in flow."),
-                        String::from("The final gateway and token wiring will land here next."),
-                    ],
-                );
-                self.last_action = String::from("Connected to Strix.");
+                let args_trimmed = args.trim();
+
+                // No args: show login picker
+                if args_trimmed.is_empty() {
+                    self.open_login_picker();
+                    return;
+                }
+
+                // Parse provider and token from args
+                // Format: /login [openrouter|strix] [token]
+                let (provider, token) = {
+                    let parts: Vec<&str> = args_trimmed.splitn(2, ' ').collect();
+                    if parts.len() == 2 {
+                        let maybe_provider = parts[0].to_lowercase();
+                        if maybe_provider == "openrouter" || maybe_provider == "strix" {
+                            (maybe_provider, parts[1])
+                        } else {
+                            // Assume first word is the token for OpenRouter (backward compat)
+                            (String::from("openrouter"), args_trimmed)
+                        }
+                    } else {
+                        let maybe_provider = args_trimmed.to_lowercase();
+                        if maybe_provider == "openrouter" {
+                            // /login openrouter -> browser login
+                            if self.start_openrouter_browser_login() {
+                                return;
+                            }
+                            self.set_result_panel(
+                                "OpenRouter login failed",
+                                vec![String::from("Unable to start the browser-based OpenRouter login flow.")],
+                            );
+                            self.last_action = String::from("OpenRouter login failed.");
+                            return;
+                        } else if maybe_provider == "strix" {
+                            self.set_result_panel(
+                                "Strix login",
+                                vec![
+                                    String::from("Strix authentication requires a token."),
+                                    String::from("Usage: /login strix <token>"),
+                                ],
+                            );
+                            self.last_action = String::from("Strix login requires a token.");
+                            return;
+                        } else {
+                            // Assume it's an OpenRouter API key directly
+                            (String::from("openrouter"), args_trimmed)
+                        }
+                    }
+                };
+
+                match provider.as_str() {
+                    "strix" => {
+                        self.set_ai_provider(AiProvider::Strix);
+                        self.add_strix_log(format!("Authenticating with Strix..."));
+                        // Strix auth is mock for now
+                        self.connected = true;
+                        self.add_strix_log("Connected to Strix successfully");
+                        self.set_result_panel(
+                            "Strix login",
+                            vec![
+                                String::from("Strix authentication configured."),
+                                String::from("Note: Strix gateway integration is a mock implementation."),
+                            ],
+                        );
+                        self.last_action = String::from("Connected to Strix.");
+                    }
+                    _ => {
+                        self.set_ai_provider(AiProvider::OpenRouter);
+                        match self.store_openrouter_api_key(token) {
+                            Ok(()) => {
+                                self.connected = true;
+                                self.openrouter_api_key = Some(token.to_string());
+                                self.rebuild_chat_render_cache();
+                                self.set_result_panel(
+                                    "OpenRouter login",
+                                    vec![
+                                        String::from("OpenRouter login saved locally."),
+                                        String::from("AI chat is ready to use now."),
+                                    ],
+                                );
+                                self.last_action = String::from("Connected to OpenRouter.");
+                            }
+                            Err(error) => {
+                                self.connected = false;
+                                self.openrouter_api_key = None;
+                                self.set_result_panel("OpenRouter login failed", vec![error]);
+                                self.last_action = String::from("OpenRouter login failed.");
+                            }
+                        }
+                    }
+                }
             }
             "logout" => {
                 self.connected = false;
+                self.openrouter_api_key = None;
+                self.chat_stream_rx = None;
+                self.openrouter_login_rx = None;
+                if let Some(cancel_flag) = &self.openrouter_login_cancel {
+                    cancel_flag.store(true, Ordering::Relaxed);
+                }
+                self.openrouter_login_cancel = None;
+                self.thinking = false;
+                self.thinking_ticks_remaining = 0;
+                self.streaming_buffer.clear();
+                self.streaming_active = false;
+                self.clear_openrouter_api_key();
+                self.chat_messages.clear();
+                self.chat_input_buffer.clear();
+                self.chat_input_cursor = 0;
+                self.rebuild_chat_render_cache();
+                self.panel_mode = PanelMode::Commands;
+                self.panel_title = String::from("Commands");
+                self.panel_lines.clear();
                 self.set_result_panel(
                     "Signed out",
                     vec![
-                        String::from("The current Strix session has been cleared."),
-                        String::from("Use /login to bring the connection back."),
+                        String::from("The current OpenRouter login has been cleared."),
+                        String::from("Use /login <api-key> to bring the connection back."),
                     ],
                 );
-                self.last_action = String::from("Disconnected.");
+                self.last_action = String::from("Disconnected from OpenRouter.");
             }
             "obsidian pair" => {
                 self.set_result_panel(
@@ -1162,14 +1486,14 @@ impl App {
                 self.set_result_panel(
                     "Status",
                     vec![
-                        format!("Session: {}", if self.connected { "connected" } else { "offline" }),
+                        format!("OpenRouter: {}", if self.connected { "connected" } else { "offline" }),
                         format!("Notes: {}", self.notes.len()),
                         format!("Memories: {}", self.memories.len()),
                         format!("Canvases: {}", self.canvases.len()),
                         format!("Uptime: {}", self.uptime()),
                     ],
                 );
-                self.last_action = String::from("Refreshed status.");
+                self.last_action = String::from("Refreshed OpenRouter status.");
             }
             "doctor" => {
                 self.set_result_panel(
@@ -1189,7 +1513,8 @@ impl App {
                     vec![
                         String::from("Theme: dark purple on black"),
                         String::from("Editor: embedded terminal note editor"),
-                        String::from("Commands: local and Strix-aligned"),
+                        String::from("AI chat: OpenRouter-backed"),
+                        String::from("Login: /login <api-key> or OPENROUTER_API_KEY"),
                     ],
                 );
                 self.last_action = String::from("Opened config summary.");
@@ -1222,13 +1547,13 @@ impl App {
             "ask" => {
                 let query = args.trim();
                 let lines = if query.is_empty() {
-                    vec![String::from("Ask Strix a question after the command, for example: /ask what should ship next?")]
+                    vec![String::from("Ask OpenRouter a question after the command, for example: /ask what should ship next?")]
                 } else {
-                    vec![
-                        format!("Question: {}", query),
-                        String::from("This local build is still wired to the plan layer, not the live Strix backend."),
-                        String::from("Use note read/edit for now, then connect the service layer next."),
-                    ]
+                    if self.start_chat_turn(query.to_string()) {
+                        self.reset_prompt();
+                        return;
+                    }
+                    return;
                 };
                 self.set_result_panel("Ask", lines);
                 self.last_action = String::from("Prepared an ask response.");
@@ -1669,6 +1994,728 @@ impl App {
         self.panel_title = title.into();
         self.panel_lines = lines;
         self.editor_note_index = None;
+    }
+
+    fn push_chat_message(&mut self, role: impl Into<String>, content: impl Into<String>) {
+        self.chat_messages.push(ChatMessage {
+            role: role.into(),
+            content: content.into(),
+            timestamp: self.uptime(),
+        });
+
+        if self.chat_messages.len() > MAX_CHAT_MESSAGES {
+            let overflow = self.chat_messages.len() - MAX_CHAT_MESSAGES;
+            self.chat_messages.drain(0..overflow);
+        }
+
+        self.rebuild_chat_render_cache();
+    }
+
+    fn scroll_chat_up(&mut self, lines: usize) {
+        self.chat_scroll_offset = self.chat_scroll_offset.saturating_add(lines);
+    }
+
+    fn scroll_chat_down(&mut self, lines: usize) {
+        self.chat_scroll_offset = self.chat_scroll_offset.saturating_sub(lines);
+    }
+
+    fn add_strix_log(&mut self, message: impl Into<String>) {
+        let timestamp = self.uptime();
+        self.strix_logs.push(format!("[{}] {}", timestamp, message.into()));
+        // Keep only last 50 log entries
+        if self.strix_logs.len() > 50 {
+            self.strix_logs.drain(0..self.strix_logs.len() - 50);
+        }
+    }
+
+    fn set_ai_provider(&mut self, provider: AiProvider) {
+        self.ai_provider = provider;
+        self.add_strix_log(format!("Switched to {:?} provider", provider));
+    }
+
+    fn clear_strix_logs(&mut self) {
+        self.strix_logs.clear();
+    }
+
+    fn start_openrouter_browser_login(&mut self) -> bool {
+        if self.openrouter_login_rx.is_some() {
+            self.last_action = String::from("OpenRouter login is already running. Use /logout to cancel it first.");
+            return false;
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.openrouter_login_rx = Some(receiver);
+        self.openrouter_login_cancel = Some(cancel_flag.clone());
+        self.set_result_panel(
+            "OpenRouter browser login",
+            vec![
+                String::from("A browser window will open for OpenRouter sign-in."),
+                String::from("After you authorize Aleph, the API key will be stored locally."),
+                String::from("If the browser does not open, copy the auth URL from the terminal."),
+            ],
+        );
+        self.last_action = String::from("Starting OpenRouter browser login.");
+
+        thread::spawn(move || {
+            let result = Self::run_openrouter_browser_login_flow(cancel_flag);
+            let _ = sender.send(result);
+        });
+
+        true
+    }
+
+    fn run_openrouter_browser_login_flow(cancel_flag: Arc<AtomicBool>) -> Result<String, String> {
+        let (code_verifier, code_challenge) = Self::build_pkce_pair();
+        let callback_nonce = Self::build_login_nonce();
+        let callback_path = format!("{}/{}", OPENROUTER_AUTH_CALLBACK, callback_nonce);
+        let callback_url = format!("http://127.0.0.1:3000{}", callback_path);
+        let auth_url = format!(
+            "https://openrouter.ai/auth?callback_url={}&code_challenge={}&code_challenge_method=S256",
+            urlencoding::encode(&callback_url),
+            urlencoding::encode(&code_challenge),
+        );
+
+        let listener = TcpListener::bind(("127.0.0.1", OPENROUTER_AUTH_PORT))
+            .map_err(|error| format!("failed to bind local OpenRouter callback listener: {}", error))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("failed to configure the callback listener: {}", error))?;
+
+        Self::open_browser(&auth_url)?;
+
+        let deadline = Instant::now() + Duration::from_secs(600);
+        let (mut stream, _) = loop {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err(String::from("OpenRouter browser login was canceled."));
+            }
+
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(String::from("OpenRouter browser login timed out waiting for the callback."));
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => {
+                    return Err(format!("failed to accept OpenRouter callback: {}", error));
+                }
+            }
+        };
+
+        let code = Self::read_openrouter_callback_code(&mut stream, &callback_path)?;
+
+        Self::write_openrouter_callback_response(
+            &mut stream,
+            "OpenRouter login completed. You can return to Aleph now.",
+        )?;
+
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(String::from("OpenRouter browser login was canceled."));
+        }
+
+        Self::exchange_openrouter_code_for_key(&code, &code_verifier)
+    }
+
+    fn build_pkce_pair() -> (String, String) {
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        let verifier = URL_SAFE_NO_PAD.encode(bytes);
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        (verifier, challenge)
+    }
+
+    fn build_login_nonce() -> String {
+        let mut bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut bytes);
+        URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    fn open_browser(url: &str) -> Result<(), String> {
+        if cfg!(target_os = "windows") {
+            Command::new("cmd")
+                .arg("/C")
+                .arg("start")
+                .arg("")
+                .arg(url.replace("&", "^&"))
+                .spawn()
+                .map_err(|error| format!("failed to open the browser: {}", error))?;
+            return Ok(());
+        }
+
+        if cfg!(target_os = "macos") {
+            Command::new("open")
+                .arg(url)
+                .spawn()
+                .map_err(|error| format!("failed to open the browser: {}", error))?;
+            return Ok(());
+        }
+
+        Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|error| format!("failed to open the browser: {}", error))?;
+        Ok(())
+    }
+
+    fn read_openrouter_callback_code(
+        stream: &mut std::net::TcpStream,
+        expected_path: &str,
+    ) -> Result<String, String> {
+        let request_path = {
+            let mut reader = BufReader::new(stream);
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .map_err(|error| format!("failed to read OpenRouter callback request: {}", error))?;
+
+            let mut header = String::new();
+            loop {
+                header.clear();
+                let bytes_read = reader
+                    .read_line(&mut header)
+                    .map_err(|error| format!("failed to read OpenRouter callback headers: {}", error))?;
+                if bytes_read == 0 || header == "\r\n" {
+                    break;
+                }
+            }
+
+            request_line
+                .split_whitespace()
+                .nth(1)
+                .ok_or_else(|| String::from("OpenRouter callback request did not include a path"))?
+                .to_string()
+        };
+
+            let request_path_only = request_path.split('?').next().unwrap_or(&request_path);
+            if request_path_only != expected_path {
+                return Err(String::from("OpenRouter callback arrived on an unexpected path."));
+            }
+
+        Self::query_parameter(&request_path, "code")
+            .ok_or_else(|| String::from("OpenRouter callback did not include an authorization code"))
+    }
+
+    fn write_openrouter_callback_response(
+        stream: &mut std::net::TcpStream,
+        message: &str,
+    ) -> Result<(), String> {
+        let body = format!(
+            "<html><body style=\"font-family: sans-serif; padding: 2rem;\"><h1>OpenRouter login complete</h1><p>{}</p></body></html>",
+            message
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .map_err(|error| format!("failed to write OpenRouter callback response: {}", error))
+    }
+
+    fn exchange_openrouter_code_for_key(code: &str, code_verifier: &str) -> Result<String, String> {
+        let payload = serde_json::json!({
+            "code": code,
+            "code_verifier": code_verifier,
+            "code_challenge_method": "S256",
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|error| format!("failed to build HTTP client: {}", error))?;
+
+        let response = client
+            .post("https://openrouter.ai/api/v1/auth/keys")
+            .json(&payload)
+            .send()
+            .map_err(|error| format!("failed to exchange the OpenRouter authorization code: {}", error))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|error| format!("failed to read OpenRouter auth response: {}", error))?;
+
+        if !status.is_success() {
+            return Err(format!("{}: {}", status, body));
+        }
+
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|error| format!("failed to parse OpenRouter auth response: {}", error))?;
+
+        value
+            .get("key")
+            .and_then(|key| key.as_str())
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| String::from("OpenRouter auth response did not include an API key"))
+    }
+
+    fn query_parameter(path: &str, name: &str) -> Option<String> {
+        let query = path.split_once('?')?.1;
+
+        for pair in query.split('&') {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            if key == name {
+                return urlencoding::decode(value).ok().map(|decoded| decoded.into_owned());
+            }
+        }
+
+        None
+    }
+
+    fn parse_chat_markdown_spans_owned(text: &str) -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        let mut remaining = text;
+
+        while !remaining.is_empty() {
+            if let Some(pos) = remaining.find("**") {
+                if pos > 0 {
+                    spans.push(Span::raw(remaining[..pos].to_string()));
+                }
+                remaining = &remaining[pos + 2..];
+                if let Some(end_pos) = remaining.find("**") {
+                    spans.push(Span::styled(
+                        remaining[..end_pos].to_string(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ));
+                    remaining = &remaining[end_pos + 2..];
+                } else {
+                    spans.push(Span::raw("**"));
+                    spans.push(Span::raw(remaining.to_string()));
+                    break;
+                }
+            } else if let Some(pos) = remaining.find('*') {
+                if pos > 0 {
+                    spans.push(Span::raw(remaining[..pos].to_string()));
+                }
+                remaining = &remaining[pos + 1..];
+                if let Some(end_pos) = remaining.find('*') {
+                    spans.push(Span::styled(
+                        remaining[..end_pos].to_string(),
+                        Style::default().add_modifier(Modifier::ITALIC),
+                    ));
+                    remaining = &remaining[end_pos + 1..];
+                } else {
+                    spans.push(Span::raw("*"));
+                    spans.push(Span::raw(remaining.to_string()));
+                    break;
+                }
+            } else if let Some(pos) = remaining.find('`') {
+                if pos > 0 {
+                    spans.push(Span::raw(remaining[..pos].to_string()));
+                }
+                remaining = &remaining[pos + 1..];
+                if let Some(end_pos) = remaining.find('`') {
+                    spans.push(Span::styled(
+                        remaining[..end_pos].to_string(),
+                        Style::default().fg(CHAT_ACCENT_SOFT),
+                    ));
+                    remaining = &remaining[end_pos + 1..];
+                } else {
+                    spans.push(Span::raw("`"));
+                    spans.push(Span::raw(remaining.to_string()));
+                    break;
+                }
+            } else {
+                spans.push(Span::raw(remaining.to_string()));
+                break;
+            }
+        }
+
+        if spans.is_empty() {
+            spans.push(Span::raw(text.to_string()));
+        }
+
+        spans
+    }
+
+    fn render_chat_markdown_line_owned(line: &str) -> Line<'static> {
+        let mut spans = Vec::new();
+        let mut remaining = line;
+        let trimmed = line.trim_start();
+        let indent_len = line.len() - trimmed.len();
+
+        if trimmed.starts_with("# ") {
+            spans.push(Span::styled(
+                line[..indent_len + 2].to_string(),
+                Style::default().fg(CHAT_ACCENT_SOFT),
+            ));
+            spans.push(Span::styled(
+                trimmed[2..].to_string(),
+                Style::default().fg(CHAT_TEXT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ));
+            return Line::from(spans);
+        } else if trimmed.starts_with("## ") {
+            spans.push(Span::styled(
+                line[..indent_len + 3].to_string(),
+                Style::default().fg(CHAT_MUTED),
+            ));
+            spans.push(Span::styled(
+                trimmed[3..].to_string(),
+                Style::default().fg(CHAT_TEXT).add_modifier(Modifier::BOLD),
+            ));
+            return Line::from(spans);
+        } else if trimmed.starts_with("### ") {
+            spans.push(Span::styled(
+                line[..indent_len + 4].to_string(),
+                Style::default().fg(CHAT_MUTED),
+            ));
+            spans.push(Span::styled(
+                trimmed[4..].to_string(),
+                Style::default().fg(CHAT_TEXT).add_modifier(Modifier::BOLD | Modifier::ITALIC),
+            ));
+            return Line::from(spans);
+        } else if let Some(stripped) = trimmed.strip_prefix("- ") {
+            if indent_len > 0 {
+                spans.push(Span::raw(line[..indent_len].to_string()));
+            }
+            spans.push(Span::styled("• ", Style::default().fg(CHAT_ACCENT)));
+            remaining = stripped;
+        } else if let Some(stripped) = trimmed.strip_prefix("* ") {
+            if indent_len > 0 {
+                spans.push(Span::raw(line[..indent_len].to_string()));
+            }
+            spans.push(Span::styled("• ", Style::default().fg(CHAT_ACCENT)));
+            remaining = stripped;
+        } else if let Some(pos) = trimmed.find(". ") {
+            if pos > 0 && trimmed[..pos].chars().all(|c| c.is_ascii_digit()) {
+                if indent_len > 0 {
+                    spans.push(Span::raw(line[..indent_len].to_string()));
+                }
+                spans.push(Span::styled(trimmed[..=pos + 1].to_string(), Style::default().fg(CHAT_ACCENT)));
+                remaining = &trimmed[pos + 2..];
+            }
+        }
+
+        spans.extend(Self::parse_chat_markdown_spans_owned(remaining));
+        Line::from(spans)
+    }
+
+    fn start_chat_turn(&mut self, query: String) -> bool {
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            return false;
+        }
+
+        if self.chat_stream_rx.is_some() {
+            self.last_action = String::from("OpenRouter is still answering the previous message.");
+            return false;
+        }
+
+        let Some(api_key) = self.openrouter_api_key.clone() else {
+            self.push_chat_message("user", query.clone());
+            self.push_chat_message("assistant", String::from("OpenRouter is not connected. Run /login <api-key> first."));
+            self.thinking = false;
+            self.thinking_ticks_remaining = 0;
+            self.streaming_active = false;
+            self.last_action = String::from("OpenRouter login required.");
+            return true;
+        };
+
+        self.push_chat_message("user", query.clone());
+
+        let conversation = self.openrouter_conversation();
+
+        self.push_chat_message("assistant", String::new());
+
+        self.panel_mode = PanelMode::AiChat;
+        self.thinking = true;
+        self.thinking_ticks_remaining = 20;
+        self.chat_scroll_offset = 0;
+        self.streaming_buffer.clear();
+        self.streaming_active = true;
+        self.last_action = format!("AI Chat: {}", query);
+
+        let (sender, receiver) = mpsc::channel();
+        self.chat_stream_rx = Some(receiver);
+
+        thread::spawn(move || {
+            if let Err(error) = Self::send_openrouter_chat_streaming(&api_key, &conversation, sender.clone()) {
+                let _ = sender.send(ChatStreamUpdate::Error(error));
+            }
+        });
+
+        true
+    }
+
+    fn openrouter_conversation(&self) -> Vec<(String, String)> {
+        let mut conversation = Vec::new();
+        conversation.push((
+            String::from("system"),
+            String::from("You are Aleph, a concise terminal assistant. Keep answers practical and grounded. If the user asks for detail, expand, but default to short, useful responses."),
+        ));
+
+        let mut recent_messages: Vec<_> = self.chat_messages.iter().rev().take(12).cloned().collect();
+        recent_messages.reverse();
+
+        for message in recent_messages {
+            if message.content.trim().is_empty() {
+                continue;
+            }
+            conversation.push((message.role, message.content));
+        }
+
+        conversation
+    }
+
+    fn rebuild_chat_render_cache(&mut self) {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        if self.chat_messages.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                if self.is_openrouter_connected() {
+                    "Welcome to Aleph AI chat. Type a message below to start."
+                } else {
+                    "Welcome to Aleph AI chat. Run /login openrouter to sign in in your browser."
+                },
+                Style::default().fg(CHAT_MUTED),
+            )]));
+            self.chat_render_cache = lines;
+            self.chat_cache_stable_len = self.chat_render_cache.len();
+            return;
+        }
+
+        let msg_count = self.chat_messages.len();
+        for (index, message) in self.chat_messages.iter().enumerate() {
+            if index > 0 {
+                lines.push(Line::from(""));
+            }
+
+            let is_user = message.role == "user";
+            let prefix = if is_user { "You" } else { "Aleph" };
+            let color = if is_user { CHAT_ACCENT_SOFT } else { CHAT_ACCENT };
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} ", prefix),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("({})", message.timestamp),
+                    Style::default().fg(CHAT_MUTED),
+                ),
+            ]));
+
+            // Mark stable length right after the last message's header
+            if index == msg_count - 1 {
+                self.chat_cache_stable_len = lines.len();
+            }
+
+            if message.content.trim().is_empty() {
+                continue;
+            }
+
+            for content_line in message.content.lines() {
+                if content_line.is_empty() {
+                    lines.push(Line::from(""));
+                } else {
+                    lines.push(Self::render_chat_markdown_line_owned(content_line));
+                }
+            }
+        }
+
+        self.chat_render_cache = lines;
+    }
+
+    /// Fast incremental rebuild: only re-render the last message's content.
+    /// Used during streaming so we don't re-parse every previous message's
+    /// markdown on each token from the model.
+    fn rebuild_chat_render_cache_streaming(&mut self) {
+        self.chat_render_cache.truncate(self.chat_cache_stable_len);
+
+        if let Some(last_msg) = self.chat_messages.last() {
+            if !last_msg.content.trim().is_empty() {
+                for content_line in last_msg.content.lines() {
+                    if content_line.is_empty() {
+                        self.chat_render_cache.push(Line::from(""));
+                    } else {
+                        self.chat_render_cache.push(Self::render_chat_markdown_line_owned(content_line));
+                    }
+                }
+            }
+        }
+    }
+
+    fn send_openrouter_chat_streaming(
+        api_key: &str,
+        conversation: &[(String, String)],
+        sender: Sender<ChatStreamUpdate>,
+    ) -> Result<(), String> {
+        let messages: Vec<_> = conversation
+            .iter()
+            .map(|(role, content)| serde_json::json!({
+                "role": role,
+                "content": content,
+            }))
+            .collect();
+
+        let payload = serde_json::json!({
+            "model": OPENROUTER_CHAT_MODEL,
+            "messages": messages,
+            "temperature": 0.7,
+            "stream": true,
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(1800))
+            .build()
+            .map_err(|error| format!("failed to build HTTP client: {}", error))?;
+
+        let response = client
+            .post("https://openrouter.ai/api/v1/chat/completions")
+            .bearer_auth(api_key)
+            .header("Accept", "text/event-stream")
+            .json(&payload)
+            .send()
+            .map_err(|error| format!("request failed: {}", error))?;
+
+        let status = response.status();
+
+        if !status.is_success() {
+            let body = response
+                .text()
+                .map_err(|error| format!("failed to read response: {}", error))?;
+            return Err(format!("{}: {}", status, body));
+        }
+
+        let mut reader = BufReader::with_capacity(256, response);
+        let mut line = String::new();
+        let mut event_data = String::new();
+
+        loop {
+            line.clear();
+            let bytes_read = reader
+                .read_line(&mut line)
+                .map_err(|error| format!("failed to read OpenRouter stream: {}", error))?;
+
+            if bytes_read == 0 {
+                break;
+            }
+
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                if !event_data.is_empty() && Self::handle_openrouter_stream_event(&event_data, &sender)? {
+                    return Ok(());
+                }
+                event_data.clear();
+                continue;
+            }
+
+            if trimmed.starts_with(':') {
+                continue;
+            }
+
+            if let Some(payload) = trimmed.strip_prefix("data:") {
+                if !event_data.is_empty() {
+                    event_data.push('\n');
+                }
+                event_data.push_str(payload.strip_prefix(' ').unwrap_or(payload));
+            }
+        }
+
+        if !event_data.is_empty() {
+            let _ = Self::handle_openrouter_stream_event(&event_data, &sender)?;
+        }
+
+        let _ = sender.send(ChatStreamUpdate::Done);
+        Ok(())
+    }
+
+    fn handle_openrouter_stream_event(
+        event_data: &str,
+        sender: &Sender<ChatStreamUpdate>,
+    ) -> Result<bool, String> {
+        let trimmed = event_data.trim();
+        if trimmed.is_empty() {
+            return Ok(false);
+        }
+
+        if trimmed == "[DONE]" {
+            let _ = sender.send(ChatStreamUpdate::Done);
+            return Ok(true);
+        }
+
+        let value: serde_json::Value = serde_json::from_str(trimmed)
+            .map_err(|error| format!("failed to parse OpenRouter stream chunk: {}", error))?;
+
+        if let Some(error) = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(|message| message.as_str())
+        {
+            let _ = sender.send(ChatStreamUpdate::Error(error.to_string()));
+            return Ok(true);
+        }
+
+        if let Some(choice) = value.get("choices").and_then(|choices| choices.get(0)) {
+            if let Some(content) = choice
+                .get("delta")
+                .and_then(|delta| delta.get("content"))
+                .and_then(|content| content.as_str())
+            {
+                if !content.is_empty() {
+                    let _ = sender.send(ChatStreamUpdate::Delta(content.to_string()));
+                }
+            }
+
+            if let Some(finish_reason) = choice.get("finish_reason").and_then(|reason| reason.as_str()) {
+                if finish_reason == "error" {
+                    let message = value
+                        .get("error")
+                        .and_then(|error| error.get("message"))
+                        .and_then(|message| message.as_str())
+                        .unwrap_or("OpenRouter reported a streaming error");
+                    let _ = sender.send(ChatStreamUpdate::Error(message.to_string()));
+                } else {
+                    let _ = sender.send(ChatStreamUpdate::Done);
+                }
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    pub fn is_openrouter_connected(&self) -> bool {
+        self.connected && self.openrouter_api_key.is_some()
+    }
+
+    fn load_openrouter_api_key() -> Option<String> {
+        if let Ok(entry) = Self::openrouter_key_entry() {
+            if let Ok(password) = entry.get_password() {
+                let trimmed = password.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+        }
+
+        std::env::var("OPENROUTER_API_KEY")
+            .ok()
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+    }
+
+    fn store_openrouter_api_key(&self, api_key: &str) -> Result<(), String> {
+        let entry = Self::openrouter_key_entry()?;
+        entry
+            .set_password(api_key.trim())
+            .map_err(|error| format!("failed to save OpenRouter login: {}", error))
+    }
+
+    fn clear_openrouter_api_key(&self) {
+        if let Ok(entry) = Self::openrouter_key_entry() {
+            let _ = entry.delete_credential();
+        }
+    }
+
+    fn openrouter_key_entry() -> Result<Entry, String> {
+        Entry::new(OPENROUTER_SERVICE, OPENROUTER_ACCOUNT)
+            .map_err(|error| format!("failed to open OpenRouter credential store: {}", error))
     }
 
     fn open_note_editor(&mut self, index: usize) {
@@ -2430,15 +3477,7 @@ impl App {
         match key_event.code {
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
                 if !self.ai_input_buffer.trim().is_empty() {
-                    self.chat_messages.push(ChatMessage {
-                        role: String::from("user"),
-                        content: self.ai_input_buffer.clone(),
-                        timestamp: self.uptime(),
-                    });
-                    self.thinking = true;
-                    self.thinking_ticks_remaining = 15;
-                    self.ai_input_buffer.clear();
-                    self.ai_input_cursor = 0;
+                    self.ghost_submit_instruction();
                 }
             }
             KeyCode::Backspace if key_event.kind == KeyEventKind::Press => {
@@ -2505,6 +3544,7 @@ impl App {
         self.thinking_ticks_remaining = 0;
         self.ai_input_buffer.clear();
         self.ai_input_cursor = 0;
+        self.ghost_result = None;
         self.last_action = String::from("Summoned the Ghost.");
     }
 
@@ -2513,6 +3553,9 @@ impl App {
         self.ai_overlay_pulse_ticks = 0;
         self.thinking = false;
         self.thinking_ticks_remaining = 0;
+        self.ghost_result = None;
+        self.ghost_streaming = false;
+        self.ghost_stream_rx = None;
     }
 
     fn toggle_ai_overlay(&mut self) {
@@ -2520,6 +3563,180 @@ impl App {
             self.close_ai_overlay();
         } else {
             self.open_ai_overlay();
+        }
+    }
+
+    fn open_login_picker(&mut self) {
+        self.panel_mode = PanelMode::LoginPicker;
+        self.panel_title = String::from("Sign in");
+        self.panel_lines = vec![String::from("picker")];
+        self.login_picker_selected = 0;
+        self.last_action = String::from("Choose an AI provider.");
+    }
+
+    fn handle_login_picker_key(&mut self, key_event: KeyEvent) {
+        if key_event.kind != KeyEventKind::Press {
+            return;
+        }
+        match key_event.code {
+            KeyCode::Esc => {
+                self.panel_mode = PanelMode::Commands;
+                self.panel_title = String::from("Commands");
+                self.panel_lines.clear();
+                self.last_action = String::from("Cancelled login.");
+            }
+            KeyCode::Up => {
+                if self.login_picker_selected > 0 {
+                    self.login_picker_selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if self.login_picker_selected < 1 {
+                    self.login_picker_selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                match self.login_picker_selected {
+                    0 => {
+                        // OpenRouter: start browser login
+                        self.panel_mode = PanelMode::Commands;
+                        if !self.start_openrouter_browser_login() {
+                            self.set_result_panel(
+                                "OpenRouter login failed",
+                                vec![String::from("Unable to start the browser-based OpenRouter login flow.")],
+                            );
+                            self.last_action = String::from("OpenRouter login failed.");
+                        }
+                    }
+                    1 => {
+                        // Strix: placeholder for now
+                        self.panel_mode = PanelMode::Commands;
+                        self.set_result_panel(
+                            "Strix login",
+                            vec![
+                                String::from("Strix authentication is not yet available."),
+                                String::from("Use /login strix <token> once you have a gateway token."),
+                            ],
+                        );
+                        self.last_action = String::from("Strix login not yet available.");
+                    }
+                    _ => {}
+                }
+            }
+            KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.request_quit();
+            }
+            _ => {}
+        }
+    }
+
+    fn ghost_submit_instruction(&mut self) {
+        let instruction = self.ai_input_buffer.trim().to_string();
+        if instruction.is_empty() {
+            return;
+        }
+
+        let Some(api_key) = self.openrouter_api_key.clone() else {
+            self.ghost_result = Some(String::from("Not connected. Run /login first."));
+            return;
+        };
+
+        let editor_content = self.editor_buffer.clone();
+        self.ghost_streaming = true;
+        self.ghost_result = None;
+        self.thinking = true;
+        self.thinking_ticks_remaining = 20;
+
+        // Build a conversation for the ghost editor
+        let system_prompt = String::from(
+            "You are a writing assistant embedded in a note editor. The user will give you the current note content and an instruction. \
+             Respond ONLY with the complete updated note content — no explanations, no markdown code fences, no preamble. \
+             If the user asks a question about the text, answer concisely in plain text. \
+             If the user asks to edit, rewrite, or add to the text, return the full updated text."
+        );
+
+        let user_msg = format!(
+            "Current note content:\n---\n{}\n---\n\nInstruction: {}",
+            editor_content, instruction
+        );
+
+        let conversation = vec![
+            (String::from("system"), system_prompt),
+            (String::from("user"), user_msg),
+        ];
+
+        let (sender, receiver) = mpsc::channel();
+        self.ghost_stream_rx = Some(receiver);
+
+        thread::spawn(move || {
+            if let Err(error) = Self::send_openrouter_chat_streaming(&api_key, &conversation, sender.clone()) {
+                let _ = sender.send(ChatStreamUpdate::Error(error));
+            }
+        });
+
+        self.ai_input_buffer.clear();
+        self.ai_input_cursor = 0;
+    }
+
+    pub fn process_ghost_stream(&mut self) {
+        let mut finished = false;
+        while !finished {
+            let result = match self.ghost_stream_rx.as_ref() {
+                Some(receiver) => receiver.try_recv(),
+                None => break,
+            };
+
+            match result {
+                Ok(ChatStreamUpdate::Delta(chunk)) => {
+                    if self.ghost_result.is_none() {
+                        self.ghost_result = Some(String::new());
+                    }
+                    if let Some(ref mut buf) = self.ghost_result {
+                        buf.push_str(&chunk);
+                    }
+                    self.thinking = true;
+                }
+                Ok(ChatStreamUpdate::Done) => {
+                    self.ghost_streaming = false;
+                    self.thinking = false;
+                    self.thinking_ticks_remaining = 0;
+                    self.ghost_stream_rx = None;
+
+                    // Apply the result to the editor buffer
+                    if let Some(ref result) = self.ghost_result {
+                        let result = result.trim().to_string();
+                        if !result.is_empty() {
+                            self.save_undo_state();
+                            self.editor_buffer = result;
+                            self.editor_cursor = self.editor_buffer.len().min(self.editor_cursor);
+                            self.last_action = String::from("Ghost applied edits.");
+                        }
+                    }
+                    self.ghost_result = None;
+                    finished = true;
+                }
+                Ok(ChatStreamUpdate::Error(error)) => {
+                    self.ghost_result = Some(format!("Error: {}", error));
+                    self.ghost_streaming = false;
+                    self.thinking = false;
+                    self.thinking_ticks_remaining = 0;
+                    self.ghost_stream_rx = None;
+                    self.last_action = String::from("Ghost request failed.");
+                    finished = true;
+                }
+                Err(TryRecvError::Empty) => {
+                    self.thinking = true;
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.ghost_result = Some(String::from("Ghost disconnected."));
+                    self.ghost_streaming = false;
+                    self.thinking = false;
+                    self.thinking_ticks_remaining = 0;
+                    self.ghost_stream_rx = None;
+                    finished = true;
+                }
+            }
         }
     }
 }
@@ -2600,7 +3817,7 @@ mod tests {
         }
         app.handle_key(press(KeyCode::Enter));
 
-        assert_eq!(app.last_action(), "Refreshed status.");
+        assert_eq!(app.last_action(), "Refreshed OpenRouter status.");
         assert_eq!(app.panel_title(), "Status");
     }
 

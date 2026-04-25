@@ -150,7 +150,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Paragraph::new(Line::from(vec![
             Span::styled("/login", Style::default().fg(TEXT)),
             Span::raw(" "),
-            Span::styled("/obsidian pair", Style::default().fg(MUTED)),
+            Span::styled("/ask", Style::default().fg(MUTED)),
         ]))
         .style(Style::default().fg(MUTED))
         .alignment(Alignment::Right)
@@ -158,7 +158,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     frame.render_widget(command_hint, input_row[1]);
 
     match app.panel_mode() {
-        PanelMode::Commands => render_commands_panel(frame, app, root[4]),
+        PanelMode::Commands | PanelMode::LoginPicker => render_commands_panel(frame, app, root[4]),
         PanelMode::NoteEditor => render_note_editor_panel(frame, app, root[4]),
         PanelMode::FullEditor | PanelMode::AiChat => {},
     }
@@ -629,18 +629,50 @@ fn render_ai_overlay(frame: &mut Frame, app: &App, area: Rect, cursor_row: u16, 
 
     let mut lines: Vec<Line> = Vec::new();
 
-    if messages.is_empty() {
+    if messages.is_empty() && !app.is_ghost_streaming() && app.ghost_result().is_none() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("  Ctrl+Space", Style::default().fg(ACCENT)),
-            Span::raw(" summon  "),
-            Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
-            Span::raw(" dismiss"),
+            Span::styled("  Type an instruction for the Ghost", Style::default().fg(MUTED)),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("  Click anywhere", Style::default().fg(MUTED)),
-            Span::raw(" to banish the overlay."),
+            Span::styled("  e.g. ", Style::default().fg(MUTED)),
+            Span::styled("\"make it more concise\"", Style::default().fg(ACCENT_SOFT)),
         ]));
+        lines.push(Line::from(vec![
+            Span::styled("  e.g. ", Style::default().fg(MUTED)),
+            Span::styled("\"add a summary section\"", Style::default().fg(ACCENT_SOFT)),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  Esc", Style::default().fg(ACCENT_SOFT)),
+            Span::styled(" dismiss", Style::default().fg(MUTED)),
+        ]));
+    } else if app.is_ghost_streaming() {
+        let frame_char = GHOST_FRAMES[(app.tick() as usize) % GHOST_FRAMES.len()];
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {} Ghost is thinking...", frame_char),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        if let Some(partial) = app.ghost_result() {
+            let preview: String = partial.chars().take(120).collect();
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {}…", preview), Style::default().fg(MUTED)),
+            ]));
+        }
+    } else if let Some(result) = app.ghost_result() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  Ghost:", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        ]));
+        for line in result.lines().take(8) {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {}", line), Style::default().fg(TEXT)),
+            ]));
+        }
     } else {
         // If extended, show more messages, otherwise show latest 2
         let take_count = if is_extended { 6 } else { 2 };
@@ -731,6 +763,11 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     if has_status && panel_title == "Strix sign-in" {
         render_strix_sign_in_panel(frame, app, area);
+        return;
+    }
+
+    if app.is_login_picker() {
+        render_login_picker_panel(frame, app, area);
         return;
     }
 
@@ -909,35 +946,292 @@ fn render_connection_panel(
     frame.render_widget(footer, sections[2]);
 }
 
-fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
-    render_connection_panel(
-        frame,
-        area,
-        app.panel_title(),
-        ACCENT,
-        vec![
-            Line::from(vec![Span::styled(
-                "Authenticate with Strix",
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(vec![Span::styled(
-                "Use a personal access token or device-code login. The real flow will live in the gateway layer.",
+fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            app.panel_title(),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER))
+        .style(Style::default().bg(PANEL));
+
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Header
+            Constraint::Length(4), // Picker rows
+            Constraint::Min(4),    // Status/Help
+            Constraint::Length(1), // Footer
+        ])
+        .split(inner);
+
+    // Header
+    let header = Paragraph::new(vec![
+        Line::from(vec![Span::styled(
+            "Choose your AI provider",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            "Select how you want Aleph to connect to AI models.",
+            Style::default().fg(MUTED),
+        )]),
+    ])
+    .wrap(Wrap { trim: false })
+    .style(Style::default().fg(TEXT));
+    frame.render_widget(header, sections[0]);
+
+    // Options
+    let is_openrouter_selected = app.login_picker_selected() == 0;
+    let is_strix_selected = app.login_picker_selected() == 1;
+
+    let selector_rows = vec![
+        Row::new(vec![
+            Cell::from(Span::styled(
+                if is_openrouter_selected { "▶" } else { " " },
+                Style::default().fg(if is_openrouter_selected { ACCENT } else { MUTED }),
+            )),
+            Cell::from(Span::styled(
+                "OpenRouter",
+                Style::default().fg(if is_openrouter_selected { TEXT } else { MUTED }),
+            )),
+            Cell::from(Span::styled(
+                "Browser-based login (Easy, recommended)",
                 Style::default().fg(MUTED),
-            )]),
-            Line::from(vec![Span::styled(
-                "Press Enter to continue the sign-in flow, or Esc to close this panel.",
+            )),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled(
+                if is_strix_selected { "▶" } else { " " },
+                Style::default().fg(if is_strix_selected { ACCENT } else { MUTED }),
+            )),
+            Cell::from(Span::styled(
+                "Strix Gateway",
+                Style::default().fg(if is_strix_selected { TEXT } else { MUTED }),
+            )),
+            Cell::from(Span::styled(
+                "Local/Enterprise gateway (Coming soon)",
                 Style::default().fg(MUTED),
-            )]),
-        ],
-        vec![
-            ("Status", "Disconnected"),
-            ("Method", "Device code or token"),
-            ("Scope", "notes, memory, canvas, darwin"),
-            ("Storage", "OS keychain or encrypted config"),
-        ],
-        "Enter",
-        "continue",
+            )),
+        ]),
+    ];
+
+    let selector_table = Table::new(
+        selector_rows,
+        [Constraint::Length(3), Constraint::Length(15), Constraint::Min(0)],
+    )
+    .column_spacing(1)
+    .style(Style::default().fg(TEXT));
+    
+    // Highlight the selected row
+    let mut table_state = ratatui::widgets::TableState::default();
+    table_state.select(Some(app.login_picker_selected()));
+    frame.render_stateful_widget(
+        selector_table.row_highlight_style(Style::default().bg(BORDER).fg(TEXT)),
+        sections[1],
+        &mut table_state
     );
+
+    // Status / Help block
+    let status_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(BORDER));
+    let status_inner = status_block.inner(sections[2]);
+    frame.render_widget(status_block, sections[2]);
+
+    let mut status_lines = Vec::new();
+    
+    if is_openrouter_selected {
+        if app.is_openrouter_login_pending() {
+            let pulse = crate::app::THINKING_FRAMES[(app.tick() as usize) % crate::app::THINKING_FRAMES.len()];
+            status_lines.push(Line::from(vec![Span::styled(
+                format!("{} Waiting for browser login...", pulse),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )]));
+            status_lines.push(Line::from(vec![Span::styled(
+                "Please complete the sign-in process in your browser.",
+                Style::default().fg(MUTED),
+            )]));
+            status_lines.push(Line::from(vec![Span::styled(
+                "Aleph will automatically detect when you finish.",
+                Style::default().fg(MUTED),
+            )]));
+        } else {
+            status_lines.push(Line::from(vec![Span::styled(
+                "OpenRouter provides access to models like Claude 3.5, GPT-4o, and Llama 3.",
+                Style::default().fg(MUTED),
+            )]));
+            status_lines.push(Line::from(""));
+            status_lines.push(Line::from(vec![Span::styled(
+                "Press Enter to open your browser and authenticate.",
+                Style::default().fg(TEXT),
+            )]));
+        }
+    } else {
+        status_lines.push(Line::from(vec![Span::styled(
+            "Strix is a unified gateway for private/local models.",
+            Style::default().fg(MUTED),
+        )]));
+        status_lines.push(Line::from(vec![Span::styled(
+            "Browser-based login for Strix is currently disabled.",
+            Style::default().fg(MUTED),
+        )]));
+        status_lines.push(Line::from(""));
+        status_lines.push(Line::from(vec![Span::styled(
+            "Use '/login strix <token>' to manually authenticate.",
+            Style::default().fg(TEXT),
+        )]));
+    }
+
+    let status_para = Paragraph::new(status_lines)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(TEXT));
+    frame.render_widget(status_para, status_inner);
+
+    // Footer
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("↑/↓", Style::default().fg(ACCENT)),
+        Span::raw(" select · "),
+        Span::styled("Enter", Style::default().fg(ACCENT)),
+        Span::raw(" confirm · "),
+        Span::styled("Esc", Style::default().fg(MUTED)),
+        Span::raw(" close"),
+    ]))
+    .alignment(Alignment::Right)
+    .style(Style::default().fg(MUTED));
+    frame.render_widget(footer, sections[3]);
+}
+
+fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            app.panel_title(),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER))
+        .style(Style::default().bg(PANEL));
+
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    // Layout: intro + provider selector + logs + footer
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Header
+            Constraint::Length(4), // Provider selector
+            Constraint::Min(4),    // Logs area
+            Constraint::Length(1), // Footer
+        ])
+        .split(inner);
+
+    // Header
+    let header = Paragraph::new(vec![
+        Line::from(vec![Span::styled(
+            "Choose your AI provider",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            "Select OpenRouter for external AI or Strix for internal gateway",
+            Style::default().fg(MUTED),
+        )]),
+    ])
+    .wrap(Wrap { trim: false })
+    .style(Style::default().fg(TEXT));
+    frame.render_widget(header, sections[0]);
+
+    // Provider selector - minimal style like Obsidian pair
+    let provider = app.ai_provider();
+    let is_openrouter = matches!(provider, crate::app::AiProvider::OpenRouter);
+    let is_strix = matches!(provider, crate::app::AiProvider::Strix);
+
+    let selector_rows = vec![
+        Row::new(vec![
+            Cell::from(Span::styled(
+                if is_openrouter { "●" } else { "○" },
+                Style::default().fg(if is_openrouter { ACCENT } else { MUTED }),
+            )),
+            Cell::from(Span::styled(
+                "OpenRouter",
+                Style::default().fg(if is_openrouter { TEXT } else { MUTED }),
+            )),
+            Cell::from(Span::styled(
+                "External AI via API key",
+                Style::default().fg(MUTED),
+            )),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled(
+                if is_strix { "●" } else { "○" },
+                Style::default().fg(if is_strix { ACCENT } else { MUTED }),
+            )),
+            Cell::from(Span::styled(
+                "Strix",
+                Style::default().fg(if is_strix { TEXT } else { MUTED }),
+            )),
+            Cell::from(Span::styled(
+                "Internal gateway (mock)",
+                Style::default().fg(MUTED),
+            )),
+        ]),
+    ];
+
+    let selector_table = Table::new(
+        selector_rows,
+        [Constraint::Length(3), Constraint::Length(14), Constraint::Min(0)],
+    )
+    .column_spacing(1)
+    .style(Style::default().fg(TEXT));
+    frame.render_widget(selector_table, sections[1]);
+
+    // Logs area - scrollable log display
+    let logs = app.strix_logs();
+    let mut log_lines: Vec<Line> = Vec::new();
+
+    if logs.is_empty() {
+        log_lines.push(Line::from(vec![Span::styled(
+            "No activity yet. Run /login to authenticate.",
+            Style::default().fg(MUTED),
+        )]));
+    } else {
+        for log in logs.iter().rev().take(20).collect::<Vec<_>>().into_iter().rev() {
+            log_lines.push(Line::from(vec![Span::styled(
+                log,
+                Style::default().fg(TEXT),
+            )]));
+        }
+    }
+
+    let logs_block = Block::default()
+        .title(Span::styled("Activity Log", Style::default().fg(ACCENT_SOFT)))
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(BORDER));
+    let logs_inner = logs_block.inner(sections[2]);
+    frame.render_widget(logs_block, sections[2]);
+
+    let logs_para = Paragraph::new(log_lines)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(TEXT));
+    frame.render_widget(logs_para, logs_inner);
+
+    // Footer
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("/login openrouter <key>", Style::default().fg(ACCENT)),
+        Span::raw(" · "),
+        Span::styled("/login strix <token>", Style::default().fg(ACCENT)),
+        Span::raw(" · "),
+        Span::styled("Esc", Style::default().fg(MUTED)),
+        Span::raw(" close"),
+    ]))
+    .alignment(Alignment::Right)
+    .style(Style::default().fg(MUTED));
+    frame.render_widget(footer, sections[3]);
 }
 
 fn render_obsidian_pairing_panel(frame: &mut Frame, app: &App, area: Rect) {
@@ -1161,59 +1455,36 @@ fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(MUTED)
     };
 
-    let title = if app.is_thinking() {
+    let title = if app.is_streaming() {
+        format!("Aleph Chat {} streaming...", app.thinking_frame())
+    } else if app.is_thinking() {
         format!("Aleph {} focusing...", app.thinking_frame())
+    } else if app.is_openrouter_connected() {
+        String::from("Aleph Chat · OpenRouter connected")
     } else {
-        String::from("Aleph Chat")
+        String::from("Aleph Chat · OpenRouter offline")
     };
 
     let top_meta = Paragraph::new(Line::from(vec![Span::styled(title, meta_style)]))
         .alignment(Alignment::Left);
     frame.render_widget(top_meta, meta_area);
 
-    let messages = app.chat_messages();
-    let mut lines: Vec<Line> = Vec::new();
-
-    for msg in messages.iter() {
-        let is_user = msg.role == "user";
-        let prefix = if is_user { "You" } else { "Aleph" };
-        let color = if is_user { ACCENT_SOFT } else { ACCENT };
-
-        if !lines.is_empty() {
-            lines.push(Line::from(""));
-        }
-
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{} ", prefix),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("({})", msg.timestamp),
-                Style::default().fg(MUTED),
-            ),
-        ]));
-
-        for content_line in msg.content.lines() {
-            if content_line.is_empty() {
-                lines.push(Line::from(""));
-            } else {
-                lines.push(render_markdown_line(content_line));
-            }
-        }
-    }
-
-    if messages.is_empty() {
+    let mut lines: Vec<Line<'static>> = app.chat_render_lines().to_vec();
+    if app.is_streaming() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("Welcome to Aleph AI chat! Type a message below to start.", Style::default().fg(MUTED)),
+            Span::styled(
+                format!("{} typing...", app.thinking_frame()),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
         ]));
     }
 
     let wrap_setting = Wrap { trim: false };
-    let scroll_y = lines
-        .len()
-        .saturating_sub(chat_area.height as usize)
+    let visible_lines = chat_area.height as usize;
+    let max_scroll = lines.len().saturating_sub(visible_lines);
+    let scroll_y = max_scroll
+        .saturating_sub(app.chat_scroll_offset().min(max_scroll))
         .min(u16::MAX as usize) as u16;
 
     let messages_widget = Paragraph::new(lines)
@@ -1237,6 +1508,8 @@ fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let hints_spans = vec![
         Span::styled("Enter", Style::default().fg(ACCENT)),
         Span::raw(" send · "),
+        Span::styled("PgUp/PgDn", Style::default().fg(ACCENT_SOFT)),
+        Span::raw(" scroll · "),
         Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
         Span::raw(" exit · "),
         Span::styled("Ctrl+C", Style::default().fg(ACCENT)),

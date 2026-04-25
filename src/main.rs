@@ -53,7 +53,7 @@ impl Drop for TerminalSession {
 
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     let mut app = App::new();
-    let tick_rate = Duration::from_millis(200);
+    let tick_rate = Duration::from_millis(16); // ~60fps for smooth UI
     let mut last_tick = Instant::now();
 
     loop {
