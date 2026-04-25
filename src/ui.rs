@@ -147,13 +147,21 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .style(Style::default().fg(MUTED))
         .alignment(Alignment::Right)
     } else {
-        Paragraph::new(Line::from(vec![
-            Span::styled("/login", Style::default().fg(TEXT)),
-            Span::raw(" "),
-            Span::styled("/ask", Style::default().fg(MUTED)),
-        ]))
-        .style(Style::default().fg(MUTED))
-        .alignment(Alignment::Right)
+        // Show auth indicator subtly
+        let mut hint_spans = vec![];
+        
+        if app.is_openrouter_connected() || app.is_strix_connected() {
+            hint_spans.push(Span::styled("●", Style::default().fg(ACCENT)));
+            hint_spans.push(Span::raw(" "));
+        }
+        
+        hint_spans.push(Span::styled("/ask", Style::default().fg(TEXT)));
+        hint_spans.push(Span::raw(" "));
+        hint_spans.push(Span::styled("/note", Style::default().fg(MUTED)));
+        
+        Paragraph::new(Line::from(hint_spans))
+            .style(Style::default().fg(MUTED))
+            .alignment(Alignment::Right)
     };
     frame.render_widget(command_hint, input_row[1]);
 
@@ -733,9 +741,16 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     // If no status to show and prompt is empty, show minimalist ghost text
     if !has_status && app.is_prompt_empty() {
+        // Determine title based on auth state
+        let title_text = if app.is_openrouter_connected() || app.is_strix_connected() {
+            "Aleph"
+        } else {
+            "Aleph"
+        };
+
         let block = Block::default()
             .title(Span::styled(
-                "Aleph",
+                title_text,
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
@@ -743,19 +758,38 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let ghost_text = Paragraph::new(vec![
+        let mut ghost_lines = vec![
             Line::from(""),
-            Line::from(vec![
+        ];
+
+        // Show contextual prompt based on authentication status
+        if app.is_openrouter_connected() || app.is_strix_connected() {
+            ghost_lines.push(Line::from(vec![
                 Span::styled("  Type ", Style::default().fg(MUTED)),
                 Span::styled("/", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
                 Span::styled(" to see commands, or just ask a question", Style::default().fg(MUTED)),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  Recent: ", Style::default().fg(MUTED)),
-                Span::styled("/login  /obsidian pair  /ask", Style::default().fg(ACCENT_SOFT)),
-            ]),
-        ])
+            ]));
+            ghost_lines.push(Line::from(""));
+            ghost_lines.push(Line::from(vec![
+                Span::styled("  Try: ", Style::default().fg(MUTED)),
+                Span::styled("/ask  /note list  /memory search", Style::default().fg(ACCENT_SOFT)),
+            ]));
+        } else {
+            ghost_lines.push(Line::from(vec![
+                Span::styled("  Type ", Style::default().fg(MUTED)),
+                Span::styled("/login", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(" to get started, or ", Style::default().fg(MUTED)),
+                Span::styled("/", Style::default().fg(ACCENT)),
+                Span::styled(" for commands", Style::default().fg(MUTED)),
+            ]));
+            ghost_lines.push(Line::from(""));
+            ghost_lines.push(Line::from(vec![
+                Span::styled("  Available: ", Style::default().fg(MUTED)),
+                Span::styled("/note list  /obsidian pair  /status", Style::default().fg(ACCENT_SOFT)),
+            ]));
+        }
+
+        let ghost_text = Paragraph::new(ghost_lines)
         .style(Style::default().fg(MUTED));
         frame.render_widget(ghost_text, inner);
         return;
@@ -1014,7 +1048,7 @@ fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(if is_strix_selected { TEXT } else { MUTED }),
             )),
             Cell::from(Span::styled(
-                "Local/Enterprise gateway (Coming soon)",
+                "Browser login to your Strix account",
                 Style::default().fg(MUTED),
             )),
         ]),
@@ -1072,19 +1106,35 @@ fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect) {
             )]));
         }
     } else {
-        status_lines.push(Line::from(vec![Span::styled(
-            "Strix is a unified gateway for private/local models.",
-            Style::default().fg(MUTED),
-        )]));
-        status_lines.push(Line::from(vec![Span::styled(
-            "Browser-based login for Strix is currently disabled.",
-            Style::default().fg(MUTED),
-        )]));
-        status_lines.push(Line::from(""));
-        status_lines.push(Line::from(vec![Span::styled(
-            "Use '/login strix <token>' to manually authenticate.",
-            Style::default().fg(TEXT),
-        )]));
+        if app.is_strix_login_pending() {
+            let pulse = crate::app::THINKING_FRAMES[(app.tick() as usize) % crate::app::THINKING_FRAMES.len()];
+            status_lines.push(Line::from(vec![Span::styled(
+                format!("{} Waiting for Strix browser login...", pulse),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )]));
+            status_lines.push(Line::from(vec![Span::styled(
+                "Please complete the sign-in process in your browser.",
+                Style::default().fg(MUTED),
+            )]));
+            status_lines.push(Line::from(vec![Span::styled(
+                "Aleph will automatically store the native access token.",
+                Style::default().fg(MUTED),
+            )]));
+        } else {
+            status_lines.push(Line::from(vec![Span::styled(
+                "Strix native auth uses a browser sign-in with PKCE and a localhost callback.",
+                Style::default().fg(MUTED),
+            )]));
+            status_lines.push(Line::from(""));
+            status_lines.push(Line::from(vec![Span::styled(
+                "Press Enter to open your browser and authenticate with Strix.",
+                Style::default().fg(TEXT),
+            )]));
+            status_lines.push(Line::from(vec![Span::styled(
+                "Set STRIX_AUTH_BASE_URL if Strix is not running on http://localhost:3000.",
+                Style::default().fg(MUTED),
+            )]));
+        }
     }
 
     let status_para = Paragraph::new(status_lines)
@@ -1176,7 +1226,7 @@ fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(if is_strix { TEXT } else { MUTED }),
             )),
             Cell::from(Span::styled(
-                "Internal gateway (mock)",
+                "Native auth token",
                 Style::default().fg(MUTED),
             )),
         ]),
@@ -1224,7 +1274,7 @@ fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
     let footer = Paragraph::new(Line::from(vec![
         Span::styled("/login openrouter <key>", Style::default().fg(ACCENT)),
         Span::raw(" · "),
-        Span::styled("/login strix <token>", Style::default().fg(ACCENT)),
+        Span::styled("/login strix", Style::default().fg(ACCENT)),
         Span::raw(" · "),
         Span::styled("Esc", Style::default().fg(MUTED)),
         Span::raw(" close"),

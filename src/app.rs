@@ -83,7 +83,7 @@ pub struct SearchState {
 pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "login",
-        description: "Authenticate with OpenRouter in the browser or Strix (usage: /login openrouter | /login openrouter <token> | /login strix <token>)",
+        description: "Authenticate in the browser with OpenRouter or Strix (usage: /login openrouter | /login strix | /login strix <token>)",
     },
     CommandSpec {
         name: "status",
@@ -204,6 +204,12 @@ const OPENROUTER_SERVICE: &str = "Aleph";
 const OPENROUTER_ACCOUNT: &str = "openrouter_api_key";
 const OPENROUTER_AUTH_CALLBACK: &str = "/aleph/openrouter/callback";
 const OPENROUTER_AUTH_PORT: u16 = 3000;
+const STRIX_SERVICE: &str = "Aleph";
+const STRIX_ACCOUNT: &str = "strix_access_token";
+const STRIX_AUTH_CALLBACK: &str = "/aleph/strix/callback";
+const STRIX_AUTH_PORT: u16 = 43879;
+const STRIX_CLIENT_ID: &str = "aleph";
+const STRIX_AUTH_BASE_URL: &str = "http://localhost:3000";
 const MAX_CHAT_MESSAGES: usize = 24;
 const CHAT_TEXT: Color = Color::Rgb(198, 198, 210);
 const CHAT_MUTED: Color = Color::Rgb(120, 122, 138);
@@ -259,9 +265,12 @@ pub struct App {
     chat_input_cursor: usize,
     chat_scroll_offset: usize,
     openrouter_api_key: Option<String>,
+    strix_access_token: Option<String>,
     chat_stream_rx: Option<Receiver<ChatStreamUpdate>>,
     openrouter_login_rx: Option<Receiver<Result<String, String>>>,
     openrouter_login_cancel: Option<Arc<AtomicBool>>,
+    strix_login_rx: Option<Receiver<Result<String, String>>>,
+    strix_login_cancel: Option<Arc<AtomicBool>>,
     ai_provider: AiProvider,
     strix_logs: Vec<String>,
     streaming_buffer: String,
@@ -279,7 +288,15 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let openrouter_api_key = Self::load_openrouter_api_key();
-        let connected = openrouter_api_key.is_some();
+        let strix_access_token = Self::load_strix_access_token();
+        let connected = openrouter_api_key.is_some() || strix_access_token.is_some();
+        let ai_provider = if openrouter_api_key.is_some() {
+            AiProvider::OpenRouter
+        } else if strix_access_token.is_some() {
+            AiProvider::Strix
+        } else {
+            AiProvider::OpenRouter
+        };
 
         let mut app = Self {
             started_at: Instant::now(),
@@ -389,10 +406,13 @@ impl App {
             chat_input_cursor: 0,
             chat_scroll_offset: 0,
             openrouter_api_key,
+            strix_access_token,
             chat_stream_rx: None,
             openrouter_login_rx: None,
             openrouter_login_cancel: None,
-            ai_provider: AiProvider::OpenRouter, // Default to OpenRouter
+            strix_login_rx: None,
+            strix_login_cancel: None,
+            ai_provider,
             strix_logs: Vec::new(),
             streaming_buffer: String::new(),
             streaming_active: false,
@@ -427,8 +447,8 @@ impl App {
                     self.set_ai_provider(AiProvider::OpenRouter);
                     match self.store_openrouter_api_key(&api_key) {
                         Ok(()) => {
-                            self.connected = true;
                             self.openrouter_api_key = Some(api_key);
+                            self.refresh_connection_state();
                             self.rebuild_chat_render_cache();
                             self.set_result_panel(
                                 "OpenRouter login",
@@ -441,8 +461,8 @@ impl App {
                             self.last_action = String::from("Connected to OpenRouter via browser login.");
                         }
                         Err(error) => {
-                            self.connected = false;
                             self.openrouter_api_key = None;
+                            self.refresh_connection_state();
                             self.set_result_panel("OpenRouter login failed", vec![error]);
                             self.last_action = String::from("OpenRouter login failed.");
                         }
@@ -453,7 +473,7 @@ impl App {
                     login_finished = true;
                 }
                 Ok(Err(error)) => {
-                    self.connected = false;
+                    self.refresh_connection_state();
                     self.set_result_panel("OpenRouter login failed", vec![error]);
                     self.last_action = String::from("OpenRouter login failed.");
                     self.openrouter_login_rx = None;
@@ -462,7 +482,7 @@ impl App {
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    self.connected = false;
+                    self.refresh_connection_state();
                     self.set_result_panel(
                         "OpenRouter login failed",
                         vec![String::from("The browser login flow disconnected before completion.")],
@@ -471,6 +491,66 @@ impl App {
                     self.openrouter_login_rx = None;
                     self.openrouter_login_cancel = None;
                     login_finished = true;
+                }
+            }
+        }
+
+        let mut strix_login_finished = false;
+        while !strix_login_finished {
+            let result = match self.strix_login_rx.as_ref() {
+                Some(receiver) => receiver.try_recv(),
+                None => break,
+            };
+
+            match result {
+                Ok(Ok(access_token)) => {
+                    self.set_ai_provider(AiProvider::Strix);
+                    match self.store_strix_access_token(&access_token) {
+                        Ok(()) => {
+                            self.strix_access_token = Some(access_token);
+                            self.refresh_connection_state();
+                            self.add_strix_log("Browser login completed successfully");
+                            self.set_result_panel(
+                                "Strix login",
+                                vec![
+                                    String::from("Strix browser login completed successfully."),
+                                    String::from("The native app access token has been stored locally."),
+                                    String::from("Aleph can now call Strix-native APIs as they come online."),
+                                ],
+                            );
+                            self.last_action = String::from("Connected to Strix via browser login.");
+                        }
+                        Err(error) => {
+                            self.strix_access_token = None;
+                            self.refresh_connection_state();
+                            self.set_result_panel("Strix login failed", vec![error]);
+                            self.last_action = String::from("Strix login failed.");
+                        }
+                    }
+
+                    self.strix_login_rx = None;
+                    self.strix_login_cancel = None;
+                    strix_login_finished = true;
+                }
+                Ok(Err(error)) => {
+                    self.refresh_connection_state();
+                    self.set_result_panel("Strix login failed", vec![error]);
+                    self.last_action = String::from("Strix login failed.");
+                    self.strix_login_rx = None;
+                    self.strix_login_cancel = None;
+                    strix_login_finished = true;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.refresh_connection_state();
+                    self.set_result_panel(
+                        "Strix login failed",
+                        vec![String::from("The browser login flow disconnected before completion.")],
+                    );
+                    self.last_action = String::from("Strix login disconnected.");
+                    self.strix_login_rx = None;
+                    self.strix_login_cancel = None;
+                    strix_login_finished = true;
                 }
             }
         }
@@ -766,6 +846,10 @@ impl App {
 
     pub fn is_openrouter_login_pending(&self) -> bool {
         self.openrouter_login_rx.is_some()
+    }
+
+    pub fn is_strix_login_pending(&self) -> bool {
+        self.strix_login_rx.is_some()
     }
 
     pub fn thinking_frame(&self) -> &'static str {
@@ -1354,6 +1438,24 @@ impl App {
 
                 // No args: show login picker
                 if args_trimmed.is_empty() {
+                    // Check if already logged in
+                    if self.is_openrouter_connected() || self.is_strix_connected() {
+                        let provider = if self.is_openrouter_connected() {
+                            "OpenRouter"
+                        } else {
+                            "Strix"
+                        };
+                        self.set_result_panel(
+                            "Already connected",
+                            vec![
+                                format!("You are already connected to {}.", provider),
+                                String::from("Use /logout first if you want to switch providers or re-authenticate."),
+                                String::from("Use /status to see your current connection details."),
+                            ],
+                        );
+                        self.last_action = format!("Already connected to {}.", provider);
+                        return;
+                    }
                     self.open_login_picker();
                     return;
                 }
@@ -1384,14 +1486,14 @@ impl App {
                             self.last_action = String::from("OpenRouter login failed.");
                             return;
                         } else if maybe_provider == "strix" {
+                            if self.start_strix_browser_login() {
+                                return;
+                            }
                             self.set_result_panel(
-                                "Strix login",
-                                vec![
-                                    String::from("Strix authentication requires a token."),
-                                    String::from("Usage: /login strix <token>"),
-                                ],
+                                "Strix login failed",
+                                vec![String::from("Unable to start the browser-based Strix login flow.")],
                             );
-                            self.last_action = String::from("Strix login requires a token.");
+                            self.last_action = String::from("Strix login failed.");
                             return;
                         } else {
                             // Assume it's an OpenRouter API key directly
@@ -1403,25 +1505,47 @@ impl App {
                 match provider.as_str() {
                     "strix" => {
                         self.set_ai_provider(AiProvider::Strix);
-                        self.add_strix_log(format!("Authenticating with Strix..."));
-                        // Strix auth is mock for now
-                        self.connected = true;
-                        self.add_strix_log("Connected to Strix successfully");
-                        self.set_result_panel(
-                            "Strix login",
-                            vec![
-                                String::from("Strix authentication configured."),
-                                String::from("Note: Strix gateway integration is a mock implementation."),
-                            ],
-                        );
-                        self.last_action = String::from("Connected to Strix.");
+                        if token.trim().is_empty() {
+                            if self.start_strix_browser_login() {
+                                return;
+                            }
+                            self.set_result_panel(
+                                "Strix login failed",
+                                vec![String::from("Unable to start the browser-based Strix login flow.")],
+                            );
+                            self.last_action = String::from("Strix login failed.");
+                            return;
+                        }
+
+                        self.add_strix_log("Saving Strix access token");
+                        match self.store_strix_access_token(token) {
+                            Ok(()) => {
+                                self.strix_access_token = Some(token.to_string());
+                                self.refresh_connection_state();
+                                self.add_strix_log("Connected to Strix successfully");
+                                self.set_result_panel(
+                                    "Strix login",
+                                    vec![
+                                        String::from("Strix authentication configured."),
+                                        String::from("The native access token has been stored locally."),
+                                    ],
+                                );
+                                self.last_action = String::from("Connected to Strix.");
+                            }
+                            Err(error) => {
+                                self.strix_access_token = None;
+                                self.refresh_connection_state();
+                                self.set_result_panel("Strix login failed", vec![error]);
+                                self.last_action = String::from("Strix login failed.");
+                            }
+                        }
                     }
                     _ => {
                         self.set_ai_provider(AiProvider::OpenRouter);
                         match self.store_openrouter_api_key(token) {
                             Ok(()) => {
-                                self.connected = true;
                                 self.openrouter_api_key = Some(token.to_string());
+                                self.refresh_connection_state();
                                 self.rebuild_chat_render_cache();
                                 self.set_result_panel(
                                     "OpenRouter login",
@@ -1433,8 +1557,8 @@ impl App {
                                 self.last_action = String::from("Connected to OpenRouter.");
                             }
                             Err(error) => {
-                                self.connected = false;
                                 self.openrouter_api_key = None;
+                                self.refresh_connection_state();
                                 self.set_result_panel("OpenRouter login failed", vec![error]);
                                 self.last_action = String::from("OpenRouter login failed.");
                             }
@@ -1443,19 +1567,26 @@ impl App {
                 }
             }
             "logout" => {
-                self.connected = false;
                 self.openrouter_api_key = None;
+                self.strix_access_token = None;
                 self.chat_stream_rx = None;
                 self.openrouter_login_rx = None;
                 if let Some(cancel_flag) = &self.openrouter_login_cancel {
                     cancel_flag.store(true, Ordering::Relaxed);
                 }
                 self.openrouter_login_cancel = None;
+                self.strix_login_rx = None;
+                if let Some(cancel_flag) = &self.strix_login_cancel {
+                    cancel_flag.store(true, Ordering::Relaxed);
+                }
+                self.strix_login_cancel = None;
                 self.thinking = false;
                 self.thinking_ticks_remaining = 0;
                 self.streaming_buffer.clear();
                 self.streaming_active = false;
                 self.clear_openrouter_api_key();
+                self.clear_strix_access_token();
+                self.refresh_connection_state();
                 self.chat_messages.clear();
                 self.chat_input_buffer.clear();
                 self.chat_input_cursor = 0;
@@ -1467,10 +1598,11 @@ impl App {
                     "Signed out",
                     vec![
                         String::from("The current OpenRouter login has been cleared."),
-                        String::from("Use /login <api-key> to bring the connection back."),
+                        String::from("The current Strix login has also been cleared."),
+                        String::from("Use /login openrouter or /login strix to connect again."),
                     ],
                 );
-                self.last_action = String::from("Disconnected from OpenRouter.");
+                self.last_action = String::from("Disconnected from providers.");
             }
             "obsidian pair" => {
                 self.set_result_panel(
@@ -1486,14 +1618,15 @@ impl App {
                 self.set_result_panel(
                     "Status",
                     vec![
-                        format!("OpenRouter: {}", if self.connected { "connected" } else { "offline" }),
+                        format!("OpenRouter: {}", if self.is_openrouter_connected() { "connected" } else { "offline" }),
+                        format!("Strix: {}", if self.is_strix_connected() { "connected" } else { "offline" }),
                         format!("Notes: {}", self.notes.len()),
                         format!("Memories: {}", self.memories.len()),
                         format!("Canvases: {}", self.canvases.len()),
                         format!("Uptime: {}", self.uptime()),
                     ],
                 );
-                self.last_action = String::from("Refreshed OpenRouter status.");
+                self.last_action = String::from("Refreshed provider status.");
             }
             "doctor" => {
                 self.set_result_panel(
@@ -1514,7 +1647,8 @@ impl App {
                         String::from("Theme: dark purple on black"),
                         String::from("Editor: embedded terminal note editor"),
                         String::from("AI chat: OpenRouter-backed"),
-                        String::from("Login: /login <api-key> or OPENROUTER_API_KEY"),
+                        String::from("Strix auth: OAuth-style browser flow with PKCE"),
+                        String::from("Login: /login openrouter, /login strix, or provider token env vars"),
                     ],
                 );
                 self.last_action = String::from("Opened config summary.");
@@ -2037,6 +2171,10 @@ impl App {
         self.strix_logs.clear();
     }
 
+    fn refresh_connection_state(&mut self) {
+        self.connected = self.openrouter_api_key.is_some() || self.strix_access_token.is_some();
+    }
+
     fn start_openrouter_browser_login(&mut self) -> bool {
         if self.openrouter_login_rx.is_some() {
             self.last_action = String::from("OpenRouter login is already running. Use /logout to cancel it first.");
@@ -2118,6 +2256,105 @@ impl App {
         Self::exchange_openrouter_code_for_key(&code, &code_verifier)
     }
 
+    fn start_strix_browser_login(&mut self) -> bool {
+        if self.strix_login_rx.is_some() {
+            self.last_action = String::from("Strix login is already running. Use /logout to cancel it first.");
+            return false;
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.strix_login_rx = Some(receiver);
+        self.strix_login_cancel = Some(cancel_flag.clone());
+        self.set_result_panel(
+            "Strix browser login",
+            vec![
+                String::from("A browser window will open for Strix sign-in."),
+                String::from("After you authenticate, Aleph receives a native app token via localhost."),
+                format!("Server: {}", Self::strix_auth_base_url()),
+            ],
+        );
+        self.add_strix_log("Starting browser login");
+        self.last_action = String::from("Starting Strix browser login.");
+
+        thread::spawn(move || {
+            let result = Self::run_strix_browser_login_flow(cancel_flag);
+            let _ = sender.send(result);
+        });
+
+        true
+    }
+
+    fn run_strix_browser_login_flow(cancel_flag: Arc<AtomicBool>) -> Result<String, String> {
+        let (code_verifier, code_challenge) = Self::build_pkce_pair();
+        let state = Self::build_login_nonce();
+        let callback_path = format!("{}/{}", STRIX_AUTH_CALLBACK, state);
+        let redirect_uri = format!("http://127.0.0.1:{}{}", STRIX_AUTH_PORT, callback_path);
+        let auth_base_url = Self::strix_auth_base_url();
+        let auth_url = format!(
+            "{}/api/auth/native/start?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+            auth_base_url,
+            urlencoding::encode(STRIX_CLIENT_ID),
+            urlencoding::encode(&redirect_uri),
+            urlencoding::encode("native:session"),
+            urlencoding::encode(&state),
+            urlencoding::encode(&code_challenge),
+        );
+
+        let listener = TcpListener::bind(("127.0.0.1", STRIX_AUTH_PORT))
+            .map_err(|error| format!("failed to bind local Strix callback listener: {}", error))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("failed to configure the Strix callback listener: {}", error))?;
+
+        Self::open_browser(&auth_url)?;
+
+        let deadline = Instant::now() + Duration::from_secs(600);
+        let (mut stream, _) = loop {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err(String::from("Strix browser login was canceled."));
+            }
+
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(String::from("Strix browser login timed out waiting for the callback."));
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => {
+                    return Err(format!("failed to accept Strix callback: {}", error));
+                }
+            }
+        };
+
+        let request_path = Self::read_oauth_callback_path(&mut stream, &callback_path, "Strix")?;
+        if let Some(error) = Self::query_parameter(&request_path, "error") {
+            return Err(format!("Strix login returned an error: {}", error));
+        }
+        let returned_state = Self::query_parameter(&request_path, "state")
+            .ok_or_else(|| String::from("Strix callback did not include state"))?;
+        if returned_state != state {
+            return Err(String::from("Strix callback state did not match the login request."));
+        }
+        let code = Self::query_parameter(&request_path, "code")
+            .ok_or_else(|| String::from("Strix callback did not include an authorization code"))?;
+
+        Self::write_oauth_callback_response(
+            &mut stream,
+            "Strix login complete",
+            "Strix login completed. You can return to Aleph now.",
+            "Strix",
+        )?;
+
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(String::from("Strix browser login was canceled."));
+        }
+
+        Self::exchange_strix_code_for_token(&auth_base_url, &code, &code_verifier, &redirect_uri)
+    }
+
     fn build_pkce_pair() -> (String, String) {
         let mut bytes = [0u8; 32];
         OsRng.fill_bytes(&mut bytes);
@@ -2163,19 +2400,42 @@ impl App {
         stream: &mut std::net::TcpStream,
         expected_path: &str,
     ) -> Result<String, String> {
+        Self::read_oauth_callback_parameter(stream, expected_path, "code", "OpenRouter")
+    }
+
+    fn read_oauth_callback_parameter(
+        stream: &mut std::net::TcpStream,
+        expected_path: &str,
+        parameter: &str,
+        provider: &str,
+    ) -> Result<String, String> {
+        let request_path = Self::read_oauth_callback_path(stream, expected_path, provider)?;
+        if let Some(error) = Self::query_parameter(&request_path, "error") {
+            return Err(format!("{} login returned an error: {}", provider, error));
+        }
+
+        Self::query_parameter(&request_path, parameter)
+            .ok_or_else(|| format!("{} callback did not include {}", provider, parameter))
+    }
+
+    fn read_oauth_callback_path(
+        stream: &mut std::net::TcpStream,
+        expected_path: &str,
+        provider: &str,
+    ) -> Result<String, String> {
         let request_path = {
             let mut reader = BufReader::new(stream);
             let mut request_line = String::new();
             reader
                 .read_line(&mut request_line)
-                .map_err(|error| format!("failed to read OpenRouter callback request: {}", error))?;
+                .map_err(|error| format!("failed to read {} callback request: {}", provider, error))?;
 
             let mut header = String::new();
             loop {
                 header.clear();
                 let bytes_read = reader
                     .read_line(&mut header)
-                    .map_err(|error| format!("failed to read OpenRouter callback headers: {}", error))?;
+                    .map_err(|error| format!("failed to read {} callback headers: {}", provider, error))?;
                 if bytes_read == 0 || header == "\r\n" {
                     break;
                 }
@@ -2184,25 +2444,39 @@ impl App {
             request_line
                 .split_whitespace()
                 .nth(1)
-                .ok_or_else(|| String::from("OpenRouter callback request did not include a path"))?
+                .ok_or_else(|| format!("{} callback request did not include a path", provider))?
                 .to_string()
         };
 
-            let request_path_only = request_path.split('?').next().unwrap_or(&request_path);
-            if request_path_only != expected_path {
-                return Err(String::from("OpenRouter callback arrived on an unexpected path."));
-            }
+        let request_path_only = request_path.split('?').next().unwrap_or(&request_path);
+        if request_path_only != expected_path {
+            return Err(format!("{} callback arrived on an unexpected path.", provider));
+        }
 
-        Self::query_parameter(&request_path, "code")
-            .ok_or_else(|| String::from("OpenRouter callback did not include an authorization code"))
+        Ok(request_path)
     }
 
     fn write_openrouter_callback_response(
         stream: &mut std::net::TcpStream,
         message: &str,
     ) -> Result<(), String> {
+        Self::write_oauth_callback_response(
+            stream,
+            "OpenRouter login complete",
+            message,
+            "OpenRouter",
+        )
+    }
+
+    fn write_oauth_callback_response(
+        stream: &mut std::net::TcpStream,
+        title: &str,
+        message: &str,
+        provider: &str,
+    ) -> Result<(), String> {
         let body = format!(
-            "<html><body style=\"font-family: sans-serif; padding: 2rem;\"><h1>OpenRouter login complete</h1><p>{}</p></body></html>",
+            "<html><body style=\"font-family: sans-serif; padding: 2rem;\"><h1>{}</h1><p>{}</p></body></html>",
+            title,
             message
         );
         let response = format!(
@@ -2212,7 +2486,7 @@ impl App {
         );
         stream
             .write_all(response.as_bytes())
-            .map_err(|error| format!("failed to write OpenRouter callback response: {}", error))
+            .map_err(|error| format!("failed to write {} callback response: {}", provider, error))
     }
 
     fn exchange_openrouter_code_for_key(code: &str, code_verifier: &str) -> Result<String, String> {
@@ -2251,6 +2525,52 @@ impl App {
             .map(|key| key.trim().to_string())
             .filter(|key| !key.is_empty())
             .ok_or_else(|| String::from("OpenRouter auth response did not include an API key"))
+    }
+
+
+    fn exchange_strix_code_for_token(
+        auth_base_url: &str,
+        code: &str,
+        code_verifier: &str,
+        redirect_uri: &str,
+    ) -> Result<String, String> {
+        let payload = serde_json::json!({
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": code_verifier,
+            "client_id": STRIX_CLIENT_ID,
+            "redirect_uri": redirect_uri,
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|error| format!("failed to build HTTP client: {}", error))?;
+
+        let response = client
+            .post(format!("{}/api/auth/native/token", auth_base_url))
+            .json(&payload)
+            .send()
+            .map_err(|error| format!("failed to exchange the Strix authorization code: {}", error))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|error| format!("failed to read Strix auth response: {}", error))?;
+
+        if !status.is_success() {
+            return Err(format!("{}: {}", status, body));
+        }
+
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|error| format!("failed to parse Strix auth response: {}", error))?;
+
+        value
+            .get("access_token")
+            .and_then(|token| token.as_str())
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| String::from("Strix auth response did not include an access token"))
     }
 
     fn query_parameter(path: &str, name: &str) -> Option<String> {
@@ -2682,6 +3002,53 @@ impl App {
 
     pub fn is_openrouter_connected(&self) -> bool {
         self.connected && self.openrouter_api_key.is_some()
+    }
+
+
+    pub fn is_strix_connected(&self) -> bool {
+        self.connected && self.strix_access_token.is_some()
+    }
+
+    fn load_strix_access_token() -> Option<String> {
+        if let Ok(entry) = Self::strix_token_entry() {
+            if let Ok(password) = entry.get_password() {
+                let trimmed = password.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+        }
+
+        std::env::var("STRIX_ACCESS_TOKEN")
+            .ok()
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty())
+    }
+
+    fn store_strix_access_token(&self, access_token: &str) -> Result<(), String> {
+        let entry = Self::strix_token_entry()?;
+        entry
+            .set_password(access_token.trim())
+            .map_err(|error| format!("failed to save Strix login: {}", error))
+    }
+
+    fn clear_strix_access_token(&self) {
+        if let Ok(entry) = Self::strix_token_entry() {
+            let _ = entry.delete_credential();
+        }
+    }
+
+    fn strix_token_entry() -> Result<Entry, String> {
+        Entry::new(STRIX_SERVICE, STRIX_ACCOUNT)
+            .map_err(|error| format!("failed to open Strix credential store: {}", error))
+    }
+
+    fn strix_auth_base_url() -> String {
+        std::env::var("STRIX_AUTH_BASE_URL")
+            .ok()
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| String::from(STRIX_AUTH_BASE_URL))
     }
 
     fn load_openrouter_api_key() -> Option<String> {
@@ -3609,16 +3976,14 @@ impl App {
                         }
                     }
                     1 => {
-                        // Strix: placeholder for now
                         self.panel_mode = PanelMode::Commands;
-                        self.set_result_panel(
-                            "Strix login",
-                            vec![
-                                String::from("Strix authentication is not yet available."),
-                                String::from("Use /login strix <token> once you have a gateway token."),
-                            ],
-                        );
-                        self.last_action = String::from("Strix login not yet available.");
+                        if !self.start_strix_browser_login() {
+                            self.set_result_panel(
+                                "Strix login failed",
+                                vec![String::from("Unable to start the browser-based Strix login flow.")],
+                            );
+                            self.last_action = String::from("Strix login failed.");
+                        }
                     }
                     _ => {}
                 }
@@ -3817,7 +4182,7 @@ mod tests {
         }
         app.handle_key(press(KeyCode::Enter));
 
-        assert_eq!(app.last_action(), "Refreshed OpenRouter status.");
+        assert_eq!(app.last_action(), "Refreshed provider status.");
         assert_eq!(app.panel_title(), "Status");
     }
 
