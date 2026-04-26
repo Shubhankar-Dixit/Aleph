@@ -3987,11 +3987,33 @@ impl App {
         fs::read_to_string(path)
             .ok()
             .and_then(|content| {
-                content.lines().find_map(|line| {
-                    line.strip_prefix("# ")
-                        .map(|title| title.trim().to_string())
-                        .filter(|title| !title.is_empty())
-                })
+                let mut in_frontmatter = false;
+                let mut is_first_line = true;
+
+                for line in content.lines() {
+                    if is_first_line {
+                        is_first_line = false;
+                        if line.trim() == "---" {
+                            in_frontmatter = true;
+                            continue;
+                        }
+                    }
+
+                    if in_frontmatter {
+                        if line.trim() == "---" {
+                            in_frontmatter = false;
+                        }
+                        continue;
+                    }
+
+                    if let Some(title) = line.strip_prefix("# ") {
+                        let trimmed = title.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+                None
             })
             .or_else(|| {
                 relative
