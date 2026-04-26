@@ -1,0 +1,17 @@
+{
+  "name": "aleph",
+  "version": "0.1.0",
+  "description": "Aleph command line tools for pairing with Obsidian vaults.",
+  "type": "module",
+  "bin": {
+    "aleph": "./bin/aleph.mjs"
+  },
+  "scripts": {
+    "test": "node --test",
+    "lint": "node --check bin/aleph.mjs && node --check src/cli.mjs && node --check src/lib/config.mjs && node --check src/lib/manifest.mjs && node --check src/lib/obsidian.mjs && node --check src/lib/open-uri.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
