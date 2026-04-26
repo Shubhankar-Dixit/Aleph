@@ -1,7 +1,7 @@
 mod app;
 mod ui;
 
-use std::io;
+use std::io::{self, Read};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -14,6 +14,27 @@ use ratatui::Terminal;
 use app::App;
 
 fn main() -> Result<()> {
+    let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    if !args.is_empty() && args[0] != "tui" {
+        expand_stdin_args(&mut args)?;
+        let mut app = App::new();
+        match app.run_cli_command(&args) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{}", line);
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!("{}", error);
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.first().map(|arg| arg.as_str()) == Some("tui") {
+        args.remove(0);
+    }
+
     let _session = TerminalSession::enter()?;
 
     let stdout = io::stdout();
@@ -81,5 +102,20 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn expand_stdin_args(args: &mut [String]) -> Result<()> {
+    if !args.iter().any(|arg| arg == "-") {
+        return Ok(());
+    }
+
+    let mut buffer = String::new();
+    io::stdin().read_to_string(&mut buffer)?;
+    for arg in args.iter_mut() {
+        if arg == "-" {
+            *arg = buffer.clone();
+        }
+    }
     Ok(())
 }

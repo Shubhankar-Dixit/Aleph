@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -37,8 +39,10 @@ pub struct Folder {
 #[derive(Clone)]
 pub struct Note {
     pub id: usize,
+    pub remote_id: Option<String>,
     pub title: String,
     pub content: String,
+    pub raw_content: String,
     pub updated_at: String,
     pub folder_id: Option<usize>,
 }
@@ -88,6 +92,10 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "status",
         description: "Show session, note, and runtime health",
+    },
+    CommandSpec {
+        name: "sync",
+        description: "Pull notes from Strix into the current Aleph session",
     },
     CommandSpec {
         name: "doctor",
@@ -210,6 +218,7 @@ const STRIX_AUTH_CALLBACK: &str = "/aleph/strix/callback";
 const STRIX_AUTH_PORT: u16 = 43879;
 const STRIX_CLIENT_ID: &str = "aleph";
 const STRIX_AUTH_BASE_URL: &str = "http://localhost:3000";
+const STRIX_NOTES_LIMIT: usize = 100;
 const MAX_CHAT_MESSAGES: usize = 24;
 const CHAT_TEXT: Color = Color::Rgb(198, 198, 210);
 const CHAT_MUTED: Color = Color::Rgb(120, 122, 138);
@@ -329,8 +338,12 @@ impl App {
             notes: vec![
                 Note {
                     id: 1,
+                    remote_id: None,
                     title: String::from("Strix gateway"),
                     content: String::from(
+                        "Build a stable gateway that normalizes auth, streaming, and note operations.",
+                    ),
+                    raw_content: String::from(
                         "Build a stable gateway that normalizes auth, streaming, and note operations.",
                     ),
                     updated_at: String::from("seed"),
@@ -338,8 +351,12 @@ impl App {
                 },
                 Note {
                     id: 2,
+                    remote_id: None,
                     title: String::from("Note editor"),
                     content: String::from(
+                        "Use a terminal editor for quick edits, then move larger writes into the Strix product.",
+                    ),
+                    raw_content: String::from(
                         "Use a terminal editor for quick edits, then move larger writes into the Strix product.",
                     ),
                     updated_at: String::from("seed"),
@@ -347,8 +364,12 @@ impl App {
                 },
                 Note {
                     id: 3,
+                    remote_id: None,
                     title: String::from("MCP server"),
                     content: String::from(
+                        "Expose Aleph as an MCP bridge so external agents can use Strix knowledge.",
+                    ),
+                    raw_content: String::from(
                         "Expose Aleph as an MCP bridge so external agents can use Strix knowledge.",
                     ),
                     updated_at: String::from("seed"),
@@ -356,8 +377,12 @@ impl App {
                 },
                 Note {
                     id: 4,
+                    remote_id: None,
                     title: String::from("Feature ideas"),
                     content: String::from(
+                        "Folder navigation, search within folders, nested folders like Strix.",
+                    ),
+                    raw_content: String::from(
                         "Folder navigation, search within folders, nested folders like Strix.",
                     ),
                     updated_at: String::from("seed"),
@@ -425,8 +450,153 @@ impl App {
             ghost_result: None,
         };
 
+        if app.strix_access_token.is_some() {
+            if let Ok(notes) = Self::load_cached_strix_notes() {
+                if !notes.is_empty() {
+                    app.notes = notes;
+                    app.selected_note = 0;
+                    app.add_strix_log("Loaded cached Strix notes");
+                    app.last_action = String::from("Loaded cached Strix notes. Run /sync to refresh.");
+                }
+            }
+        }
+
         app.rebuild_chat_render_cache();
         app
+    }
+
+    pub fn run_cli_command(&mut self, args: &[String]) -> Result<Vec<String>, String> {
+        if args.is_empty() {
+            return Ok(vec![
+                String::from("Usage: aleph notes <list|search|read|write|append|create> ..."),
+                String::from("Examples:"),
+                String::from("  aleph notes search roadmap"),
+                String::from("  aleph notes read <id>"),
+                String::from("  aleph notes write <id> -   # content from stdin"),
+            ]);
+        }
+
+        let area = args[0].as_str();
+        if area == "sync" {
+            let count = self.sync_strix_notes()?;
+            return Ok(vec![format!("Synced {} notes from Strix.", count)]);
+        }
+
+        if area != "notes" && area != "note" {
+            return Err(format!("Unknown Aleph CLI area '{}'. Try 'notes'.", area));
+        }
+
+        let action = args.get(1).map(|value| value.as_str()).unwrap_or("list");
+        match action {
+            "list" => {
+                self.ensure_cached_strix_notes_loaded();
+                if self.notes.is_empty() {
+                    self.sync_strix_notes()?;
+                }
+                Ok(self
+                    .notes
+                    .iter()
+                    .map(|note| {
+                        format!(
+                            "{}\t{}\t{}",
+                            note.remote_id.as_deref().unwrap_or("local-only"),
+                            note.title,
+                            Self::preview_text(&note.content, 120)
+                        )
+                    })
+                    .collect())
+            }
+            "search" => {
+                let query = args.get(2..).unwrap_or(&[]).join(" ");
+                self.ensure_cached_strix_notes_loaded();
+                if self.notes.is_empty() {
+                    self.sync_strix_notes()?;
+                }
+                Ok(self.search_notes(&query))
+            }
+            "read" => {
+                let id = args
+                    .get(2)
+                    .ok_or_else(|| String::from("Usage: aleph notes read <id|title>"))?;
+                self.ensure_cached_strix_notes_loaded();
+                let note = self
+                    .resolve_note_index(id)
+                    .and_then(|index| self.notes.get(index).cloned())
+                    .map(Ok)
+                    .unwrap_or_else(|| self.load_strix_note(id, true))?;
+                Ok(vec![
+                    format!("# {}", note.title),
+                    format!("Strix ID: {}", note.remote_id.as_deref().unwrap_or("local-only")),
+                    String::new(),
+                    note.content,
+                ])
+            }
+            "write" => {
+                let id = args
+                    .get(2)
+                    .ok_or_else(|| String::from("Usage: aleph notes write <id|title> <content>"))?;
+                let content = args.get(3..).unwrap_or(&[]).join(" ");
+                if content.is_empty() {
+                    return Err(String::from("Provide content or pass '-' to read content from stdin."));
+                }
+                self.ensure_cached_strix_notes_loaded();
+                let mut note = self
+                    .resolve_note_index(id)
+                    .and_then(|index| self.notes.get(index).cloned())
+                    .map(Ok)
+                    .unwrap_or_else(|| self.load_strix_note(id, true))?;
+                note.content = content;
+                let updated = self.update_strix_note(&note)?;
+                self.upsert_synced_note(updated.clone());
+                Ok(vec![format!(
+                    "Updated {} ({})",
+                    updated.title,
+                    updated.remote_id.as_deref().unwrap_or("local-only")
+                )])
+            }
+            "append" => {
+                let id = args
+                    .get(2)
+                    .ok_or_else(|| String::from("Usage: aleph notes append <id|title> <content>"))?;
+                let content = args.get(3..).unwrap_or(&[]).join(" ");
+                if content.is_empty() {
+                    return Err(String::from("Provide content or pass '-' to read content from stdin."));
+                }
+                self.ensure_cached_strix_notes_loaded();
+                let mut note = self
+                    .resolve_note_index(id)
+                    .and_then(|index| self.notes.get(index).cloned())
+                    .map(Ok)
+                    .unwrap_or_else(|| self.load_strix_note(id, true))?;
+                if !note.content.is_empty() {
+                    note.content.push('\n');
+                }
+                note.content.push_str(&content);
+                let updated = self.update_strix_note(&note)?;
+                self.upsert_synced_note(updated.clone());
+                Ok(vec![format!(
+                    "Appended to {} ({})",
+                    updated.title,
+                    updated.remote_id.as_deref().unwrap_or("local-only")
+                )])
+            }
+            "create" => {
+                let title = args
+                    .get(2)
+                    .map(|title| title.as_str())
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or("Untitled note");
+                let content = args.get(3..).unwrap_or(&[]).join(" ");
+                let note = self.create_strix_note(title, &content)?;
+                self.upsert_synced_note(note.clone());
+                Ok(vec![format!(
+                    "Created {} ({})",
+                    note.title,
+                    note.remote_id.as_deref().unwrap_or("local-only")
+                )])
+            }
+            _ => Err(format!("Unknown notes action '{}'.", action)),
+        }
     }
 
     pub fn on_tick(&mut self) {
@@ -1379,7 +1549,7 @@ impl App {
             return;
         }
 
-        let prompt = self.normalized_prompt();
+        let prompt = Self::expand_command_alias(&self.normalized_prompt());
         let Some((command, args)) = Self::parse_command(prompt.as_str()) else {
             self.set_result_panel(
                 "Unknown command",
@@ -1392,6 +1562,13 @@ impl App {
             self.reset_prompt();
             return;
         };
+
+        if args.trim().is_empty() && Self::command_expects_argument(command.name) {
+            self.prompt = format!("/{} ", command.name);
+            self.cursor = self.prompt.len();
+            self.last_action = format!("Add a target or text for /{}.", command.name);
+            return;
+        }
 
         self.history.push(format!("/{}", prompt));
         self.history_index = None;
@@ -1408,6 +1585,52 @@ impl App {
 
     fn normalize_command_input(prompt: &str) -> String {
         prompt.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn expand_command_alias(prompt: &str) -> String {
+        let trimmed = prompt.trim();
+        let aliases = [
+            ("find", "search"),
+            ("open", "note read"),
+            ("read", "note read"),
+            ("edit", "note edit"),
+            ("new", "note create"),
+            ("create", "note create"),
+            ("list", "note list"),
+            ("ls", "note list"),
+        ];
+
+        for (alias, command) in aliases {
+            if trimmed == alias {
+                return command.to_string();
+            }
+            if let Some(rest) = trimmed.strip_prefix(alias) {
+                if rest.starts_with(char::is_whitespace) {
+                    return format!("{}{}", command, rest);
+                }
+            }
+        }
+
+        trimmed.to_string()
+    }
+
+    fn command_expects_argument(command: &str) -> bool {
+        matches!(
+            command,
+            "search"
+                | "ask"
+                | "note create"
+                | "note append"
+                | "note move"
+                | "folder create"
+                | "folder delete"
+                | "folder notes"
+                | "memory save"
+                | "memory search"
+                | "canvas show"
+                | "canvas export"
+                | "darwin run"
+        )
     }
 
     fn parse_command<'a>(prompt: &'a str) -> Option<(&'static CommandSpec, &'a str)> {
@@ -1621,12 +1844,31 @@ impl App {
                         format!("OpenRouter: {}", if self.is_openrouter_connected() { "connected" } else { "offline" }),
                         format!("Strix: {}", if self.is_strix_connected() { "connected" } else { "offline" }),
                         format!("Notes: {}", self.notes.len()),
+                        format!("Cache: {}", Self::strix_cache_path().display()),
                         format!("Memories: {}", self.memories.len()),
                         format!("Canvases: {}", self.canvases.len()),
                         format!("Uptime: {}", self.uptime()),
                     ],
                 );
                 self.last_action = String::from("Refreshed provider status.");
+            }
+            "sync" => {
+                match self.sync_strix_notes() {
+                    Ok(count) => {
+                        self.set_result_panel(
+                            "Strix sync",
+                            vec![
+                                format!("Pulled {} notes from Strix.", count),
+                                String::from("Use /search, /note list, /note read, and /note edit against the synced notes."),
+                            ],
+                        );
+                        self.last_action = format!("Synced {} Strix notes.", count);
+                    }
+                    Err(error) => {
+                        self.set_result_panel("Strix sync failed", vec![error]);
+                        self.last_action = String::from("Strix sync failed.");
+                    }
+                }
             }
             "doctor" => {
                 self.set_result_panel(
@@ -1655,6 +1897,23 @@ impl App {
             }
             "search" => {
                 let query = args.trim();
+                if self.is_strix_connected() {
+                    self.ensure_cached_strix_notes_loaded();
+                    if self.notes.is_empty() {
+                        if let Err(error) = self.sync_strix_notes() {
+                            self.set_result_panel("Strix search failed", vec![error]);
+                            self.last_action = String::from("Strix search failed.");
+                            return;
+                        }
+                    }
+                    let mut lines = self.search_notes(query);
+                    if lines.is_empty() {
+                        lines.push(format!("No cached Strix matches for '{}'. Run /sync to refresh.", query));
+                    }
+                    self.set_result_panel(format!("Search: {}", query), lines);
+                    self.last_action = format!("Searched cached Strix notes for {}.", query);
+                    return;
+                }
                 let mut lines = self.search_notes(query);
                 if lines.is_empty() {
                     lines.push(format!("No local matches for '{}'.", query));
@@ -1693,6 +1952,9 @@ impl App {
                 self.last_action = String::from("Prepared an ask response.");
             }
             "note list" => {
+                if self.is_strix_connected() {
+                    self.ensure_cached_strix_notes_loaded();
+                }
                 let folder_id = self.current_folder_id;
                 let folder_name = folder_id
                     .and_then(|id| self.get_folder_name(id))
@@ -1714,12 +1976,13 @@ impl App {
                             String::from("[—] ")
                         };
                         format!(
-                            "{:>2}. #{} {:<14} {}{}",
+                            "{:>2}. #{} {:<14} {}{}{}",
                             index + 1,
                             note.id,
                             if note.title.len() > 14 { format!("{}…", &note.title[..13]) } else { note.title.clone() },
                             folder_indicator,
-                            Self::preview_text(&note.content, 32)
+                            Self::preview_text(&note.content, 32),
+                            note.remote_id.as_deref().map(|id| format!(" [{}]", id)).unwrap_or_default()
                         )
                     })
                     .collect::<Vec<_>>();
@@ -1728,6 +1991,14 @@ impl App {
                 self.last_action = String::from("Listed notes.");
             }
             "note read" => {
+                if self.is_strix_connected() {
+                    self.ensure_cached_strix_notes_loaded();
+                }
+                if self.is_strix_connected() && !args.trim().is_empty() && self.resolve_note_index(args.trim()).is_none() {
+                    if let Ok(note) = self.load_strix_note(args.trim(), true) {
+                        self.upsert_synced_note(note);
+                    }
+                }
                 let Some(index) = self.resolve_note_index(args.trim()) else {
                     self.set_result_panel(
                         "Note not found",
@@ -1751,6 +2022,7 @@ impl App {
 
                 let mut lines = vec![
                     format!("ID: {}", note_id),
+                    format!("Strix ID: {}", note.remote_id.as_deref().unwrap_or("local-only")),
                     format!("Updated: {}", note_updated),
                     folder_info,
                     String::new(),
@@ -1766,13 +2038,26 @@ impl App {
                     args.trim().to_string()
                 };
                 let note_id = self.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
-                self.notes.push(Note {
+                let mut note = Note {
                     id: note_id,
+                    remote_id: None,
                     title: title.clone(),
                     content: String::new(),
+                    raw_content: String::new(),
                     updated_at: String::from("draft"),
                     folder_id: self.current_folder_id,
-                });
+                };
+                if self.is_strix_connected() {
+                    match self.create_strix_note(&title, "") {
+                        Ok(remote_note) => note = remote_note,
+                        Err(error) => {
+                            self.set_result_panel("Strix create failed", vec![error]);
+                            self.last_action = String::from("Strix note create failed.");
+                            return;
+                        }
+                    }
+                }
+                self.notes.push(note);
                 let index = self.notes.len() - 1;
                 self.open_note_editor(index);
                 self.last_action = format!("Created note: {}", title);
@@ -1807,6 +2092,11 @@ impl App {
                     note.updated_at = updated_at;
                     (note.title.clone(), note.content.clone())
                 };
+                if let Err(error) = self.push_note_to_strix(index) {
+                    self.set_result_panel("Strix push failed", vec![error]);
+                    self.last_action = String::from("Strix note append failed.");
+                    return;
+                }
                 self.selected_note = index;
                 self.set_result_panel(
                     format!("Note: {}", note_title),
@@ -1842,6 +2132,18 @@ impl App {
                     self.last_action = String::from("Note not found.");
                     return;
                 };
+
+                if self.is_strix_connected() {
+                    if let Some(remote_id) = self.notes[index].remote_id.clone() {
+                        if let Ok(note) = self.load_strix_note(&remote_id, true) {
+                            let mut refreshed = note;
+                            refreshed.id = self.notes[index].id;
+                            refreshed.folder_id = self.notes[index].folder_id;
+                            self.notes[index] = refreshed;
+                            let _ = Self::save_cached_strix_notes(&self.notes);
+                        }
+                    }
+                }
 
                 self.open_note_editor(index);
                 self.last_action = format!("Editing note: {}", self.notes[index].title);
@@ -3051,6 +3353,486 @@ impl App {
             .unwrap_or_else(|| String::from(STRIX_AUTH_BASE_URL))
     }
 
+    fn strix_api_base_url() -> String {
+        std::env::var("STRIX_API_BASE_URL")
+            .ok()
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(Self::strix_auth_base_url)
+    }
+
+    fn strix_access_token(&self) -> Result<&str, String> {
+        self.strix_access_token
+            .as_deref()
+            .filter(|token| !token.trim().is_empty())
+            .ok_or_else(|| String::from("Strix is not connected. Run /login strix first."))
+    }
+
+    fn strix_json_request(
+        &self,
+        method: &str,
+        path: &str,
+        payload: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        let token = self.strix_access_token()?;
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|error| format!("failed to build HTTP client: {}", error))?;
+        let url = format!("{}{}", Self::strix_api_base_url(), path);
+        let mut request = match method {
+            "GET" => client.get(url),
+            "POST" => client.post(url),
+            "PATCH" => client.patch(url),
+            _ => return Err(format!("unsupported Strix HTTP method: {}", method)),
+        }
+        .bearer_auth(token);
+
+        if let Some(payload) = payload {
+            request = request.json(&payload);
+        }
+
+        let response = request
+            .send()
+            .map_err(|error| format!("Strix request failed: {}", error))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|error| format!("failed to read Strix response: {}", error))?;
+        if !status.is_success() {
+            return Err(format!("Strix returned {}: {}", status, body));
+        }
+        serde_json::from_str(&body).map_err(|error| format!("failed to parse Strix response: {}", error))
+    }
+
+    fn sync_strix_notes(&mut self) -> Result<usize, String> {
+        let notes = self.load_strix_notes("", STRIX_NOTES_LIMIT)?;
+        let count = notes.len();
+        self.notes = notes;
+        self.selected_note = 0;
+        Self::save_cached_strix_notes(&self.notes)?;
+        self.add_strix_log(format!("Synced {} notes", count));
+        Ok(count)
+    }
+
+    fn load_strix_notes(&self, query: &str, limit: usize) -> Result<Vec<Note>, String> {
+        let path = if query.trim().is_empty() {
+            format!("/api/auth/native/notes?limit={}", limit)
+        } else {
+            format!(
+                "/api/auth/native/notes?q={}&limit={}",
+                urlencoding::encode(query.trim()),
+                limit
+            )
+        };
+        let value = self.strix_json_request("GET", &path, None)?;
+        let notes = value
+            .get("notes")
+            .and_then(|notes| notes.as_array())
+            .ok_or_else(|| String::from("Strix notes response did not include notes"))?;
+
+        Ok(notes
+            .iter()
+            .enumerate()
+            .map(|(index, value)| Self::note_from_strix_value(index + 1, value))
+            .collect())
+    }
+
+    fn load_strix_note(&self, id_or_title: &str, hydrate_content: bool) -> Result<Note, String> {
+        let remote_id = self
+            .resolve_note_index(id_or_title)
+            .and_then(|index| self.notes.get(index))
+            .and_then(|note| note.remote_id.clone())
+            .unwrap_or_else(|| id_or_title.trim().to_string());
+        let path = format!(
+            "/api/auth/native/notes/{}",
+            urlencoding::encode(remote_id.trim())
+        );
+        let value = self.strix_json_request("GET", &path, None)?;
+        let note = value
+            .get("note")
+            .ok_or_else(|| String::from("Strix note response did not include note"))?;
+        let mut parsed = Self::note_from_strix_value(self.notes.len() + 1, note);
+        if !hydrate_content {
+            parsed.raw_content.clear();
+        }
+        Ok(parsed)
+    }
+
+    fn create_strix_note(&self, title: &str, content: &str) -> Result<Note, String> {
+        let payload = serde_json::json!({
+            "title": title,
+            "content": Self::text_to_strix_html(content),
+            "tags": [],
+        });
+        let value = self.strix_json_request("POST", "/api/auth/native/notes", Some(payload))?;
+        let note = value
+            .get("note")
+            .ok_or_else(|| String::from("Strix create response did not include note"))?;
+        Ok(Self::note_from_strix_value(self.notes.len() + 1, note))
+    }
+
+    fn update_strix_note(&self, note: &Note) -> Result<Note, String> {
+        let Some(remote_id) = note.remote_id.as_deref() else {
+            return Ok(note.clone());
+        };
+        let payload = serde_json::json!({
+            "title": note.title,
+            "content": Self::text_to_strix_html(&note.content),
+        });
+        let path = format!(
+            "/api/auth/native/notes/{}",
+            urlencoding::encode(remote_id.trim())
+        );
+        let value = self.strix_json_request("PATCH", &path, Some(payload))?;
+        let note = value
+            .get("note")
+            .ok_or_else(|| String::from("Strix update response did not include note"))?;
+        Ok(Self::note_from_strix_value(0, note))
+    }
+
+    fn push_note_to_strix(&mut self, index: usize) -> Result<(), String> {
+        if !self.is_strix_connected() {
+            return Ok(());
+        }
+        let Some(note) = self.notes.get(index).cloned() else {
+            return Ok(());
+        };
+        let mut synced = if note.remote_id.is_some() {
+            self.update_strix_note(&note)?
+        } else {
+            self.create_strix_note(&note.title, &note.content)?
+        };
+        synced.id = note.id;
+        synced.folder_id = note.folder_id;
+        if let Some(slot) = self.notes.get_mut(index) {
+            *slot = synced;
+        }
+        Self::save_cached_strix_notes(&self.notes)?;
+        self.add_strix_log("Pushed note changes to Strix");
+        Ok(())
+    }
+
+    fn upsert_synced_note(&mut self, mut note: Note) {
+        if let Some(remote_id) = note.remote_id.clone() {
+            if let Some((index, existing)) = self
+                .notes
+                .iter_mut()
+                .enumerate()
+                .find(|(_, existing)| existing.remote_id.as_deref() == Some(remote_id.as_str()))
+            {
+                note.id = existing.id;
+                *existing = note;
+                self.selected_note = index;
+                return;
+            }
+        }
+
+        note.id = self.notes.len() + 1;
+        self.notes.push(note);
+        self.selected_note = self.notes.len() - 1;
+        let _ = Self::save_cached_strix_notes(&self.notes);
+    }
+
+    fn note_from_strix_value(local_id: usize, value: &serde_json::Value) -> Note {
+        let remote_id = value
+            .get("id")
+            .and_then(|id| id.as_str())
+            .map(|id| id.to_string());
+        let updated_at = value
+            .get("updatedAt")
+            .and_then(|updated| {
+                if updated.is_number() {
+                    updated.as_i64().map(|number| number.to_string())
+                } else {
+                    updated.as_str().map(|text| text.to_string())
+                }
+            })
+            .unwrap_or_else(|| String::from("strix"));
+        let raw_content = value
+            .get("content")
+            .and_then(|content| content.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Note {
+            id: local_id,
+            remote_id,
+            title: value
+                .get("title")
+                .and_then(|title| title.as_str())
+                .unwrap_or("Untitled")
+                .to_string(),
+            content: Self::html_to_terminal_text(&raw_content),
+            raw_content,
+            updated_at,
+            folder_id: None,
+        }
+    }
+
+    fn ensure_cached_strix_notes_loaded(&mut self) {
+        let has_remote_notes = self.notes.iter().any(|note| note.remote_id.is_some());
+        if has_remote_notes {
+            return;
+        }
+
+        if let Ok(notes) = Self::load_cached_strix_notes() {
+            if !notes.is_empty() {
+                self.notes = notes;
+                self.selected_note = 0;
+                self.add_strix_log("Loaded cached Strix notes");
+            }
+        }
+    }
+
+    fn strix_cache_path() -> PathBuf {
+        if let Ok(dir) = std::env::var("ALEPH_CACHE_DIR") {
+            return PathBuf::from(dir).join("strix-notes.json");
+        }
+
+        if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
+            return PathBuf::from(dir).join("aleph").join("strix-notes.json");
+        }
+
+        if let Ok(dir) = std::env::var("LOCALAPPDATA").or_else(|_| std::env::var("APPDATA")) {
+            return PathBuf::from(dir).join("Aleph").join("strix-notes.json");
+        }
+
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(".cache").join("aleph").join("strix-notes.json");
+        }
+
+        std::env::temp_dir().join("aleph-strix-notes.json")
+    }
+
+    fn load_cached_strix_notes() -> Result<Vec<Note>, String> {
+        let path = Self::strix_cache_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let body = fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read Strix note cache: {}", error))?;
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|error| format!("failed to parse Strix note cache: {}", error))?;
+        let notes = value
+            .get("notes")
+            .and_then(|notes| notes.as_array())
+            .ok_or_else(|| String::from("Strix note cache did not include notes"))?;
+
+        Ok(notes
+            .iter()
+            .enumerate()
+            .map(|(index, value)| Self::note_from_strix_value(index + 1, value))
+            .collect())
+    }
+
+    fn save_cached_strix_notes(notes: &[Note]) -> Result<(), String> {
+        let path = Self::strix_cache_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("failed to create Strix note cache directory: {}", error))?;
+        }
+
+        let cached_notes = notes
+            .iter()
+            .filter(|note| note.remote_id.is_some())
+            .map(|note| {
+                serde_json::json!({
+                    "id": note.remote_id.as_deref().unwrap_or(""),
+                    "title": note.title.as_str(),
+                    "content": if note.raw_content.trim().is_empty() {
+                        Self::text_to_strix_html(&note.content)
+                    } else {
+                        note.raw_content.clone()
+                    },
+                    "updatedAt": note.updated_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        let payload = serde_json::json!({
+            "version": 1,
+            "syncedAt": Self::now_millis(),
+            "notes": cached_notes,
+        });
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&payload)
+                .map_err(|error| format!("failed to encode Strix note cache: {}", error))?,
+        )
+        .map_err(|error| format!("failed to write Strix note cache: {}", error))
+    }
+
+    fn now_millis() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0)
+    }
+
+    fn html_to_terminal_text(input: &str) -> String {
+        if !input.contains('<') {
+            return Self::decode_html_entities(input).trim().to_string();
+        }
+
+        let mut output = String::new();
+        let mut chars = input.chars().peekable();
+        while let Some(character) = chars.next() {
+            if character != '<' {
+                output.push(character);
+                continue;
+            }
+
+            let mut tag = String::new();
+            for next in chars.by_ref() {
+                if next == '>' {
+                    break;
+                }
+                tag.push(next);
+            }
+            let normalized = tag.trim().trim_start_matches('/').to_lowercase();
+            let closing = tag.trim_start().starts_with('/');
+
+            if closing {
+                if normalized.starts_with('p')
+                    || normalized.starts_with("div")
+                    || normalized.starts_with("li")
+                    || normalized.starts_with("h1")
+                    || normalized.starts_with("h2")
+                    || normalized.starts_with("h3")
+                {
+                    Self::push_collapsed_newline(&mut output);
+                }
+                continue;
+            }
+
+            if normalized.starts_with("br") {
+                output.push('\n');
+            } else if normalized.starts_with("h1") {
+                Self::push_block_prefix(&mut output, "# ");
+            } else if normalized.starts_with("h2") {
+                Self::push_block_prefix(&mut output, "## ");
+            } else if normalized.starts_with("h3") {
+                Self::push_block_prefix(&mut output, "### ");
+            } else if normalized.starts_with("li") {
+                if normalized.contains("data-type=\"taskitem\"")
+                    || normalized.contains("data-task-item=\"true\"")
+                {
+                    if normalized.contains("data-checked=\"true\"") {
+                        Self::push_block_prefix(&mut output, "- [x] ");
+                    } else {
+                        Self::push_block_prefix(&mut output, "- [ ] ");
+                    }
+                } else {
+                    Self::push_block_prefix(&mut output, "- ");
+                }
+            }
+        }
+
+        Self::decode_html_entities(&output)
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("\n\n\n", "\n\n")
+            .trim()
+            .to_string()
+    }
+
+    fn push_block_prefix(output: &mut String, prefix: &str) {
+        if !output.trim_end().is_empty() {
+            Self::push_collapsed_newline(output);
+        }
+        output.push_str(prefix);
+    }
+
+    fn push_collapsed_newline(output: &mut String) {
+        if output.ends_with("\n\n") {
+            return;
+        }
+        if output.ends_with('\n') {
+            output.push('\n');
+        } else {
+            output.push_str("\n\n");
+        }
+    }
+
+    fn decode_html_entities(input: &str) -> String {
+        input
+            .replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+    }
+
+    fn text_to_strix_html(input: &str) -> String {
+        let mut html = String::new();
+        let mut task_list_open = false;
+
+        for line in input.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                if task_list_open {
+                    html.push_str("</ul>");
+                    task_list_open = false;
+                }
+                continue;
+            }
+
+            if let Some(task) = trimmed.strip_prefix("- [ ] ").or_else(|| trimmed.strip_prefix("- [x] ")) {
+                if !task_list_open {
+                    html.push_str("<ul data-type=\"taskList\">");
+                    task_list_open = true;
+                }
+                let checked = if trimmed.starts_with("- [x] ") { "true" } else { "false" };
+                html.push_str(&format!(
+                    "<li data-type=\"taskItem\" data-task-item=\"true\" data-checked=\"{}\"><label><input type=\"checkbox\"><span></span></label><div><p>{}</p></div></li>",
+                    checked,
+                    Self::escape_html(task)
+                ));
+                continue;
+            }
+
+            if task_list_open {
+                html.push_str("</ul>");
+                task_list_open = false;
+            }
+
+            if let Some(text) = trimmed.strip_prefix("### ") {
+                html.push_str(&format!("<h3>{}</h3>", Self::escape_html(text)));
+            } else if let Some(text) = trimmed.strip_prefix("## ") {
+                html.push_str(&format!("<h2>{}</h2>", Self::escape_html(text)));
+            } else if let Some(text) = trimmed.strip_prefix("# ") {
+                html.push_str(&format!("<h1>{}</h1>", Self::escape_html(text)));
+            } else if let Some(text) = trimmed.strip_prefix("- ") {
+                html.push_str(&format!("<ul><li><p>{}</p></li></ul>", Self::escape_html(text)));
+            } else {
+                html.push_str(&format!("<p>{}</p>", Self::escape_html(trimmed)));
+            }
+        }
+
+        if task_list_open {
+            html.push_str("</ul>");
+        }
+
+        if html.is_empty() {
+            String::from("<p></p>")
+        } else {
+            html
+        }
+    }
+
+    fn escape_html(input: &str) -> String {
+        input
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;")
+    }
+
     fn load_openrouter_api_key() -> Option<String> {
         if let Ok(entry) = Self::openrouter_key_entry() {
             if let Ok(password) = entry.get_password() {
@@ -3112,6 +3894,9 @@ impl App {
             note.content = self.editor_buffer.clone();
             note.updated_at = updated_at;
         }
+        if let Err(error) = self.push_note_to_strix(index) {
+            self.last_action = format!("Strix push failed: {}", error);
+        }
         self.save_shimmer_ticks = 4;
     }
 
@@ -3142,6 +3927,7 @@ impl App {
 
         let mut lines = vec![
             format!("ID: {}", note.id),
+            format!("Strix ID: {}", note.remote_id.as_deref().unwrap_or("local-only")),
             format!("Updated: {}", note.updated_at),
             folder_info,
             String::new(),
@@ -3180,7 +3966,12 @@ impl App {
         let lower = trimmed.to_lowercase();
         self.notes.iter().enumerate().find_map(|(index, note)| {
             let title = note.title.to_lowercase();
-            if note.title.eq_ignore_ascii_case(trimmed) || title.contains(&lower) {
+            let remote_matches = note
+                .remote_id
+                .as_deref()
+                .map(|remote_id| remote_id.eq_ignore_ascii_case(trimmed))
+                .unwrap_or(false);
+            if remote_matches || note.title.eq_ignore_ascii_case(trimmed) || title.contains(&lower) {
                 Some(index)
             } else {
                 None
@@ -3197,7 +3988,14 @@ impl App {
                     || note.title.to_lowercase().contains(&query)
                     || note.content.to_lowercase().contains(&query)
             })
-            .map(|note| format!("{} — {}", note.title, Self::preview_text(&note.content, 56)))
+            .map(|note| {
+                let id_label = note
+                    .remote_id
+                    .as_deref()
+                    .map(|remote_id| format!("#{} {}", note.id, remote_id))
+                    .unwrap_or_else(|| format!("#{}", note.id));
+                format!("{} {} — {}", id_label, note.title, Self::preview_text(&note.content, 56))
+            })
             .collect()
     }
 
