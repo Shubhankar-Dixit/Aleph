@@ -1414,29 +1414,30 @@ fn render_note_list_panel(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let selected = app.note_list_selected();
-    let lines: Vec<Line> = app
+    let selected = app
+        .note_list_selected()
+        .min(app.panel_lines().len().saturating_sub(1));
+    let rows = app
         .panel_lines()
         .iter()
-        .enumerate()
-        .map(|(index, line)| {
-            if index == selected {
-                // Highlight the selected line
-                Line::from(vec![
-                    Span::styled("▶ ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                    Span::styled(line, Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(line, Style::default().fg(MUTED)),
-                ])
-            }
+        .map(|line| {
+            Row::new(vec![Cell::from(Span::styled(
+                line,
+                Style::default().fg(MUTED),
+            ))])
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, inner);
+    let table = Table::new(rows, [Constraint::Min(0)])
+        .row_highlight_style(Style::default().fg(TEXT).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▶ ")
+        .column_spacing(0);
+
+    let mut table_state = ratatui::widgets::TableState::default();
+    if !app.panel_lines().is_empty() {
+        table_state.select(Some(selected));
+    }
+    frame.render_stateful_widget(table, inner, &mut table_state);
 }
 
 fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
