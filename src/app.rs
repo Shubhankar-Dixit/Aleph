@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -222,7 +222,7 @@ const OPENROUTER_CHAT_MODEL: &str = "nvidia/nemotron-3-nano-30b-a3b:free";
 const OPENROUTER_SERVICE: &str = "Aleph";
 const OPENROUTER_ACCOUNT: &str = "openrouter_api_key";
 const OPENROUTER_AUTH_CALLBACK: &str = "/aleph/openrouter/callback";
-const OPENROUTER_AUTH_PORT: u16 = 3000;
+const OPENROUTER_AUTH_PORT: u16 = 43878;
 const STRIX_SERVICE: &str = "Aleph";
 const STRIX_ACCOUNT: &str = "strix_access_token";
 const STRIX_AUTH_CALLBACK: &str = "/aleph/strix/callback";
@@ -884,7 +884,7 @@ impl App {
                             .rev()
                             .find(|message| message.role == "assistant")
                         {
-                            message.content = String::from("OpenRouter returned no content.");
+                            message.content = String::from("Aleph returned no content.");
                         }
                     }
 
@@ -895,7 +895,7 @@ impl App {
                     self.thinking = false;
                     self.thinking_ticks_remaining = 0;
                     self.chat_stream_rx = None;
-                    self.last_action = String::from("OpenRouter response received.");
+                    self.last_action = String::from("AI response received.");
                     stream_finished = true;
                 }
                 Ok(ChatStreamUpdate::Error(error)) => {
@@ -906,13 +906,13 @@ impl App {
                         .find(|message| message.role == "assistant")
                     {
                         if message.content.trim().is_empty() {
-                            message.content = format!("OpenRouter chat failed: {}", error);
+                            message.content = format!("AI chat failed: {}", error);
                         } else {
                             message.content.push_str("\n\n");
-                            message.content.push_str(&format!("[OpenRouter error: {}]", error));
+                            message.content.push_str(&format!("[AI error: {}]", error));
                         }
                     } else {
-                        self.push_chat_message("assistant", format!("OpenRouter chat failed: {}", error));
+                        self.push_chat_message("assistant", format!("AI chat failed: {}", error));
                     }
 
                     self.streaming_buffer.clear();
@@ -922,7 +922,7 @@ impl App {
                     self.thinking = false;
                     self.thinking_ticks_remaining = 0;
                     self.chat_stream_rx = None;
-                    self.last_action = String::from("OpenRouter request failed.");
+                    self.last_action = String::from("AI request failed.");
                     stream_finished = true;
                 }
                 Err(TryRecvError::Empty) => {
@@ -936,7 +936,7 @@ impl App {
                         .rev()
                         .find(|message| message.role == "assistant")
                     {
-                        message.content = String::from("OpenRouter chat disconnected before a response arrived.");
+                        message.content = String::from("AI chat disconnected before a response arrived.");
                     }
 
                     self.streaming_buffer.clear();
@@ -946,7 +946,7 @@ impl App {
                     self.thinking = false;
                     self.thinking_ticks_remaining = 0;
                     self.chat_stream_rx = None;
-                    self.last_action = String::from("OpenRouter request disconnected.");
+                    self.last_action = String::from("AI request disconnected.");
                     stream_finished = true;
                 }
             }
@@ -1176,7 +1176,7 @@ impl App {
     }
 
     pub fn title_cursor(&self) -> usize {
-        self.title_cursor
+        Self::clamp_to_char_boundary(&self.title_buffer, self.title_cursor)
     }
 
     pub fn is_ghost_streaming(&self) -> bool {
@@ -2762,7 +2762,7 @@ impl App {
         let (code_verifier, code_challenge) = Self::build_pkce_pair();
         let callback_nonce = Self::build_login_nonce();
         let callback_path = format!("{}/{}", OPENROUTER_AUTH_CALLBACK, callback_nonce);
-        let callback_url = format!("http://127.0.0.1:3000{}", callback_path);
+        let callback_url = format!("http://127.0.0.1:{}{}", OPENROUTER_AUTH_PORT, callback_path);
         let auth_url = format!(
             "https://openrouter.ai/auth?callback_url={}&code_challenge={}&code_challenge_method=S256",
             urlencoding::encode(&callback_url),
@@ -3276,23 +3276,25 @@ impl App {
         }
 
         if self.chat_stream_rx.is_some() {
-            self.last_action = String::from("OpenRouter is still answering the previous message.");
+            self.last_action = String::from("Aleph is still answering the previous message.");
             return false;
         }
 
-        let Some(api_key) = self.openrouter_api_key.clone() else {
-            self.push_chat_message("user", query.clone());
-            self.push_chat_message("assistant", String::from("OpenRouter is not connected. Run /login <api-key> first."));
-            self.thinking = false;
-            self.thinking_ticks_remaining = 0;
-            self.streaming_active = false;
-            self.last_action = String::from("OpenRouter login required.");
-            return true;
-        };
+        let provider = self.ai_provider;
+        let openrouter_api_key = self.openrouter_api_key.clone();
+        let strix_access_token = self.strix_access_token.clone();
 
         self.push_chat_message("user", query.clone());
 
-        let conversation = self.openrouter_conversation();
+        let conversation = match provider {
+            AiProvider::OpenRouter => self.openrouter_conversation(),
+            AiProvider::Strix => Vec::new(),
+        };
+        let strix_notes = if provider == AiProvider::Strix {
+            self.notes.clone()
+        } else {
+            Vec::new()
+        };
 
         self.push_chat_message("assistant", String::new());
 
@@ -3307,11 +3309,35 @@ impl App {
         let (sender, receiver) = mpsc::channel();
         self.chat_stream_rx = Some(receiver);
 
-        thread::spawn(move || {
-            if let Err(error) = Self::send_openrouter_chat_streaming(&api_key, &conversation, sender.clone()) {
-                let _ = sender.send(ChatStreamUpdate::Error(error));
+        match provider {
+            AiProvider::OpenRouter => {
+                let Some(api_key) = openrouter_api_key else {
+                    let _ = sender.send(ChatStreamUpdate::Error(String::from(
+                        "OpenRouter is not connected. Run /login openrouter first.",
+                    )));
+                    return true;
+                };
+                thread::spawn(move || {
+                    if let Err(error) = Self::send_openrouter_chat_streaming(&api_key, &conversation, sender.clone()) {
+                        let _ = sender.send(ChatStreamUpdate::Error(error));
+                    }
+                });
             }
-        });
+            AiProvider::Strix => {
+                let Some(access_token) = strix_access_token else {
+                    let _ = sender.send(ChatStreamUpdate::Error(String::from(
+                        "Strix is not connected. Run /login strix first.",
+                    )));
+                    return true;
+                };
+                let base_url = Self::strix_api_base_url();
+                thread::spawn(move || {
+                    if let Err(error) = Self::send_strix_chat(&base_url, &access_token, &query, &strix_notes, sender.clone()) {
+                        let _ = sender.send(ChatStreamUpdate::Error(error));
+                    }
+                });
+            }
+        }
 
         true
     }
@@ -3342,10 +3368,10 @@ impl App {
         if self.chat_messages.is_empty() {
             lines.push(Line::from(""));
             lines.push(Line::from(vec![Span::styled(
-                if self.is_openrouter_connected() {
+                if self.is_openrouter_connected() || self.is_strix_connected() {
                     "Welcome to Aleph AI chat. Type a message below to start."
                 } else {
-                    "Welcome to Aleph AI chat. Run /login openrouter to sign in in your browser."
+                    "Welcome to Aleph AI chat. Run /login to sign in."
                 },
                 Style::default().fg(CHAT_MUTED),
             )]));
@@ -3628,11 +3654,21 @@ impl App {
         payload: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
         let token = self.strix_access_token()?;
+        Self::strix_json_request_with(&Self::strix_api_base_url(), token, method, path, payload)
+    }
+
+    fn strix_json_request_with(
+        base_url: &str,
+        token: &str,
+        method: &str,
+        path: &str,
+        payload: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|error| format!("failed to build HTTP client: {}", error))?;
-        let url = format!("{}{}", Self::strix_api_base_url(), path);
+        let url = format!("{}{}", base_url.trim_end_matches('/'), path);
         let mut request = match method {
             "GET" => client.get(url),
             "POST" => client.post(url),
@@ -3658,14 +3694,95 @@ impl App {
         serde_json::from_str(&body).map_err(|error| format!("failed to parse Strix response: {}", error))
     }
 
+    fn send_strix_chat(
+        base_url: &str,
+        token: &str,
+        query: &str,
+        notes: &[Note],
+        sender: Sender<ChatStreamUpdate>,
+    ) -> Result<(), String> {
+        let notes_payload: Vec<_> = notes
+            .iter()
+            .take(STRIX_NOTES_LIMIT)
+            .map(|note| {
+                let id = note
+                    .remote_id
+                    .clone()
+                    .unwrap_or_else(|| note.id.to_string());
+                serde_json::json!({
+                    "id": id,
+                    "title": note.title.as_str(),
+                    "content": note.content.as_str(),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "question": query,
+            "notes": notes_payload,
+        });
+        let value = Self::strix_json_request_with(base_url, token, "POST", "/nest/ask", Some(payload))?;
+        let answer = value
+            .get("answer")
+            .or_else(|| value.get("result").and_then(|result| result.get("answer")))
+            .or_else(|| value.get("content"))
+            .and_then(|answer| answer.as_str())
+            .unwrap_or("Strix returned an empty answer.")
+            .to_string();
+        let _ = sender.send(ChatStreamUpdate::Delta(answer));
+        let _ = sender.send(ChatStreamUpdate::Done);
+        Ok(())
+    }
+
     fn sync_strix_notes(&mut self) -> Result<usize, String> {
-        let notes = self.load_strix_notes("", STRIX_NOTES_LIMIT)?;
-        let count = notes.len();
-        self.notes = notes;
+        let remote_notes = self.load_strix_notes("", STRIX_NOTES_LIMIT)?;
+        let count = remote_notes.len();
+        self.merge_strix_notes(remote_notes);
         self.selected_note = 0;
         Self::save_cached_strix_notes(&self.notes)?;
         self.add_strix_log(format!("Synced {} notes", count));
         Ok(count)
+    }
+
+    fn merge_strix_notes(&mut self, remote_notes: Vec<Note>) {
+        let existing_by_remote_id: HashMap<String, Note> = self
+            .notes
+            .iter()
+            .filter_map(|note| note.remote_id.as_ref().map(|remote_id| (remote_id.clone(), note.clone())))
+            .collect();
+        let mut merged = Vec::with_capacity(remote_notes.len() + self.notes.len());
+        let mut remote_ids = Vec::new();
+
+        for mut note in remote_notes {
+            if let Some(remote_id) = note.remote_id.clone() {
+                if let Some(existing) = existing_by_remote_id.get(&remote_id) {
+                    note.id = existing.id;
+                    if note.obsidian_path.is_none() {
+                        note.obsidian_path = existing.obsidian_path.clone();
+                    }
+                    if note.folder_id.is_none() {
+                        note.folder_id = existing.folder_id;
+                    }
+                }
+                remote_ids.push(remote_id);
+            }
+            merged.push(note);
+        }
+
+        for note in &self.notes {
+            let is_matched_remote_note = note
+                .remote_id
+                .as_ref()
+                .map(|remote_id| remote_ids.iter().any(|id| id == remote_id))
+                .unwrap_or(false);
+            if !is_matched_remote_note {
+                merged.push(note.clone());
+            }
+        }
+
+        for (index, note) in merged.iter_mut().enumerate() {
+            note.id = index + 1;
+        }
+        self.notes = merged;
     }
 
     fn handle_obsidian_pair(&mut self, target: &str) {
@@ -4335,6 +4452,7 @@ impl App {
                 }
                 *existing = note;
                 self.selected_note = index;
+                let _ = Self::save_cached_strix_notes(&self.notes);
                 return;
             }
         }
@@ -5138,6 +5256,7 @@ impl App {
         if key_event.kind != KeyEventKind::Press && key_event.kind != KeyEventKind::Repeat {
             return;
         }
+        self.title_cursor = Self::clamp_to_char_boundary(&self.title_buffer, self.title_cursor);
         match key_event.code {
             KeyCode::Enter => {
                 self.finish_title_edit(true);
@@ -5147,23 +5266,25 @@ impl App {
             }
             KeyCode::Backspace => {
                 if self.title_cursor > 0 {
-                    self.title_buffer.remove(self.title_cursor - 1);
-                    self.title_cursor -= 1;
+                    let previous = Self::previous_char_boundary(&self.title_buffer, self.title_cursor);
+                    self.title_buffer.drain(previous..self.title_cursor);
+                    self.title_cursor = previous;
                 }
             }
             KeyCode::Delete => {
                 if self.title_cursor < self.title_buffer.len() {
-                    self.title_buffer.remove(self.title_cursor);
+                    let next = Self::next_char_boundary(&self.title_buffer, self.title_cursor);
+                    self.title_buffer.drain(self.title_cursor..next);
                 }
             }
             KeyCode::Left => {
                 if self.title_cursor > 0 {
-                    self.title_cursor -= 1;
+                    self.title_cursor = Self::previous_char_boundary(&self.title_buffer, self.title_cursor);
                 }
             }
             KeyCode::Right => {
                 if self.title_cursor < self.title_buffer.len() {
-                    self.title_cursor += 1;
+                    self.title_cursor = Self::next_char_boundary(&self.title_buffer, self.title_cursor);
                 }
             }
             KeyCode::Home => {
@@ -5174,10 +5295,36 @@ impl App {
             }
             KeyCode::Char(c) if !key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.title_buffer.insert(self.title_cursor, c);
-                self.title_cursor += 1;
+                self.title_cursor += c.len_utf8();
             }
             _ => {}
         }
+    }
+
+    fn previous_char_boundary(input: &str, cursor: usize) -> usize {
+        let cursor = Self::clamp_to_char_boundary(input, cursor);
+        input[..cursor]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    }
+
+    fn next_char_boundary(input: &str, cursor: usize) -> usize {
+        let cursor = Self::clamp_to_char_boundary(input, cursor);
+        input[cursor..]
+            .chars()
+            .next()
+            .map(|character| cursor + character.len_utf8())
+            .unwrap_or_else(|| input.len())
+    }
+
+    fn clamp_to_char_boundary(input: &str, cursor: usize) -> usize {
+        let mut cursor = cursor.min(input.len());
+        while cursor > 0 && !input.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
+        cursor
     }
 
     fn search_next(&mut self) {
@@ -5796,10 +5943,9 @@ impl App {
             return;
         }
 
-        let Some(api_key) = self.openrouter_api_key.clone() else {
-            self.ghost_result = Some(String::from("Not connected. Run /login first."));
-            return;
-        };
+        let provider = self.ai_provider;
+        let openrouter_api_key = self.openrouter_api_key.clone();
+        let strix_access_token = self.strix_access_token.clone();
 
         let editor_content = self.editor_buffer.clone();
         self.ghost_streaming = true;
@@ -5819,6 +5965,7 @@ impl App {
             "Current note content:\n---\n{}\n---\n\nInstruction: {}",
             editor_content, instruction
         );
+        let strix_instruction = format!("{}\n\n{}", system_prompt, user_msg);
 
         let conversation = vec![
             (String::from("system"), system_prompt),
@@ -5828,11 +5975,49 @@ impl App {
         let (sender, receiver) = mpsc::channel();
         self.ghost_stream_rx = Some(receiver);
 
-        thread::spawn(move || {
-            if let Err(error) = Self::send_openrouter_chat_streaming(&api_key, &conversation, sender.clone()) {
-                let _ = sender.send(ChatStreamUpdate::Error(error));
+        match provider {
+            AiProvider::OpenRouter => {
+                let Some(api_key) = openrouter_api_key else {
+                    self.ghost_result = Some(String::from("OpenRouter is not connected. Run /login openrouter first."));
+                    self.ghost_streaming = false;
+                    self.thinking = false;
+                    self.thinking_ticks_remaining = 0;
+                    self.ghost_stream_rx = None;
+                    return;
+                };
+                thread::spawn(move || {
+                    if let Err(error) = Self::send_openrouter_chat_streaming(&api_key, &conversation, sender.clone()) {
+                        let _ = sender.send(ChatStreamUpdate::Error(error));
+                    }
+                });
             }
-        });
+            AiProvider::Strix => {
+                let Some(access_token) = strix_access_token else {
+                    self.ghost_result = Some(String::from("Strix is not connected. Run /login strix first."));
+                    self.ghost_streaming = false;
+                    self.thinking = false;
+                    self.thinking_ticks_remaining = 0;
+                    self.ghost_stream_rx = None;
+                    return;
+                };
+                let base_url = Self::strix_api_base_url();
+                let notes = vec![Note {
+                    id: 1,
+                    remote_id: None,
+                    obsidian_path: None,
+                    title: String::from("Current note"),
+                    content: editor_content,
+                    raw_content: String::new(),
+                    updated_at: String::new(),
+                    folder_id: None,
+                }];
+                thread::spawn(move || {
+                    if let Err(error) = Self::send_strix_chat(&base_url, &access_token, &strix_instruction, &notes, sender.clone()) {
+                        let _ = sender.send(ChatStreamUpdate::Error(error));
+                    }
+                });
+            }
+        }
 
         self.ai_input_buffer.clear();
         self.ai_input_cursor = 0;
@@ -5921,6 +6106,19 @@ mod tests {
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Repeat,
             state: KeyEventState::NONE,
+        }
+    }
+
+    fn test_note(id: usize, remote_id: Option<&str>, title: &str, content: &str) -> Note {
+        Note {
+            id,
+            remote_id: remote_id.map(String::from),
+            obsidian_path: None,
+            title: title.to_string(),
+            content: content.to_string(),
+            raw_content: String::new(),
+            updated_at: String::new(),
+            folder_id: None,
         }
     }
 
@@ -6043,6 +6241,64 @@ mod tests {
     fn obsidian_filenames_are_sanitized() {
         assert_eq!(App::safe_obsidian_filename("Daily/Plan: Q2?"), "Daily-Plan- Q2-");
         assert_eq!(App::safe_obsidian_filename("   ...   "), "Untitled note");
+    }
+
+    #[test]
+    fn strix_sync_merge_preserves_local_only_notes() {
+        let mut app = App::new();
+        app.notes = vec![
+            test_note(1, None, "Offline draft", "local"),
+            test_note(2, Some("remote-1"), "Cached remote", "old"),
+        ];
+
+        app.merge_strix_notes(vec![
+            test_note(9, Some("remote-1"), "Remote updated", "new"),
+            test_note(10, Some("remote-2"), "Remote new", "fresh"),
+        ]);
+
+        assert!(app.notes.iter().any(|note| note.title == "Offline draft"));
+        assert!(app.notes.iter().any(|note| note.title == "Remote updated"));
+        assert!(app.notes.iter().any(|note| note.title == "Remote new"));
+        assert_eq!(app.notes.len(), 3);
+    }
+
+    #[test]
+    fn upsert_existing_synced_note_updates_cache() {
+        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap();
+        let cache_path = std::env::temp_dir().join(format!("aleph-strix-cache-test-{}.json", App::now_millis()));
+        std::env::set_var("ALEPH_STRIX_CACHE", &cache_path);
+
+        let mut app = App::new();
+        app.notes = vec![test_note(1, Some("remote-1"), "Old", "old")];
+        app.upsert_synced_note(test_note(99, Some("remote-1"), "Updated", "new"));
+
+        let saved = fs::read_to_string(&cache_path).unwrap();
+        assert!(saved.contains("Updated"));
+        assert!(saved.contains("new"));
+
+        std::env::remove_var("ALEPH_STRIX_CACHE");
+        let _ = fs::remove_file(cache_path);
+    }
+
+    #[test]
+    fn title_edit_cursor_stays_on_utf8_boundaries() {
+        let mut app = App::new();
+        app.editing_title = true;
+
+        app.handle_title_edit_key(press(KeyCode::Char('é')));
+        assert_eq!(app.title_buffer, "é");
+        assert_eq!(app.title_cursor, "é".len());
+
+        app.handle_title_edit_key(press(KeyCode::Left));
+        assert_eq!(app.title_cursor, 0);
+
+        app.handle_title_edit_key(press(KeyCode::Right));
+        assert_eq!(app.title_cursor, "é".len());
+
+        app.handle_title_edit_key(press(KeyCode::Backspace));
+        assert!(app.title_buffer.is_empty());
+        assert_eq!(app.title_cursor, 0);
     }
 
     #[test]
