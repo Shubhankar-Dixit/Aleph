@@ -54,6 +54,7 @@ pub enum PanelMode {
     FullEditor,
     AiChat,
     LoginPicker,
+    NoteList,
 }
 
 #[derive(Clone)]
@@ -182,22 +183,6 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Search stored memories",
     },
     CommandSpec {
-        name: "canvas list",
-        description: "List canvases",
-    },
-    CommandSpec {
-        name: "canvas show",
-        description: "Preview a canvas",
-    },
-    CommandSpec {
-        name: "canvas export",
-        description: "Export a canvas snapshot",
-    },
-    CommandSpec {
-        name: "darwin run",
-        description: "Run Darwin reasoning",
-    },
-    CommandSpec {
         name: "serve mcp",
         description: "Start the MCP server",
     },
@@ -291,6 +276,11 @@ pub struct App {
     ghost_stream_rx: Option<Receiver<ChatStreamUpdate>>,
     ghost_streaming: bool,
     ghost_result: Option<String>,
+    note_list_selected: usize,
+    note_list_indices: Vec<usize>,
+    editing_title: bool,
+    title_buffer: String,
+    title_cursor: usize,
 }
 
 #[allow(dead_code)]
@@ -448,6 +438,11 @@ impl App {
             ghost_stream_rx: None,
             ghost_streaming: false,
             ghost_result: None,
+            note_list_selected: 0,
+            note_list_indices: Vec::new(),
+            editing_title: false,
+            title_buffer: String::new(),
+            title_cursor: 0,
         };
 
         if app.strix_access_token.is_some() {
@@ -1006,6 +1001,30 @@ impl App {
         self.panel_mode == PanelMode::LoginPicker
     }
 
+    pub fn is_note_list(&self) -> bool {
+        self.panel_mode == PanelMode::NoteList
+    }
+
+    pub fn note_list_selected(&self) -> usize {
+        self.note_list_selected
+    }
+
+    pub fn note_list_indices(&self) -> &[usize] {
+        &self.note_list_indices
+    }
+
+    pub fn is_editing_title(&self) -> bool {
+        self.editing_title
+    }
+
+    pub fn title_buffer(&self) -> &str {
+        &self.title_buffer
+    }
+
+    pub fn title_cursor(&self) -> usize {
+        self.title_cursor
+    }
+
     pub fn is_ghost_streaming(&self) -> bool {
         self.ghost_streaming
     }
@@ -1047,12 +1066,16 @@ impl App {
             COMMANDS
                 .iter()
                 .filter(|cmd| {
-                    cmd.name.contains(&query)
-                        || cmd.description.to_lowercase().contains(&query)
+                    self.is_command_visible(cmd)
+                        && (cmd.name.contains(&query)
+                            || cmd.description.to_lowercase().contains(&query))
                 })
                 .collect()
         } else {
-            COMMANDS.iter().collect()
+            COMMANDS
+                .iter()
+                .filter(|cmd| self.is_command_visible(cmd))
+                .collect()
         };
 
         let total = all.len();
@@ -1090,7 +1113,10 @@ impl App {
 
         // Show all commands when query is empty
         if query.is_empty() {
-            let mut all: Vec<_> = COMMANDS.iter().collect();
+            let mut all: Vec<_> = COMMANDS
+                .iter()
+                .filter(|cmd| self.is_command_visible(cmd))
+                .collect();
             all.truncate(limit);
             return all;
         }
@@ -1099,13 +1125,22 @@ impl App {
         let mut matches: Vec<&'static CommandSpec> = COMMANDS
             .iter()
             .filter(|command| {
-                command.name.contains(&query)
-                    || command.description.to_lowercase().contains(&query)
+                self.is_command_visible(command)
+                    && (command.name.contains(&query)
+                        || command.description.to_lowercase().contains(&query))
             })
             .collect();
 
         matches.truncate(limit);
         matches
+    }
+
+    fn is_command_visible(&self, cmd: &CommandSpec) -> bool {
+        match cmd.name {
+            "login" => !self.connected,
+            "logout" => self.connected,
+            _ => true,
+        }
     }
 
     pub fn total_command_matches(&self) -> usize {
@@ -1141,6 +1176,10 @@ impl App {
         }
         if self.is_login_picker() {
             self.handle_login_picker_key(key_event);
+            return;
+        }
+        if self.is_note_list() {
+            self.handle_note_list_key(key_event);
             return;
         }
 
@@ -1488,13 +1527,17 @@ impl App {
         let query = self.suggestion_filter.as_ref().unwrap().clone();
 
         let suggestions: Vec<_> = if query.is_empty() {
-            COMMANDS.iter().collect()
+            COMMANDS
+                .iter()
+                .filter(|cmd| self.is_command_visible(cmd))
+                .collect()
         } else {
             COMMANDS
                 .iter()
                 .filter(|cmd| {
-                    cmd.name.contains(&query)
-                        || cmd.description.to_lowercase().contains(&query)
+                    self.is_command_visible(cmd)
+                        && (cmd.name.contains(&query)
+                            || cmd.description.to_lowercase().contains(&query))
                 })
                 .collect()
         };
@@ -1627,9 +1670,6 @@ impl App {
                 | "folder notes"
                 | "memory save"
                 | "memory search"
-                | "canvas show"
-                | "canvas export"
-                | "darwin run"
         )
     }
 
@@ -1960,7 +2000,8 @@ impl App {
                     .and_then(|id| self.get_folder_name(id))
                     .unwrap_or_else(|| String::from("All notes"));
 
-                let lines = self
+                // Collect indices of notes that match the folder filter
+                self.note_list_indices = self
                     .notes
                     .iter()
                     .enumerate()
@@ -1968,7 +2009,15 @@ impl App {
                         // If we're in a folder, only show notes from that folder
                         folder_id.is_none() || note.folder_id == folder_id
                     })
-                    .map(|(index, note)| {
+                    .map(|(index, _)| index)
+                    .collect();
+
+                let lines = self
+                    .note_list_indices
+                    .iter()
+                    .enumerate()
+                    .map(|(list_index, &note_index)| {
+                        let note = &self.notes[note_index];
                         let folder_indicator = if let Some(fid) = note.folder_id {
                             let fname = self.get_folder_name(fid).unwrap_or_default();
                             format!("[{}] ", &fname[..fname.len().min(8)])
@@ -1977,7 +2026,7 @@ impl App {
                         };
                         format!(
                             "{:>2}. #{} {:<14} {}{}{}",
-                            index + 1,
+                            list_index + 1,
                             note.id,
                             if note.title.len() > 14 { format!("{}…", &note.title[..13]) } else { note.title.clone() },
                             folder_indicator,
@@ -1987,8 +2036,11 @@ impl App {
                     })
                     .collect::<Vec<_>>();
 
-                self.set_result_panel(format!("Notes — {}", folder_name), lines);
-                self.last_action = String::from("Listed notes.");
+                self.note_list_selected = 0;
+                self.panel_mode = PanelMode::NoteList;
+                self.panel_title = format!("Notes — {} (↑/↓ to navigate, Enter to open)", folder_name);
+                self.panel_lines = lines;
+                self.last_action = String::from("Listed notes. Use arrow keys to navigate.");
             }
             "note read" => {
                 if self.is_strix_connected() {
@@ -2353,57 +2405,6 @@ impl App {
 
                 self.set_result_panel(format!("Memory search: {}", args.trim()), lines);
                 self.last_action = String::from("Searched memories.");
-            }
-            "canvas list" => {
-                let lines = self
-                    .canvases
-                    .iter()
-                    .enumerate()
-                    .map(|(index, canvas)| format!("{:>2}. {}", index + 1, canvas))
-                    .collect::<Vec<_>>();
-                self.set_result_panel("Canvases", lines);
-                self.last_action = String::from("Listed canvases.");
-            }
-            "canvas show" => {
-                let query = args.trim();
-                let canvas = self
-                    .canvases
-                    .iter()
-                    .find(|name| query.is_empty() || name.to_lowercase().contains(&query.to_lowercase()))
-                    .cloned()
-                    .unwrap_or_else(|| String::from("Canvas not found"));
-                self.set_result_panel(
-                    format!("Canvas: {}", query),
-                    vec![canvas, String::from("Canvas previews stay text-first in this build.")],
-                );
-                self.last_action = String::from("Opened a canvas preview.");
-            }
-            "canvas export" => {
-                let query = if args.trim().is_empty() {
-                    String::from("selected canvas")
-                } else {
-                    args.trim().to_string()
-                };
-                self.set_result_panel(
-                    "Canvas export",
-                    vec![
-                        format!("Exported {} as JSON in the local demo flow.", query),
-                        String::from("Wire this to the real Strix export endpoint next."),
-                    ],
-                );
-                self.last_action = String::from("Exported a canvas snapshot.");
-            }
-            "darwin run" => {
-                let query = args.trim();
-                self.set_result_panel(
-                    "Darwin",
-                    vec![
-                        format!("Question: {}", query),
-                        String::from("Champion thesis: push note editing and MCP wiring first."),
-                        String::from("Risks: local mock data will need a real Strix adapter later."),
-                    ],
-                );
-                self.last_action = String::from("Ran Darwin reasoning.");
             }
             "serve mcp" => {
                 self.set_result_panel(
@@ -4271,6 +4272,76 @@ impl App {
         self.search_state.current_match = None;
     }
 
+    fn start_title_edit(&mut self) {
+        if let Some(index) = self.editor_note_index {
+            self.editing_title = true;
+            self.title_buffer = self.notes[index].title.clone();
+            self.title_cursor = self.title_buffer.len();
+            self.last_action = String::from("Editing title. Press Enter to save, Esc to cancel.");
+        }
+    }
+
+    fn finish_title_edit(&mut self, save: bool) {
+        if save && !self.title_buffer.trim().is_empty() {
+            if let Some(index) = self.editor_note_index {
+                self.notes[index].title = self.title_buffer.trim().to_string();
+                self.panel_title = format!("Editing: {}", self.notes[index].title);
+                self.last_action = format!("Title updated to: {}", self.notes[index].title);
+            }
+        } else if !save {
+            self.last_action = String::from("Title edit cancelled.");
+        }
+        self.editing_title = false;
+        self.title_buffer.clear();
+        self.title_cursor = 0;
+    }
+
+    fn handle_title_edit_key(&mut self, key_event: KeyEvent) {
+        if key_event.kind != KeyEventKind::Press && key_event.kind != KeyEventKind::Repeat {
+            return;
+        }
+        match key_event.code {
+            KeyCode::Enter => {
+                self.finish_title_edit(true);
+            }
+            KeyCode::Esc => {
+                self.finish_title_edit(false);
+            }
+            KeyCode::Backspace => {
+                if self.title_cursor > 0 {
+                    self.title_buffer.remove(self.title_cursor - 1);
+                    self.title_cursor -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                if self.title_cursor < self.title_buffer.len() {
+                    self.title_buffer.remove(self.title_cursor);
+                }
+            }
+            KeyCode::Left => {
+                if self.title_cursor > 0 {
+                    self.title_cursor -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if self.title_cursor < self.title_buffer.len() {
+                    self.title_cursor += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.title_cursor = 0;
+            }
+            KeyCode::End => {
+                self.title_cursor = self.title_buffer.len();
+            }
+            KeyCode::Char(c) if !key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.title_buffer.insert(self.title_cursor, c);
+                self.title_cursor += 1;
+            }
+            _ => {}
+        }
+    }
+
     fn search_next(&mut self) {
         if self.search_state.matches.is_empty() {
             return;
@@ -4444,6 +4515,11 @@ impl App {
     }
 
     fn handle_full_editor_key(&mut self, key_event: KeyEvent) {
+        if self.editing_title {
+            self.handle_title_edit_key(key_event);
+            return;
+        }
+
         if self.search_state.active {
             self.handle_search_key(key_event);
             return;
@@ -4531,6 +4607,9 @@ impl App {
                 self.save_editor();
             }
             KeyCode::Esc if key_event.kind == KeyEventKind::Press => self.exit_editor(),
+            KeyCode::Tab if key_event.kind == KeyEventKind::Press => {
+                self.start_title_edit();
+            }
             KeyCode::Char(' ')
                 if key_event.kind == KeyEventKind::Press
                     && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -4559,9 +4638,6 @@ impl App {
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
                 self.save_undo_state();
                 self.insert_editor_character('\n');
-            }
-            KeyCode::Tab if key_event.kind == KeyEventKind::Press => {
-                self.insert_editor_text("    ");
             }
             KeyCode::Backspace if key_event.kind == KeyEventKind::Press => self.editor_backspace(),
             KeyCode::Delete if key_event.kind == KeyEventKind::Press => self.editor_delete(),
@@ -4784,6 +4860,41 @@ impl App {
                         }
                     }
                     _ => {}
+                }
+            }
+            KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.request_quit();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_note_list_key(&mut self, key_event: KeyEvent) {
+        if key_event.kind != KeyEventKind::Press && key_event.kind != KeyEventKind::Repeat {
+            return;
+        }
+        match key_event.code {
+            KeyCode::Esc => {
+                self.panel_mode = PanelMode::Commands;
+                self.panel_title = String::from("Commands");
+                self.panel_lines.clear();
+                self.last_action = String::from("Exited note list.");
+            }
+            KeyCode::Up => {
+                if self.note_list_selected > 0 {
+                    self.note_list_selected -= 1;
+                    self.last_action = format!("Selected note {}", self.note_list_selected + 1);
+                }
+            }
+            KeyCode::Down => {
+                if self.note_list_selected + 1 < self.note_list_indices.len() {
+                    self.note_list_selected += 1;
+                    self.last_action = format!("Selected note {}", self.note_list_selected + 1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(&note_index) = self.note_list_indices.get(self.note_list_selected) {
+                    self.open_note_editor(note_index);
                 }
             }
             KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {

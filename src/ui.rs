@@ -167,6 +167,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     match app.panel_mode() {
         PanelMode::Commands | PanelMode::LoginPicker => render_commands_panel(frame, app, root[4]),
+        PanelMode::NoteList => render_note_list_panel(frame, app, root[4]),
         PanelMode::NoteEditor => render_note_editor_panel(frame, app, root[4]),
         PanelMode::FullEditor | PanelMode::AiChat => {},
     }
@@ -437,10 +438,23 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(MUTED)
     };
 
-    let mut meta_spans = vec![Span::styled(
-        format!("{} / Draft / {} words", title, word_count),
-        meta_style,
-    )];
+    let mut meta_spans = vec![];
+
+    if app.is_editing_title() {
+        // Show title editing mode
+        let cursor = app.title_cursor().min(app.title_buffer().len());
+        meta_spans.push(Span::styled("Title: ", Style::default().fg(ACCENT)));
+        meta_spans.push(Span::styled(&app.title_buffer()[..cursor], Style::default().fg(TEXT)));
+        meta_spans.push(Span::styled(CURSOR, Style::default().fg(ACCENT)));
+        meta_spans.push(Span::styled(&app.title_buffer()[cursor..], Style::default().fg(TEXT)));
+        meta_spans.push(Span::raw("  "));
+        meta_spans.push(Span::styled("(Enter to save, Esc to cancel)", Style::default().fg(MUTED)));
+    } else {
+        meta_spans.push(Span::styled(
+            format!("{} / Draft / {} words", title, word_count),
+            meta_style,
+        ));
+    }
 
     if app.search_state().active {
         meta_spans.push(Span::raw("  "));
@@ -546,7 +560,7 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let hints = Span::styled(
-        "Ctrl+S save · Ctrl+F find · Ctrl+Space ghost",
+        "Tab edit title · Ctrl+S save · Ctrl+F find · Ctrl+Space ghost",
         Style::default().fg(MUTED),
     );
     let bottom_hints = Paragraph::new(Line::from(hints))
@@ -1313,6 +1327,42 @@ fn render_obsidian_pairing_panel(frame: &mut Frame, app: &App, area: Rect) {
         "Enter",
         "pair vault",
     );
+}
+
+fn render_note_list_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            app.panel_title(),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let selected = app.note_list_selected();
+    let lines: Vec<Line> = app
+        .panel_lines()
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == selected {
+                // Highlight the selected line
+                Line::from(vec![
+                    Span::styled("▶ ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                    Span::styled(line, Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(line, Style::default().fg(MUTED)),
+                ])
+            }
+        })
+        .collect();
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, inner);
 }
 
 fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
