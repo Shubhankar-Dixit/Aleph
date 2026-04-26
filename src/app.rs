@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -40,11 +40,20 @@ pub struct Folder {
 pub struct Note {
     pub id: usize,
     pub remote_id: Option<String>,
+    pub obsidian_path: Option<PathBuf>,
     pub title: String,
     pub content: String,
     pub raw_content: String,
     pub updated_at: String,
     pub folder_id: Option<usize>,
+}
+
+#[derive(Clone)]
+pub struct ObsidianVault {
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
+    pub source: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -55,6 +64,7 @@ pub enum PanelMode {
     AiChat,
     LoginPicker,
     NoteList,
+    VaultPicker,
 }
 
 #[derive(Clone)]
@@ -112,7 +122,23 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "obsidian pair",
-        description: "Pair a local Obsidian vault",
+        description: "Pair a local Obsidian vault (usage: /obsidian pair | /obsidian pair <path|number|name>)",
+    },
+    CommandSpec {
+        name: "obsidian vaults",
+        description: "List detected Obsidian vaults",
+    },
+    CommandSpec {
+        name: "obsidian sync",
+        description: "Import Markdown notes from the paired Obsidian vault",
+    },
+    CommandSpec {
+        name: "obsidian status",
+        description: "Show the paired Obsidian vault and discovery config",
+    },
+    CommandSpec {
+        name: "obsidian open",
+        description: "Open the paired vault or selected note in Obsidian",
     },
     CommandSpec {
         name: "search",
@@ -204,6 +230,8 @@ const STRIX_AUTH_PORT: u16 = 43879;
 const STRIX_CLIENT_ID: &str = "aleph";
 const STRIX_AUTH_BASE_URL: &str = "http://localhost:3000";
 const STRIX_NOTES_LIMIT: usize = 100;
+const OBSIDIAN_SERVICE: &str = "Aleph";
+const OBSIDIAN_ACCOUNT: &str = "obsidian_vault_path";
 const MAX_CHAT_MESSAGES: usize = 24;
 const CHAT_TEXT: Color = Color::Rgb(198, 198, 210);
 const CHAT_MUTED: Color = Color::Rgb(120, 122, 138);
@@ -265,6 +293,9 @@ pub struct App {
     openrouter_login_cancel: Option<Arc<AtomicBool>>,
     strix_login_rx: Option<Receiver<Result<String, String>>>,
     strix_login_cancel: Option<Arc<AtomicBool>>,
+    obsidian_vault_path: Option<PathBuf>,
+    obsidian_vaults: Vec<ObsidianVault>,
+    obsidian_vault_selected: usize,
     ai_provider: AiProvider,
     strix_logs: Vec<String>,
     streaming_buffer: String,
@@ -288,6 +319,8 @@ impl App {
     pub fn new() -> Self {
         let openrouter_api_key = Self::load_openrouter_api_key();
         let strix_access_token = Self::load_strix_access_token();
+        let obsidian_vault_path = Self::load_obsidian_vault_path();
+        let obsidian_vaults = Self::discover_obsidian_vaults();
         let connected = openrouter_api_key.is_some() || strix_access_token.is_some();
         let ai_provider = if openrouter_api_key.is_some() {
             AiProvider::OpenRouter
@@ -329,6 +362,7 @@ impl App {
                 Note {
                     id: 1,
                     remote_id: None,
+                    obsidian_path: None,
                     title: String::from("Strix gateway"),
                     content: String::from(
                         "Build a stable gateway that normalizes auth, streaming, and note operations.",
@@ -342,6 +376,7 @@ impl App {
                 Note {
                     id: 2,
                     remote_id: None,
+                    obsidian_path: None,
                     title: String::from("Note editor"),
                     content: String::from(
                         "Use a terminal editor for quick edits, then move larger writes into the Strix product.",
@@ -355,6 +390,7 @@ impl App {
                 Note {
                     id: 3,
                     remote_id: None,
+                    obsidian_path: None,
                     title: String::from("MCP server"),
                     content: String::from(
                         "Expose Aleph as an MCP bridge so external agents can use Strix knowledge.",
@@ -368,6 +404,7 @@ impl App {
                 Note {
                     id: 4,
                     remote_id: None,
+                    obsidian_path: None,
                     title: String::from("Feature ideas"),
                     content: String::from(
                         "Folder navigation, search within folders, nested folders like Strix.",
@@ -427,6 +464,9 @@ impl App {
             openrouter_login_cancel: None,
             strix_login_rx: None,
             strix_login_cancel: None,
+            obsidian_vault_path,
+            obsidian_vaults,
+            obsidian_vault_selected: 0,
             ai_provider,
             strix_logs: Vec::new(),
             streaming_buffer: String::new(),
@@ -477,8 +517,13 @@ impl App {
             return Ok(vec![format!("Synced {} notes from Strix.", count)]);
         }
 
+        if area == "obsidian" {
+            self.refresh_obsidian_vaults();
+            return self.run_obsidian_cli_command(&args[1..]);
+        }
+
         if area != "notes" && area != "note" {
-            return Err(format!("Unknown Aleph CLI area '{}'. Try 'notes'.", area));
+            return Err(format!("Unknown Aleph CLI area '{}'. Try 'notes' or 'obsidian'.", area));
         }
 
         let action = args.get(1).map(|value| value.as_str()).unwrap_or("list");
@@ -494,7 +539,11 @@ impl App {
                     .map(|note| {
                         format!(
                             "{}\t{}\t{}",
-                            note.remote_id.as_deref().unwrap_or("local-only"),
+                            note.obsidian_path
+                                .as_ref()
+                                .map(|path| format!("obsidian:{}", path.display()))
+                                .or_else(|| note.remote_id.clone())
+                                .unwrap_or_else(|| String::from("local-only")),
                             note.title,
                             Self::preview_text(&note.content, 120)
                         )
@@ -521,7 +570,7 @@ impl App {
                     .unwrap_or_else(|| self.load_strix_note(id, true))?;
                 Ok(vec![
                     format!("# {}", note.title),
-                    format!("Strix ID: {}", note.remote_id.as_deref().unwrap_or("local-only")),
+                    Self::note_source_label(&note),
                     String::new(),
                     note.content,
                 ])
@@ -535,18 +584,31 @@ impl App {
                     return Err(String::from("Provide content or pass '-' to read content from stdin."));
                 }
                 self.ensure_cached_strix_notes_loaded();
-                let mut note = self
-                    .resolve_note_index(id)
+                let local_index = self.resolve_note_index(id);
+                let mut note = local_index
                     .and_then(|index| self.notes.get(index).cloned())
                     .map(Ok)
                     .unwrap_or_else(|| self.load_strix_note(id, true))?;
                 note.content = content;
-                let updated = self.update_strix_note(&note)?;
-                self.upsert_synced_note(updated.clone());
+                note.raw_content = note.content.clone();
+                if let Some(index) = local_index {
+                    if let Some(slot) = self.notes.get_mut(index) {
+                        *slot = note.clone();
+                    }
+                    self.write_note_to_obsidian(index)?;
+                }
+                let updated = if note.remote_id.is_some() {
+                    self.update_strix_note(&note)?
+                } else {
+                    note.clone()
+                };
+                if updated.remote_id.is_some() || local_index.is_none() {
+                    self.upsert_synced_note(updated.clone());
+                }
                 Ok(vec![format!(
                     "Updated {} ({})",
                     updated.title,
-                    updated.remote_id.as_deref().unwrap_or("local-only")
+                    Self::note_source_label(&updated)
                 )])
             }
             "append" => {
@@ -558,8 +620,8 @@ impl App {
                     return Err(String::from("Provide content or pass '-' to read content from stdin."));
                 }
                 self.ensure_cached_strix_notes_loaded();
-                let mut note = self
-                    .resolve_note_index(id)
+                let local_index = self.resolve_note_index(id);
+                let mut note = local_index
                     .and_then(|index| self.notes.get(index).cloned())
                     .map(Ok)
                     .unwrap_or_else(|| self.load_strix_note(id, true))?;
@@ -567,12 +629,25 @@ impl App {
                     note.content.push('\n');
                 }
                 note.content.push_str(&content);
-                let updated = self.update_strix_note(&note)?;
-                self.upsert_synced_note(updated.clone());
+                note.raw_content = note.content.clone();
+                if let Some(index) = local_index {
+                    if let Some(slot) = self.notes.get_mut(index) {
+                        *slot = note.clone();
+                    }
+                    self.write_note_to_obsidian(index)?;
+                }
+                let updated = if note.remote_id.is_some() {
+                    self.update_strix_note(&note)?
+                } else {
+                    note.clone()
+                };
+                if updated.remote_id.is_some() || local_index.is_none() {
+                    self.upsert_synced_note(updated.clone());
+                }
                 Ok(vec![format!(
                     "Appended to {} ({})",
                     updated.title,
-                    updated.remote_id.as_deref().unwrap_or("local-only")
+                    Self::note_source_label(&updated)
                 )])
             }
             "create" => {
@@ -582,15 +657,74 @@ impl App {
                     .filter(|title| !title.trim().is_empty())
                     .unwrap_or("Untitled note");
                 let content = args.get(3..).unwrap_or(&[]).join(" ");
-                let note = self.create_strix_note(title, &content)?;
+                let mut note = self.create_strix_note(title, &content)?;
+                if let Some(path) = self.obsidian_note_path_for_title(title) {
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent).map_err(|error| {
+                            format!("failed to create '{}': {}", parent.display(), error)
+                        })?;
+                    }
+                    fs::write(&path, &content)
+                        .map_err(|error| format!("failed to write '{}': {}", path.display(), error))?;
+                    note.obsidian_path = Some(path);
+                }
                 self.upsert_synced_note(note.clone());
                 Ok(vec![format!(
                     "Created {} ({})",
                     note.title,
-                    note.remote_id.as_deref().unwrap_or("local-only")
+                    Self::note_source_label(&note)
                 )])
             }
             _ => Err(format!("Unknown notes action '{}'.", action)),
+        }
+    }
+
+    fn run_obsidian_cli_command(&mut self, args: &[String]) -> Result<Vec<String>, String> {
+        let action = args.first().map(|value| value.as_str()).unwrap_or("status");
+        match action {
+            "pair" => {
+                self.refresh_obsidian_vaults();
+                let target = args.get(1).map(|value| value.as_str()).unwrap_or("");
+                let path = if target.is_empty() {
+                    match self.obsidian_vaults.as_slice() {
+                        [vault] => vault.path.clone(),
+                        [] => return Err(String::from("No Obsidian vaults found. Run `aleph obsidian pair <path>`.")),
+                        _ => {
+                            return Ok(std::iter::once(String::from("Multiple vaults found. Re-run with a number or name:"))
+                                .chain(self.format_obsidian_vault_lines())
+                                .collect())
+                        }
+                    }
+                } else {
+                    self.resolve_obsidian_vault_target(target)
+                        .unwrap_or_else(|| PathBuf::from(Self::expand_home(target)))
+                };
+                let message = self.pair_obsidian_vault(path)?;
+                Ok(vec![message, String::from("Run `aleph obsidian sync` to import notes.")])
+            }
+            "vaults" | "list" => {
+                self.refresh_obsidian_vaults();
+                let mut lines = self.format_obsidian_vault_lines();
+                if lines.is_empty() {
+                    lines.push(String::from("No Obsidian vaults found. Run `aleph obsidian pair <path>`."));
+                }
+                Ok(lines)
+            }
+            "sync" => {
+                let count = self.sync_obsidian_notes()?;
+                Ok(vec![format!("Imported {} Obsidian notes.", count)])
+            }
+            "status" => Ok(vec![
+                format!("Obsidian: {}", self.obsidian_status_label()),
+                format!("Detected vaults: {}", self.obsidian_vaults.len()),
+                format!("Config: {}", Self::obsidian_config_path().display()),
+                format!("Pairing fallback: {}", Self::obsidian_pairing_path().display()),
+            ]),
+            "open" => {
+                let target = args.get(1..).unwrap_or(&[]).join(" ");
+                self.open_obsidian_target(&target).map(|message| vec![message])
+            }
+            _ => Err(format!("Unknown obsidian action '{}'. Try pair, vaults, sync, status, or open.", action)),
         }
     }
 
@@ -1005,12 +1139,32 @@ impl App {
         self.panel_mode == PanelMode::NoteList
     }
 
+    pub fn is_vault_picker(&self) -> bool {
+        self.panel_mode == PanelMode::VaultPicker
+    }
+
     pub fn note_list_selected(&self) -> usize {
         self.note_list_selected
     }
 
     pub fn note_list_indices(&self) -> &[usize] {
         &self.note_list_indices
+    }
+
+    pub fn obsidian_vaults(&self) -> &[ObsidianVault] {
+        &self.obsidian_vaults
+    }
+
+    pub fn obsidian_vault_selected(&self) -> usize {
+        self.obsidian_vault_selected
+    }
+
+    pub fn obsidian_vault_path(&self) -> Option<&Path> {
+        self.obsidian_vault_path.as_deref()
+    }
+
+    pub fn is_obsidian_paired(&self) -> bool {
+        self.obsidian_vault_path.is_some()
     }
 
     pub fn is_editing_title(&self) -> bool {
@@ -1180,6 +1334,10 @@ impl App {
         }
         if self.is_note_list() {
             self.handle_note_list_key(key_event);
+            return;
+        }
+        if self.is_vault_picker() {
+            self.handle_vault_picker_key(key_event);
             return;
         }
 
@@ -1868,14 +2026,75 @@ impl App {
                 self.last_action = String::from("Disconnected from providers.");
             }
             "obsidian pair" => {
+                self.handle_obsidian_pair(args.trim());
+            }
+            "obsidian vaults" => {
+                self.refresh_obsidian_vaults();
+                let mut lines = self.format_obsidian_vault_lines();
+                if lines.is_empty() {
+                    lines = vec![
+                        String::from("No Obsidian vaults were found in desktop config."),
+                        String::from("Pair explicitly with /obsidian pair /path/to/vault."),
+                    ];
+                }
+                self.set_result_panel("Obsidian vaults", lines);
+                self.last_action = String::from("Listed Obsidian vaults.");
+            }
+            "obsidian sync" => {
+                match self.sync_obsidian_notes() {
+                    Ok(count) => {
+                        let vault = self
+                            .obsidian_vault_path
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| String::from("unknown vault"));
+                        self.set_result_panel(
+                            "Obsidian sync",
+                            vec![
+                                format!("Imported {} Markdown notes.", count),
+                                format!("Vault: {}", vault),
+                                String::from("Use /note list, /search, /note edit, and /obsidian open."),
+                            ],
+                        );
+                        self.last_action = format!("Synced {} Obsidian notes.", count);
+                    }
+                    Err(error) => {
+                        self.set_result_panel("Obsidian sync failed", vec![error]);
+                        self.last_action = String::from("Obsidian sync failed.");
+                    }
+                }
+            }
+            "obsidian status" => {
+                self.refresh_obsidian_vaults();
+                let paired = self
+                    .obsidian_vault_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| String::from("Not paired"));
                 self.set_result_panel(
-                    "Obsidian pairing",
+                    "Obsidian status",
                     vec![
-                        String::from("Pair a local Obsidian vault so Aleph can read notes."),
-                        String::from("This is a UI placeholder for the future vault picker and sync flow."),
+                        format!("Paired vault: {}", paired),
+                        format!("Detected vaults: {}", self.obsidian_vaults.len()),
+                        format!("Config: {}", Self::obsidian_config_path().display()),
+                        format!("Pairing fallback: {}", Self::obsidian_pairing_path().display()),
+                        String::from("Sync mode: direct Markdown filesystem integration"),
+                        String::from("Open mode: obsidian:// URI, no Obsidian CLI required"),
                     ],
                 );
-                self.last_action = String::from("Opened Obsidian pairing.");
+                self.last_action = String::from("Refreshed Obsidian status.");
+            }
+            "obsidian open" => {
+                match self.open_obsidian_target(args.trim()) {
+                    Ok(message) => {
+                        self.set_result_panel("Obsidian open", vec![message]);
+                        self.last_action = String::from("Opened Obsidian target.");
+                    }
+                    Err(error) => {
+                        self.set_result_panel("Obsidian open failed", vec![error]);
+                        self.last_action = String::from("Obsidian open failed.");
+                    }
+                }
             }
             "status" => {
                 self.set_result_panel(
@@ -1883,6 +2102,7 @@ impl App {
                     vec![
                         format!("OpenRouter: {}", if self.is_openrouter_connected() { "connected" } else { "offline" }),
                         format!("Strix: {}", if self.is_strix_connected() { "connected" } else { "offline" }),
+                        format!("Obsidian: {}", self.obsidian_status_label()),
                         format!("Notes: {}", self.notes.len()),
                         format!("Cache: {}", Self::strix_cache_path().display()),
                         format!("Memories: {}", self.memories.len()),
@@ -2024,6 +2244,11 @@ impl App {
                         } else {
                             String::from("[—] ")
                         };
+                        let source_indicator = if note.obsidian_path.is_some() {
+                            String::from(" [obsidian]")
+                        } else {
+                            note.remote_id.as_deref().map(|id| format!(" [{}]", id)).unwrap_or_default()
+                        };
                         format!(
                             "{:>2}. #{} {:<14} {}{}{}",
                             list_index + 1,
@@ -2031,7 +2256,7 @@ impl App {
                             if note.title.len() > 14 { format!("{}…", &note.title[..13]) } else { note.title.clone() },
                             folder_indicator,
                             Self::preview_text(&note.content, 32),
-                            note.remote_id.as_deref().map(|id| format!(" [{}]", id)).unwrap_or_default()
+                            source_indicator
                         )
                     })
                     .collect::<Vec<_>>();
@@ -2066,6 +2291,7 @@ impl App {
                 let note_id = note.id;
                 let note_updated = note.updated_at.clone();
                 let note_content = note.content.clone();
+                let source_info = Self::note_source_label(note);
                 let folder_info = if let Some(fid) = note.folder_id {
                     format!("Folder: {}", self.get_folder_path(fid))
                 } else {
@@ -2074,7 +2300,7 @@ impl App {
 
                 let mut lines = vec![
                     format!("ID: {}", note_id),
-                    format!("Strix ID: {}", note.remote_id.as_deref().unwrap_or("local-only")),
+                    source_info,
                     format!("Updated: {}", note_updated),
                     folder_info,
                     String::new(),
@@ -2093,15 +2319,34 @@ impl App {
                 let mut note = Note {
                     id: note_id,
                     remote_id: None,
+                    obsidian_path: self.obsidian_note_path_for_title(&title),
                     title: title.clone(),
                     content: String::new(),
                     raw_content: String::new(),
                     updated_at: String::from("draft"),
                     folder_id: self.current_folder_id,
                 };
+                if let Some(path) = note.obsidian_path.as_ref() {
+                    if let Some(parent) = path.parent() {
+                        if let Err(error) = fs::create_dir_all(parent) {
+                            self.set_result_panel("Obsidian create failed", vec![format!("failed to create '{}': {}", parent.display(), error)]);
+                            self.last_action = String::from("Obsidian note create failed.");
+                            return;
+                        }
+                    }
+                    if let Err(error) = fs::write(path, "") {
+                        self.set_result_panel("Obsidian create failed", vec![format!("failed to write '{}': {}", path.display(), error)]);
+                        self.last_action = String::from("Obsidian note create failed.");
+                        return;
+                    }
+                }
                 if self.is_strix_connected() {
                     match self.create_strix_note(&title, "") {
-                        Ok(remote_note) => note = remote_note,
+                        Ok(remote_note) => {
+                            let obsidian_path = note.obsidian_path.clone();
+                            note = remote_note;
+                            note.obsidian_path = obsidian_path;
+                        }
                         Err(error) => {
                             self.set_result_panel("Strix create failed", vec![error]);
                             self.last_action = String::from("Strix note create failed.");
@@ -2141,9 +2386,15 @@ impl App {
                         note.content.push('\n');
                     }
                     note.content.push_str(append_text);
+                    note.raw_content = note.content.clone();
                     note.updated_at = updated_at;
                     (note.title.clone(), note.content.clone())
                 };
+                if let Err(error) = self.write_note_to_obsidian(index) {
+                    self.set_result_panel("Obsidian write failed", vec![error]);
+                    self.last_action = String::from("Obsidian note append failed.");
+                    return;
+                }
                 if let Err(error) = self.push_note_to_strix(index) {
                     self.set_result_panel("Strix push failed", vec![error]);
                     self.last_action = String::from("Strix note append failed.");
@@ -2191,6 +2442,7 @@ impl App {
                             let mut refreshed = note;
                             refreshed.id = self.notes[index].id;
                             refreshed.folder_id = self.notes[index].folder_id;
+                            refreshed.obsidian_path = self.notes[index].obsidian_path.clone();
                             self.notes[index] = refreshed;
                             let _ = Self::save_cached_strix_notes(&self.notes);
                         }
@@ -3416,6 +3668,556 @@ impl App {
         Ok(count)
     }
 
+    fn handle_obsidian_pair(&mut self, target: &str) {
+        self.refresh_obsidian_vaults();
+        if target.is_empty() {
+            if self.obsidian_vaults.len() == 1 {
+                let path = self.obsidian_vaults[0].path.clone();
+                match self.pair_obsidian_vault(path) {
+                    Ok(message) => {
+                        self.set_result_panel("Obsidian paired", vec![message, String::from("Run /obsidian sync to import Markdown notes.")]);
+                        self.last_action = String::from("Paired Obsidian vault.");
+                    }
+                    Err(error) => {
+                        self.set_result_panel("Obsidian pairing failed", vec![error]);
+                        self.last_action = String::from("Obsidian pairing failed.");
+                    }
+                }
+            } else {
+                self.open_vault_picker();
+            }
+            return;
+        }
+
+        let target_path = self
+            .resolve_obsidian_vault_target(target)
+            .unwrap_or_else(|| PathBuf::from(Self::expand_home(target)));
+
+        match self.pair_obsidian_vault(target_path) {
+            Ok(message) => {
+                self.set_result_panel("Obsidian paired", vec![message, String::from("Run /obsidian sync to import Markdown notes.")]);
+                self.last_action = String::from("Paired Obsidian vault.");
+            }
+            Err(error) => {
+                self.set_result_panel("Obsidian pairing failed", vec![error]);
+                self.last_action = String::from("Obsidian pairing failed.");
+            }
+        }
+    }
+
+    fn open_vault_picker(&mut self) {
+        self.panel_mode = PanelMode::VaultPicker;
+        self.panel_title = String::from("Obsidian pairing");
+        self.panel_lines.clear();
+        self.obsidian_vault_selected = 0;
+        self.last_action = if self.obsidian_vaults.is_empty() {
+            String::from("No Obsidian vaults found; type /obsidian pair <path>.")
+        } else {
+            String::from("Choose an Obsidian vault.")
+        };
+    }
+
+    fn pair_obsidian_vault(&mut self, path: PathBuf) -> Result<String, String> {
+        let canonical = fs::canonicalize(&path)
+            .map_err(|error| format!("failed to open vault path '{}': {}", path.display(), error))?;
+        if !canonical.is_dir() {
+            return Err(format!("'{}' is not a directory.", canonical.display()));
+        }
+
+        self.store_obsidian_vault_path(&canonical)?;
+        self.obsidian_vault_path = Some(canonical.clone());
+        if !self.obsidian_vaults.iter().any(|vault| vault.path == canonical) {
+            self.obsidian_vaults.push(ObsidianVault {
+                id: Self::stable_vault_id(&canonical),
+                name: Self::vault_display_name(&canonical),
+                path: canonical.clone(),
+                source: String::from("manual"),
+            });
+        }
+        Ok(format!("Paired vault: {}", canonical.display()))
+    }
+
+    fn sync_obsidian_notes(&mut self) -> Result<usize, String> {
+        let vault_path = self
+            .obsidian_vault_path
+            .clone()
+            .ok_or_else(|| String::from("No Obsidian vault is paired. Run /obsidian pair first."))?;
+        let files = Self::collect_markdown_files(&vault_path)?;
+        let folder_root_id = self.ensure_folder_path(&[String::from("Obsidian")], None);
+        let vault_name = Self::vault_display_name(&vault_path);
+        let vault_folder_id = self.ensure_folder_path(&[vault_name], Some(folder_root_id));
+        let mut imported = 0;
+
+        for file in files {
+            let relative = file.strip_prefix(&vault_path).unwrap_or(file.as_path());
+            let title = Self::obsidian_note_title(&file, relative);
+            let content = fs::read_to_string(&file)
+                .map_err(|error| format!("failed to read '{}': {}", file.display(), error))?;
+            let folder_id = self.obsidian_folder_id(relative, vault_folder_id);
+            let updated_at = fs::metadata(&file)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| format!("obsidian:{}", duration.as_secs()))
+                .unwrap_or_else(|| String::from("obsidian"));
+            self.upsert_obsidian_note(file, title, content, updated_at, folder_id);
+            imported += 1;
+        }
+
+        if imported > 0 {
+            self.selected_note = self.selected_note.min(self.notes.len().saturating_sub(1));
+        }
+        Ok(imported)
+    }
+
+    fn upsert_obsidian_note(
+        &mut self,
+        path: PathBuf,
+        title: String,
+        content: String,
+        updated_at: String,
+        folder_id: Option<usize>,
+    ) {
+        if let Some((index, note)) = self
+            .notes
+            .iter_mut()
+            .enumerate()
+            .find(|(_, note)| note.obsidian_path.as_deref() == Some(path.as_path()))
+        {
+            note.title = title;
+            note.content = content.clone();
+            note.raw_content = content;
+            note.updated_at = updated_at;
+            note.folder_id = folder_id;
+            self.selected_note = index;
+            return;
+        }
+
+        let id = self.notes.iter().map(|note| note.id).max().unwrap_or(0) + 1;
+        self.notes.push(Note {
+            id,
+            remote_id: None,
+            obsidian_path: Some(path),
+            title,
+            content: content.clone(),
+            raw_content: content,
+            updated_at,
+            folder_id,
+        });
+        self.selected_note = self.notes.len() - 1;
+    }
+
+    fn obsidian_folder_id(&mut self, relative: &Path, vault_folder_id: usize) -> Option<usize> {
+        let Some(parent) = relative.parent() else {
+            return Some(vault_folder_id);
+        };
+        let parts = parent
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(part) => part.to_str().map(|part| part.to_string()),
+                _ => None,
+            })
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        if parts.is_empty() {
+            Some(vault_folder_id)
+        } else {
+            Some(self.ensure_folder_path(&parts, Some(vault_folder_id)))
+        }
+    }
+
+    fn ensure_folder_path(&mut self, parts: &[String], parent_id: Option<usize>) -> usize {
+        let mut parent = parent_id;
+        let mut last_id = parent_id.unwrap_or(0);
+        for part in parts {
+            if let Some(existing) = self
+                .folders
+                .iter()
+                .find(|folder| folder.parent_id == parent && folder.name == *part)
+                .map(|folder| folder.id)
+            {
+                last_id = existing;
+                parent = Some(existing);
+                continue;
+            }
+            let id = self.folders.iter().map(|folder| folder.id).max().unwrap_or(0) + 1;
+            self.folders.push(Folder {
+                id,
+                name: part.clone(),
+                parent_id: parent,
+            });
+            last_id = id;
+            parent = Some(id);
+        }
+        last_id
+    }
+
+    fn open_obsidian_target(&mut self, target: &str) -> Result<String, String> {
+        let vault_path = self
+            .obsidian_vault_path
+            .as_ref()
+            .ok_or_else(|| String::from("No Obsidian vault is paired. Run /obsidian pair first."))?;
+        let vault_name = Self::vault_display_name(vault_path);
+        let target_note = if target.is_empty() {
+            self.active_note()
+        } else {
+            self.resolve_note_index(target).and_then(|index| self.notes.get(index))
+        };
+
+        let uri = if let Some(note) = target_note {
+            if let Some(path) = note.obsidian_path.as_ref() {
+                let file = path
+                    .strip_prefix(vault_path)
+                    .unwrap_or(path.as_path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                format!(
+                    "obsidian://open?vault={}&file={}",
+                    urlencoding::encode(&vault_name),
+                    urlencoding::encode(file.trim_end_matches(".md"))
+                )
+            } else {
+                format!(
+                    "obsidian://new?vault={}&name={}&content={}",
+                    urlencoding::encode(&vault_name),
+                    urlencoding::encode(&note.title),
+                    urlencoding::encode(&note.content)
+                )
+            }
+        } else if target.is_empty() {
+            format!("obsidian://open?vault={}", urlencoding::encode(&vault_name))
+        } else {
+            format!(
+                "obsidian://open?vault={}&file={}",
+                urlencoding::encode(&vault_name),
+                urlencoding::encode(target)
+            )
+        };
+
+        Self::open_browser(&uri)?;
+        Ok(format!("Sent Obsidian URI: {}", uri))
+    }
+
+    fn obsidian_status_label(&self) -> String {
+        self.obsidian_vault_path
+            .as_ref()
+            .map(|path| format!("paired ({})", Self::vault_display_name(path)))
+            .unwrap_or_else(|| String::from("not paired"))
+    }
+
+    fn refresh_obsidian_vaults(&mut self) {
+        self.obsidian_vaults = Self::discover_obsidian_vaults();
+        if let Some(path) = self.obsidian_vault_path.clone() {
+            if !self.obsidian_vaults.iter().any(|vault| vault.path == path) {
+                self.obsidian_vaults.push(ObsidianVault {
+                    id: Self::stable_vault_id(&path),
+                    name: Self::vault_display_name(&path),
+                    path,
+                    source: String::from("paired"),
+                });
+            }
+        }
+    }
+
+    fn format_obsidian_vault_lines(&self) -> Vec<String> {
+        self.obsidian_vaults
+            .iter()
+            .enumerate()
+            .map(|(index, vault)| {
+                let paired = if self.obsidian_vault_path.as_deref() == Some(vault.path.as_path()) {
+                    " paired"
+                } else {
+                    ""
+                };
+                format!(
+                    "{:>2}. {} — {} [{}]{}",
+                    index + 1,
+                    vault.name,
+                    vault.path.display(),
+                    vault.source,
+                    paired
+                )
+            })
+            .collect()
+    }
+
+    fn resolve_obsidian_vault_target(&self, target: &str) -> Option<PathBuf> {
+        if let Ok(index) = target.parse::<usize>() {
+            return self.obsidian_vaults.get(index.saturating_sub(1)).map(|vault| vault.path.clone());
+        }
+
+        let lowered = target.to_lowercase();
+        self.obsidian_vaults
+            .iter()
+            .find(|vault| vault.name.to_lowercase() == lowered || vault.id == target)
+            .map(|vault| vault.path.clone())
+    }
+
+    fn collect_markdown_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+        let mut files = Vec::new();
+        Self::collect_markdown_files_inner(root, &mut files)?;
+        files.sort();
+        Ok(files)
+    }
+
+    fn collect_markdown_files_inner(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+        let entries = fs::read_dir(dir)
+            .map_err(|error| format!("failed to read '{}': {}", dir.display(), error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("failed to read vault entry: {}", error))?;
+            let path = entry.path();
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+            if name.starts_with('.') || name == "node_modules" || name == "target" {
+                continue;
+            }
+            if path.is_dir() {
+                Self::collect_markdown_files_inner(&path, files)?;
+            } else if path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map_or(false, |extension| extension.eq_ignore_ascii_case("md"))
+            {
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn obsidian_note_title(path: &Path, relative: &Path) -> String {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|content| {
+                let mut in_frontmatter = false;
+                let mut is_first_line = true;
+
+                for line in content.lines() {
+                    if is_first_line {
+                        is_first_line = false;
+                        if line.trim() == "---" {
+                            in_frontmatter = true;
+                            continue;
+                        }
+                    }
+
+                    if in_frontmatter {
+                        if line.trim() == "---" {
+                            in_frontmatter = false;
+                        }
+                        continue;
+                    }
+
+                    if let Some(title) = line.strip_prefix("# ") {
+                        let trimmed = title.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+                None
+            })
+            .or_else(|| {
+                relative
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(|stem| stem.to_string())
+            })
+            .unwrap_or_else(|| String::from("Untitled Obsidian note"))
+    }
+
+    fn obsidian_note_path_for_title(&self, title: &str) -> Option<PathBuf> {
+        let vault_path = self.obsidian_vault_path.as_ref()?;
+        let filename = Self::safe_obsidian_filename(title);
+        let mut path = vault_path.join(format!("{}.md", filename));
+        if !path.exists() {
+            return Some(path);
+        }
+
+        for suffix in 2..1000 {
+            path = vault_path.join(format!("{} {}.md", filename, suffix));
+            if !path.exists() {
+                return Some(path);
+            }
+        }
+        Some(vault_path.join(format!("{} {}.md", filename, Self::now_millis())))
+    }
+
+    fn safe_obsidian_filename(title: &str) -> String {
+        let cleaned = title
+            .chars()
+            .map(|character| match character {
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+                character if character.is_control() => ' ',
+                character => character,
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cleaned = cleaned.trim_matches(|character| character == '.' || character == ' ').trim();
+        if cleaned.is_empty() {
+            String::from("Untitled note")
+        } else {
+            cleaned.chars().take(120).collect()
+        }
+    }
+
+    fn discover_obsidian_vaults() -> Vec<ObsidianVault> {
+        let mut vaults = Vec::new();
+        if let Some(path) = Self::load_obsidian_vault_path() {
+            vaults.push(ObsidianVault {
+                id: Self::stable_vault_id(&path),
+                name: Self::vault_display_name(&path),
+                path,
+                source: String::from("paired"),
+            });
+        }
+        if let Ok(config) = fs::read_to_string(Self::obsidian_config_path()) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&config) {
+                if let Some(map) = value.get("vaults").and_then(|vaults| vaults.as_object()) {
+                    for (id, vault) in map {
+                        let Some(path) = vault.get("path").and_then(|path| path.as_str()) else {
+                            continue;
+                        };
+                        let path = PathBuf::from(Self::expand_home(path));
+                        if !path.is_dir() {
+                            continue;
+                        }
+                        vaults.push(ObsidianVault {
+                            id: id.clone(),
+                            name: Self::vault_display_name(&path),
+                            path,
+                            source: String::from("Obsidian desktop"),
+                        });
+                    }
+                }
+            }
+        }
+        vaults.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+        vaults.dedup_by(|left, right| left.path == right.path);
+        vaults
+    }
+
+    fn obsidian_config_path() -> PathBuf {
+        if let Ok(path) = std::env::var("OBSIDIAN_CONFIG_PATH") {
+            return PathBuf::from(Self::expand_home(&path));
+        }
+        if cfg!(target_os = "windows") {
+            if let Ok(appdata) = std::env::var("APPDATA") {
+                return PathBuf::from(appdata).join("obsidian").join("obsidian.json");
+            }
+        }
+        if cfg!(target_os = "macos") {
+            if let Ok(home) = std::env::var("HOME") {
+                return PathBuf::from(home)
+                    .join("Library")
+                    .join("Application Support")
+                    .join("obsidian")
+                    .join("obsidian.json");
+            }
+        }
+        if let Ok(config_home) = std::env::var("XDG_CONFIG_HOME") {
+            return PathBuf::from(config_home).join("obsidian").join("obsidian.json");
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(".config").join("obsidian").join("obsidian.json");
+        }
+        PathBuf::from("obsidian.json")
+    }
+
+    fn load_obsidian_vault_path() -> Option<PathBuf> {
+        if let Ok(entry) = Self::obsidian_vault_entry() {
+            if let Ok(path) = entry.get_password() {
+                let path = PathBuf::from(Self::expand_home(path.trim()));
+                if path.is_dir() {
+                    return Some(path);
+                }
+            }
+        }
+        if let Ok(path) = fs::read_to_string(Self::obsidian_pairing_path()) {
+            let path = PathBuf::from(Self::expand_home(path.trim()));
+            if path.is_dir() {
+                return Some(path);
+            }
+        }
+        std::env::var("ALEPH_OBSIDIAN_VAULT")
+            .ok()
+            .map(|path| PathBuf::from(Self::expand_home(path.trim())))
+            .filter(|path| path.is_dir())
+    }
+
+    fn store_obsidian_vault_path(&self, path: &Path) -> Result<(), String> {
+        if let Ok(entry) = Self::obsidian_vault_entry() {
+            if entry.set_password(&path.display().to_string()).is_ok() {
+                return Ok(());
+            }
+        }
+
+        let pairing_path = Self::obsidian_pairing_path();
+        if let Some(parent) = pairing_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create Obsidian pairing directory '{}': {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+        fs::write(&pairing_path, path.display().to_string()).map_err(|error| {
+            format!(
+                "failed to save Obsidian vault pairing '{}': {}",
+                pairing_path.display(),
+                error
+            )
+        })
+    }
+
+    fn obsidian_vault_entry() -> Result<Entry, String> {
+        Entry::new(OBSIDIAN_SERVICE, OBSIDIAN_ACCOUNT)
+            .map_err(|error| format!("failed to open Obsidian credential store: {}", error))
+    }
+
+    fn obsidian_pairing_path() -> PathBuf {
+        if let Ok(dir) = std::env::var("ALEPH_CONFIG_DIR") {
+            return PathBuf::from(dir).join("obsidian-vault");
+        }
+        if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
+            return PathBuf::from(dir).join("aleph").join("obsidian-vault");
+        }
+        if let Ok(dir) = std::env::var("LOCALAPPDATA").or_else(|_| std::env::var("APPDATA")) {
+            return PathBuf::from(dir).join("Aleph").join("obsidian-vault");
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(".config").join("aleph").join("obsidian-vault");
+        }
+        std::env::temp_dir().join("aleph-obsidian-vault")
+    }
+
+    fn vault_display_name(path: &Path) -> String {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| path.display().to_string())
+    }
+
+    fn stable_vault_id(path: &Path) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(path.display().to_string().as_bytes());
+        let digest = hasher.finalize();
+        URL_SAFE_NO_PAD.encode(&digest[..9])
+    }
+
+    fn expand_home(path: &str) -> String {
+        if path == "~" {
+            return std::env::var("HOME").unwrap_or_else(|_| path.to_string());
+        }
+        if let Some(rest) = path.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                return format!("{}/{}", home, rest);
+            }
+        }
+        path.to_string()
+    }
+
     fn load_strix_notes(&self, query: &str, limit: usize) -> Result<Vec<Note>, String> {
         let path = if query.trim().is_empty() {
             format!("/api/auth/native/notes?limit={}", limit)
@@ -3499,6 +4301,7 @@ impl App {
         let Some(note) = self.notes.get(index).cloned() else {
             return Ok(());
         };
+        let obsidian_path = note.obsidian_path.clone();
         let mut synced = if note.remote_id.is_some() {
             self.update_strix_note(&note)?
         } else {
@@ -3506,6 +4309,7 @@ impl App {
         };
         synced.id = note.id;
         synced.folder_id = note.folder_id;
+        synced.obsidian_path = obsidian_path;
         if let Some(slot) = self.notes.get_mut(index) {
             *slot = synced;
         }
@@ -3523,6 +4327,12 @@ impl App {
                 .find(|(_, existing)| existing.remote_id.as_deref() == Some(remote_id.as_str()))
             {
                 note.id = existing.id;
+                if note.obsidian_path.is_none() {
+                    note.obsidian_path = existing.obsidian_path.clone();
+                }
+                if note.folder_id.is_none() {
+                    note.folder_id = existing.folder_id;
+                }
                 *existing = note;
                 self.selected_note = index;
                 return;
@@ -3559,6 +4369,7 @@ impl App {
         Note {
             id: local_id,
             remote_id,
+            obsidian_path: None,
             title: value
                 .get("title")
                 .and_then(|title| title.as_str())
@@ -3569,6 +4380,16 @@ impl App {
             updated_at,
             folder_id: None,
         }
+    }
+
+    fn note_source_label(note: &Note) -> String {
+        if let Some(path) = note.obsidian_path.as_ref() {
+            return format!("Obsidian: {}", path.display());
+        }
+        if let Some(remote_id) = note.remote_id.as_deref() {
+            return format!("Strix ID: {}", remote_id);
+        }
+        String::from("Source: local-only")
     }
 
     fn ensure_cached_strix_notes_loaded(&mut self) {
@@ -3893,12 +4714,29 @@ impl App {
         let updated_at = self.uptime();
         if let Some(note) = self.notes.get_mut(index) {
             note.content = self.editor_buffer.clone();
+            note.raw_content = self.editor_buffer.clone();
             note.updated_at = updated_at;
+        }
+        if let Err(error) = self.write_note_to_obsidian(index) {
+            self.last_action = format!("Obsidian write failed: {}", error);
+            self.save_shimmer_ticks = 4;
+            return;
         }
         if let Err(error) = self.push_note_to_strix(index) {
             self.last_action = format!("Strix push failed: {}", error);
         }
         self.save_shimmer_ticks = 4;
+    }
+
+    fn write_note_to_obsidian(&self, index: usize) -> Result<(), String> {
+        let Some(note) = self.notes.get(index) else {
+            return Ok(());
+        };
+        let Some(path) = note.obsidian_path.as_ref() else {
+            return Ok(());
+        };
+        fs::write(path, &note.content)
+            .map_err(|error| format!("failed to write '{}': {}", path.display(), error))
     }
 
     fn exit_editor(&mut self) {
@@ -3928,7 +4766,7 @@ impl App {
 
         let mut lines = vec![
             format!("ID: {}", note.id),
-            format!("Strix ID: {}", note.remote_id.as_deref().unwrap_or("local-only")),
+            Self::note_source_label(note),
             format!("Updated: {}", note.updated_at),
             folder_info,
             String::new(),
@@ -4904,6 +5742,54 @@ impl App {
         }
     }
 
+    fn handle_vault_picker_key(&mut self, key_event: KeyEvent) {
+        if key_event.kind != KeyEventKind::Press && key_event.kind != KeyEventKind::Repeat {
+            return;
+        }
+        match key_event.code {
+            KeyCode::Esc => {
+                self.panel_mode = PanelMode::Commands;
+                self.panel_title = String::from("Commands");
+                self.panel_lines.clear();
+                self.last_action = String::from("Cancelled Obsidian pairing.");
+            }
+            KeyCode::Up => {
+                if self.obsidian_vault_selected > 0 {
+                    self.obsidian_vault_selected -= 1;
+                    self.last_action = format!("Selected vault {}", self.obsidian_vault_selected + 1);
+                }
+            }
+            KeyCode::Down => {
+                if self.obsidian_vault_selected + 1 < self.obsidian_vaults.len() {
+                    self.obsidian_vault_selected += 1;
+                    self.last_action = format!("Selected vault {}", self.obsidian_vault_selected + 1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(vault) = self.obsidian_vaults.get(self.obsidian_vault_selected).cloned() {
+                    match self.pair_obsidian_vault(vault.path) {
+                        Ok(message) => {
+                            self.panel_mode = PanelMode::Commands;
+                            self.set_result_panel(
+                                "Obsidian paired",
+                                vec![message, String::from("Run /obsidian sync to import Markdown notes.")],
+                            );
+                            self.last_action = String::from("Paired Obsidian vault.");
+                        }
+                        Err(error) => {
+                            self.set_result_panel("Obsidian pairing failed", vec![error]);
+                            self.last_action = String::from("Obsidian pairing failed.");
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.request_quit();
+            }
+            _ => {}
+        }
+    }
+
     fn ghost_submit_instruction(&mut self) {
         let instruction = self.ai_input_buffer.trim().to_string();
         if instruction.is_empty() {
@@ -5103,6 +5989,60 @@ mod tests {
         app.handle_key(press(KeyCode::Tab));
 
         assert!(app.prompt().starts_with('/'));
+    }
+
+    #[test]
+    fn obsidian_sync_imports_markdown_tree() {
+        let root = std::env::temp_dir().join(format!("aleph-obsidian-test-{}", App::now_millis()));
+        let project_dir = root.join("Projects");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(root.join("Inbox.md"), "# Inbox\n\nTop-level note").unwrap();
+        fs::write(project_dir.join("Plan.md"), "# Project Plan\n\nNested note").unwrap();
+        fs::write(root.join("ignore.txt"), "not markdown").unwrap();
+
+        let mut app = App::new();
+        app.obsidian_vault_path = Some(root.clone());
+        app.folders.clear();
+        app.notes.clear();
+
+        let count = app.sync_obsidian_notes().unwrap();
+
+        assert_eq!(count, 2);
+        assert!(app.notes.iter().any(|note| note.title == "Inbox"));
+        assert!(app.notes.iter().any(|note| note.title == "Project Plan"));
+        assert!(app.notes.iter().all(|note| note.title != "ignore"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn obsidian_pair_without_target_opens_picker_for_multiple_vaults() {
+        let mut app = App::new();
+        app.obsidian_vaults = vec![
+            ObsidianVault {
+                id: String::from("one"),
+                name: String::from("One"),
+                path: PathBuf::from("/tmp/one"),
+                source: String::from("test"),
+            },
+            ObsidianVault {
+                id: String::from("two"),
+                name: String::from("Two"),
+                path: PathBuf::from("/tmp/two"),
+                source: String::from("test"),
+            },
+        ];
+
+        app.open_vault_picker();
+
+        assert!(app.is_vault_picker());
+        assert_eq!(app.obsidian_vault_selected(), 0);
+    }
+
+    #[test]
+    fn obsidian_filenames_are_sanitized() {
+        assert_eq!(App::safe_obsidian_filename("Daily/Plan: Q2?"), "Daily-Plan- Q2-");
+        assert_eq!(App::safe_obsidian_filename("   ...   "), "Untitled note");
     }
 
     #[test]

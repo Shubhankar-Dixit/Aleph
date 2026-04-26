@@ -167,6 +167,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     match app.panel_mode() {
         PanelMode::Commands | PanelMode::LoginPicker => render_commands_panel(frame, app, root[4]),
+        PanelMode::VaultPicker => render_obsidian_vault_picker_panel(frame, app, root[4]),
         PanelMode::NoteList => render_note_list_panel(frame, app, root[4]),
         PanelMode::NoteEditor => render_note_editor_panel(frame, app, root[4]),
         PanelMode::FullEditor | PanelMode::AiChat => {},
@@ -942,7 +943,7 @@ fn render_connection_panel(
     title: &str,
     accent: Color,
     intro: Vec<Line<'static>>,
-    rows: Vec<(&'static str, &'static str)>,
+    rows: Vec<(&'static str, String)>,
     footer_left: &'static str,
     footer_right: &'static str,
 ) {
@@ -1299,6 +1300,12 @@ fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_obsidian_pairing_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let status = if let Some(path) = app.obsidian_vault_path() {
+        format!("Paired: {}", path.display())
+    } else {
+        String::from("Not paired")
+    };
+    let detected = format!("{} detected", app.obsidian_vaults().len());
     render_connection_panel(
         frame,
         area,
@@ -1310,23 +1317,90 @@ fn render_obsidian_pairing_panel(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
             )]),
             Line::from(vec![Span::styled(
-                "Use a running vault as the source for imported notes and folder context.",
+                "Import Markdown directly and use Obsidian URIs only when opening the app.",
                 Style::default().fg(MUTED),
             )]),
             Line::from(vec![Span::styled(
-                "Press Enter to choose a vault path, or Esc to back out.",
+                "Type /obsidian pair <path>, /obsidian vaults, or /obsidian sync.",
                 Style::default().fg(MUTED),
             )]),
         ],
         vec![
-            ("Status", "Not paired"),
-            ("Vault", "Choose a local vault folder"),
-            ("Mode", "Import-first, read-mostly"),
-            ("Pull", "Notes, folders, backlinks"),
+            ("Status", status),
+            ("Vaults", detected),
+            ("Mode", String::from("Direct Markdown sync")),
+            ("Open", String::from("obsidian:// URI fallback")),
         ],
-        "Enter",
-        "pair vault",
+        "/obsidian sync",
+        "sync notes",
     );
+}
+
+fn render_obsidian_vault_picker_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            app.panel_title(),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER))
+        .style(Style::default().bg(PANEL));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    let header = Paragraph::new(vec![
+        Line::from(vec![Span::styled(
+            "Pick an Obsidian vault",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            "Aleph reads Markdown files directly; no Obsidian CLI dependency is required.",
+            Style::default().fg(MUTED),
+        )]),
+    ]);
+    frame.render_widget(header, sections[0]);
+
+    let selected = app.obsidian_vault_selected();
+    let lines = if app.obsidian_vaults().is_empty() {
+        vec![Line::from(vec![Span::styled(
+            "No desktop vaults detected. Type /obsidian pair /path/to/vault.",
+            Style::default().fg(MUTED),
+        )])]
+    } else {
+        app.obsidian_vaults()
+            .iter()
+            .enumerate()
+            .map(|(index, vault)| {
+                let marker = if index == selected { "▶ " } else { "  " };
+                let style = if index == selected {
+                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(MUTED)
+                };
+                Line::from(vec![
+                    Span::styled(marker, Style::default().fg(ACCENT)),
+                    Span::styled(format!("{} — {}", vault.name, vault.path.display()), style),
+                ])
+            })
+            .collect()
+    };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), sections[1]);
+
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(ACCENT)),
+        Span::raw(" pair · "),
+        Span::styled("Esc", Style::default().fg(MUTED)),
+        Span::raw(" cancel"),
+    ]))
+    .alignment(Alignment::Right)
+    .style(Style::default().fg(MUTED));
+    frame.render_widget(footer, sections[2]);
 }
 
 fn render_note_list_panel(frame: &mut Frame, app: &App, area: Rect) {
