@@ -1661,6 +1661,10 @@ fn render_note_list_panel(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled("Delete", Style::default().fg(Color::Rgb(209, 118, 128))),
             Span::raw(" confirm · "),
+            Span::styled("Enter", Style::default().fg(Color::Rgb(209, 118, 128))),
+            Span::raw(" confirm · "),
+            Span::styled("d", Style::default().fg(Color::Rgb(209, 118, 128))),
+            Span::raw(" confirm · "),
             Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
             Span::raw(" cancel"),
         ])

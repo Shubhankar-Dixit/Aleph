@@ -266,6 +266,9 @@ const STRIX_AUTH_BASE_URL: &str = "http://localhost:3000";
 const STRIX_NOTES_LIMIT: usize = 100;
 const OBSIDIAN_SERVICE: &str = "Aleph";
 const OBSIDIAN_ACCOUNT: &str = "obsidian_vault_path";
+const NOTE_SAVE_TARGET_CONFIG: &str = "note-save-target";
+const AI_PROVIDER_CONFIG: &str = "ai-provider";
+const AGENT_MODE_CONFIG: &str = "agent-mode";
 const MAX_CHAT_MESSAGES: usize = 24;
 const CHAT_TEXT: Color = Color::Rgb(198, 198, 210);
 const CHAT_MUTED: Color = Color::Rgb(120, 122, 138);
@@ -369,20 +372,30 @@ impl App {
         let obsidian_vault_path = Self::load_obsidian_vault_path();
         let obsidian_vaults = Self::discover_obsidian_vaults();
         let connected = openrouter_api_key.is_some() || strix_access_token.is_some();
-        let ai_provider = if openrouter_api_key.is_some() {
+        let default_ai_provider = if openrouter_api_key.is_some() {
             AiProvider::OpenRouter
         } else if strix_access_token.is_some() {
             AiProvider::Strix
         } else {
             AiProvider::OpenRouter
         };
-        let note_save_target = if strix_access_token.is_some() {
+        let ai_provider = Self::load_ai_provider().unwrap_or(default_ai_provider);
+        let default_note_save_target = if strix_access_token.is_some() {
             NoteSaveTarget::Strix
         } else if obsidian_vault_path.is_some() {
             NoteSaveTarget::Obsidian
         } else {
             NoteSaveTarget::Local
         };
+        let note_save_target = Self::load_note_save_target()
+            .filter(|target| {
+                Self::note_save_target_is_available(
+                    *target,
+                    obsidian_vault_path.is_some(),
+                    strix_access_token.is_some(),
+                )
+            })
+            .unwrap_or(default_note_save_target);
 
         let mut app = Self {
             started_at: Instant::now(),
@@ -529,7 +542,7 @@ impl App {
             chat_render_cache: Vec::new(),
             chat_render_dirty: false,
             chat_cache_stable_len: 0,
-            agent_mode_enabled: true,
+            agent_mode_enabled: Self::load_agent_mode_enabled().unwrap_or(true),
             login_picker_selected: 0,
             settings_selected: 0,
             ghost_stream_rx: None,
@@ -902,6 +915,7 @@ impl App {
                         Ok(()) => {
                             self.strix_access_token = Some(access_token);
                             self.note_save_target = NoteSaveTarget::Strix;
+                            let _ = self.store_note_save_target();
                             self.refresh_connection_state();
                             self.add_strix_log("Browser login completed successfully");
                             self.set_result_panel(
@@ -1302,11 +1316,7 @@ impl App {
     }
 
     pub fn note_save_target_label(&self) -> &'static str {
-        match self.note_save_target {
-            NoteSaveTarget::Local => "Local",
-            NoteSaveTarget::Obsidian => "Obsidian",
-            NoteSaveTarget::Strix => "Strix",
-        }
+        Self::note_save_target_name(self.note_save_target)
     }
 
     pub fn is_editing_title(&self) -> bool {
@@ -2035,10 +2045,15 @@ impl App {
 
     fn toggle_agent_mode(&mut self) {
         self.agent_mode_enabled = !self.agent_mode_enabled;
-        self.last_action = if self.agent_mode_enabled {
-            String::from("Agent mode enabled. Aleph will route note-writing requests to tools.")
+        let mode_message = if self.agent_mode_enabled {
+            "Agent mode enabled. Aleph will route note-writing requests to tools."
         } else {
-            String::from("Chat mode enabled. Aleph will answer without taking note actions.")
+            "Chat mode enabled. Aleph will answer without taking note actions."
+        };
+        self.last_action = if let Err(error) = self.store_agent_mode_enabled() {
+            format!("{} (save failed: {})", mode_message, error)
+        } else {
+            String::from(mode_message)
         };
     }
 
@@ -2071,6 +2086,14 @@ impl App {
         }
 
         self.note_save_target = next;
+        if let Err(error) = self.store_note_save_target() {
+            self.last_action = format!(
+                "Note save target: {} (save failed: {})",
+                self.note_save_target_label(),
+                error
+            );
+            return;
+        }
         self.last_action = format!("Note save target: {}", self.note_save_target_label());
     }
 
@@ -2390,6 +2413,7 @@ impl App {
                             Ok(()) => {
                                 self.strix_access_token = Some(token.to_string());
                                 self.note_save_target = NoteSaveTarget::Strix;
+                                let _ = self.store_note_save_target();
                                 self.refresh_connection_state();
                                 self.add_strix_log("Connected to Strix successfully");
                                 self.set_result_panel(
@@ -2446,6 +2470,7 @@ impl App {
                 self.strix_access_token = None;
                 if self.note_save_target == NoteSaveTarget::Strix {
                     self.note_save_target = NoteSaveTarget::Local;
+                    let _ = self.store_note_save_target();
                 }
                 self.chat_stream_rx = None;
                 self.openrouter_login_rx = None;
@@ -2618,6 +2643,7 @@ impl App {
             }
             "mode agent" => {
                 self.agent_mode_enabled = true;
+                let _ = self.store_agent_mode_enabled();
                 self.set_result_panel(
                     "Agent mode",
                     vec![String::from(
@@ -2628,6 +2654,7 @@ impl App {
             }
             "mode chat" => {
                 self.agent_mode_enabled = false;
+                let _ = self.store_agent_mode_enabled();
                 self.set_result_panel(
                     "Chat mode",
                     vec![String::from(
@@ -3186,7 +3213,7 @@ impl App {
         let note = &self.notes[note_index];
         let folder_indicator = if let Some(fid) = note.folder_id {
             let fname = self.get_folder_name(fid).unwrap_or_default();
-            format!("[{}] ", &fname[..fname.len().min(8)])
+            format!("[{}] ", Self::truncate_chars(&fname, 8))
         } else {
             String::from("[-] ")
         };
@@ -3202,8 +3229,8 @@ impl App {
             "{:>2}. #{} {:<14} {}{}{}",
             list_index + 1,
             note.id,
-            if note.title.len() > 14 {
-                format!("{}...", &note.title[..11])
+            if note.title.chars().count() > 14 {
+                format!("{}...", Self::truncate_chars(&note.title, 11))
             } else {
                 note.title.clone()
             },
@@ -3211,6 +3238,10 @@ impl App {
             Self::preview_text(&note.content, 32),
             source_indicator
         )
+    }
+
+    fn truncate_chars(value: &str, max_chars: usize) -> String {
+        value.chars().take(max_chars).collect()
     }
 
     fn create_note_from_content(&mut self, title: &str, content: &str) -> Result<usize, String> {
@@ -3333,6 +3364,7 @@ impl App {
 
     fn set_ai_provider(&mut self, provider: AiProvider) {
         self.ai_provider = provider;
+        let _ = self.store_ai_provider();
         self.add_strix_log(format!("Switched to {:?} provider", provider));
     }
 
@@ -4533,6 +4565,7 @@ impl App {
         self.obsidian_vault_path = Some(canonical.clone());
         if self.note_save_target == NoteSaveTarget::Local {
             self.note_save_target = NoteSaveTarget::Obsidian;
+            self.store_note_save_target()?;
         }
         if !self
             .obsidian_vaults
@@ -5006,6 +5039,163 @@ impl App {
     fn obsidian_vault_entry() -> Result<Entry, String> {
         Entry::new(OBSIDIAN_SERVICE, OBSIDIAN_ACCOUNT)
             .map_err(|error| format!("failed to open Obsidian credential store: {}", error))
+    }
+
+    fn note_save_target_name(target: NoteSaveTarget) -> &'static str {
+        match target {
+            NoteSaveTarget::Local => "Local",
+            NoteSaveTarget::Obsidian => "Obsidian",
+            NoteSaveTarget::Strix => "Strix",
+        }
+    }
+
+    fn note_save_target_config_value(target: NoteSaveTarget) -> &'static str {
+        match target {
+            NoteSaveTarget::Local => "local",
+            NoteSaveTarget::Obsidian => "obsidian",
+            NoteSaveTarget::Strix => "strix",
+        }
+    }
+
+    fn parse_note_save_target(value: &str) -> Option<NoteSaveTarget> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "local" => Some(NoteSaveTarget::Local),
+            "obsidian" => Some(NoteSaveTarget::Obsidian),
+            "strix" => Some(NoteSaveTarget::Strix),
+            _ => None,
+        }
+    }
+
+    fn note_save_target_is_available(
+        target: NoteSaveTarget,
+        has_obsidian_vault: bool,
+        has_strix_token: bool,
+    ) -> bool {
+        match target {
+            NoteSaveTarget::Local => true,
+            NoteSaveTarget::Obsidian => has_obsidian_vault,
+            NoteSaveTarget::Strix => has_strix_token,
+        }
+    }
+
+    fn ai_provider_config_value(provider: AiProvider) -> &'static str {
+        match provider {
+            AiProvider::OpenRouter => "openrouter",
+            AiProvider::Strix => "strix",
+        }
+    }
+
+    fn parse_ai_provider(value: &str) -> Option<AiProvider> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "openrouter" => Some(AiProvider::OpenRouter),
+            "strix" => Some(AiProvider::Strix),
+            _ => None,
+        }
+    }
+
+    fn load_ai_provider() -> Option<AiProvider> {
+        fs::read_to_string(Self::ai_provider_path())
+            .ok()
+            .and_then(|value| Self::parse_ai_provider(&value))
+    }
+
+    fn store_ai_provider(&self) -> Result<(), String> {
+        Self::write_config_value(
+            Self::ai_provider_path(),
+            Self::ai_provider_config_value(self.ai_provider),
+            "AI provider setting",
+        )
+    }
+
+    fn load_agent_mode_enabled() -> Option<bool> {
+        match fs::read_to_string(Self::agent_mode_path())
+            .ok()?
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "true" | "agent" | "enabled" | "1" => Some(true),
+            "false" | "chat" | "disabled" | "0" => Some(false),
+            _ => None,
+        }
+    }
+
+    fn store_agent_mode_enabled(&self) -> Result<(), String> {
+        Self::write_config_value(
+            Self::agent_mode_path(),
+            if self.agent_mode_enabled {
+                "agent"
+            } else {
+                "chat"
+            },
+            "agent mode setting",
+        )
+    }
+
+    fn load_note_save_target() -> Option<NoteSaveTarget> {
+        fs::read_to_string(Self::note_save_target_path())
+            .ok()
+            .and_then(|value| Self::parse_note_save_target(&value))
+    }
+
+    fn store_note_save_target(&self) -> Result<(), String> {
+        Self::write_config_value(
+            Self::note_save_target_path(),
+            Self::note_save_target_config_value(self.note_save_target),
+            "note storage setting",
+        )
+    }
+
+    fn write_config_value(
+        config_path: PathBuf,
+        value: &'static str,
+        setting_name: &str,
+    ) -> Result<(), String> {
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create settings directory '{}': {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+        fs::write(&config_path, value).map_err(|error| {
+            format!(
+                "failed to save {} '{}': {}",
+                setting_name,
+                config_path.display(),
+                error
+            )
+        })
+    }
+
+    fn note_save_target_path() -> PathBuf {
+        Self::aleph_config_dir().join(NOTE_SAVE_TARGET_CONFIG)
+    }
+
+    fn ai_provider_path() -> PathBuf {
+        Self::aleph_config_dir().join(AI_PROVIDER_CONFIG)
+    }
+
+    fn agent_mode_path() -> PathBuf {
+        Self::aleph_config_dir().join(AGENT_MODE_CONFIG)
+    }
+
+    fn aleph_config_dir() -> PathBuf {
+        if let Ok(dir) = std::env::var("ALEPH_CONFIG_DIR") {
+            return PathBuf::from(dir);
+        }
+        if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
+            return PathBuf::from(dir).join("aleph");
+        }
+        if let Ok(dir) = std::env::var("LOCALAPPDATA").or_else(|_| std::env::var("APPDATA")) {
+            return PathBuf::from(dir).join("Aleph");
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(".config").join("aleph");
+        }
+        std::env::temp_dir().join("aleph")
     }
 
     fn obsidian_pairing_path() -> PathBuf {
@@ -6728,6 +6918,7 @@ impl App {
                         self.strix_access_token = None;
                         if self.note_save_target == NoteSaveTarget::Strix {
                             self.note_save_target = NoteSaveTarget::Local;
+                            let _ = self.store_note_save_target();
                         }
                         self.chat_stream_rx = None;
                         self.openrouter_login_rx = None;
@@ -6856,44 +7047,56 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                self.note_list_pending_delete = None;
+                if self.note_list_delete_is_pending() {
+                    self.confirm_or_stage_note_delete();
+                    return;
+                }
                 if let Some(&note_index) = self.note_list_indices.get(self.note_list_selected) {
                     self.open_note_editor(note_index);
                 }
             }
-            KeyCode::Delete | KeyCode::Backspace => {
-                let Some(&note_index) = self.note_list_indices.get(self.note_list_selected) else {
-                    self.last_action = String::from("No note selected to delete.");
-                    return;
-                };
-                let note_title = self
-                    .notes
-                    .get(note_index)
-                    .map(|note| note.title.clone())
-                    .unwrap_or_else(|| String::from("Untitled note"));
-                if self.note_list_pending_delete == Some(note_index) {
-                    match self.delete_note_at_index(note_index) {
-                        Ok(title) => {
-                            self.open_note_list_panel();
-                            self.last_action = format!("Deleted note: {}", title);
-                        }
-                        Err(error) => {
-                            self.note_list_pending_delete = None;
-                            self.last_action = format!("Delete failed: {}", error);
-                        }
-                    }
-                } else {
-                    self.note_list_pending_delete = Some(note_index);
-                    self.last_action = format!(
-                        "Press Delete again to delete '{}'. Esc or move to cancel.",
-                        note_title
-                    );
-                }
+            KeyCode::Delete | KeyCode::Backspace if key_event.kind == KeyEventKind::Press => {
+                self.confirm_or_stage_note_delete();
+            }
+            KeyCode::Char('d') | KeyCode::Char('D')
+                if key_event.kind == KeyEventKind::Press && self.note_list_delete_is_pending() =>
+            {
+                self.confirm_or_stage_note_delete();
             }
             KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.request_quit();
             }
             _ => {}
+        }
+    }
+
+    fn confirm_or_stage_note_delete(&mut self) {
+        let Some(&note_index) = self.note_list_indices.get(self.note_list_selected) else {
+            self.last_action = String::from("No note selected to delete.");
+            return;
+        };
+        let note_title = self
+            .notes
+            .get(note_index)
+            .map(|note| note.title.clone())
+            .unwrap_or_else(|| String::from("Untitled note"));
+        if self.note_list_pending_delete == Some(note_index) {
+            match self.delete_note_at_index(note_index) {
+                Ok(title) => {
+                    self.open_note_list_panel();
+                    self.last_action = format!("Deleted note: {}", title);
+                }
+                Err(error) => {
+                    self.note_list_pending_delete = None;
+                    self.last_action = format!("Delete failed: {}", error);
+                }
+            }
+        } else {
+            self.note_list_pending_delete = Some(note_index);
+            self.last_action = format!(
+                "Press Delete, Enter, or d again to delete '{}'. Esc or move to cancel.",
+                note_title
+            );
         }
     }
 
@@ -7378,6 +7581,46 @@ mod tests {
     }
 
     #[test]
+    fn note_list_handles_unicode_obsidian_folder_and_title() {
+        let mut app = App::new();
+        app.folders.push(Folder {
+            id: 99,
+            name: String::from("研究ノート集"),
+            parent_id: None,
+        });
+        app.notes = vec![test_note(1, None, "計画とアイデアの長いノート", "body")];
+        app.notes[0].folder_id = Some(99);
+        app.notes[0].obsidian_path = Some(PathBuf::from("/tmp/unicode.md"));
+
+        app.open_note_list_panel();
+
+        assert_eq!(app.panel_lines.len(), 1);
+        assert!(app.panel_lines[0].contains("[研究ノート集]"));
+    }
+
+    #[test]
+    fn settings_round_trip_to_config() {
+        let config_dir =
+            std::env::temp_dir().join(format!("aleph-settings-test-{}", App::now_millis()));
+        std::env::set_var("ALEPH_CONFIG_DIR", &config_dir);
+
+        let mut app = App::new();
+        app.note_save_target = NoteSaveTarget::Obsidian;
+        app.store_note_save_target().unwrap();
+        app.ai_provider = AiProvider::Strix;
+        app.store_ai_provider().unwrap();
+        app.agent_mode_enabled = false;
+        app.store_agent_mode_enabled().unwrap();
+
+        assert_eq!(App::load_note_save_target(), Some(NoteSaveTarget::Obsidian));
+        assert_eq!(App::load_ai_provider(), Some(AiProvider::Strix));
+        assert_eq!(App::load_agent_mode_enabled(), Some(false));
+
+        std::env::remove_var("ALEPH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(config_dir);
+    }
+
+    #[test]
     fn obsidian_pair_without_target_opens_picker_for_multiple_vaults() {
         let mut app = App::new();
         app.obsidian_vaults = vec![
@@ -7606,6 +7849,38 @@ mod tests {
 
         assert_eq!(app.notes.len(), original_count - 1);
         assert!(!app.note_list_delete_is_pending());
+    }
+
+    #[test]
+    fn note_list_delete_can_be_confirmed_with_enter_or_d() {
+        let mut app = App::new();
+        let original_count = app.notes.len();
+
+        app.open_note_list_panel();
+        app.handle_note_list_key(press(KeyCode::Delete));
+        app.handle_note_list_key(press(KeyCode::Enter));
+
+        assert_eq!(app.notes.len(), original_count - 1);
+        assert!(!app.note_list_delete_is_pending());
+
+        app.handle_note_list_key(press(KeyCode::Delete));
+        app.handle_note_list_key(press(KeyCode::Char('d')));
+
+        assert_eq!(app.notes.len(), original_count - 2);
+        assert!(!app.note_list_delete_is_pending());
+    }
+
+    #[test]
+    fn note_list_delete_repeat_does_not_confirm() {
+        let mut app = App::new();
+        let original_count = app.notes.len();
+
+        app.open_note_list_panel();
+        app.handle_note_list_key(press(KeyCode::Delete));
+        app.handle_note_list_key(repeat(KeyCode::Delete));
+
+        assert_eq!(app.notes.len(), original_count);
+        assert!(app.note_list_delete_is_pending());
     }
 
     #[test]
