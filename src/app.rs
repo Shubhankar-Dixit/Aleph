@@ -5,7 +5,10 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -65,11 +68,12 @@ pub enum PanelMode {
     LoginPicker,
     NoteList,
     VaultPicker,
+    Settings,
 }
 
 #[derive(Clone)]
 pub struct ChatMessage {
-    pub role: String,  // "user" or "assistant"
+    pub role: String, // "user" or "assistant"
     pub content: String,
     pub timestamp: String,
 }
@@ -98,7 +102,7 @@ pub struct SearchState {
 pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "login",
-        description: "Authenticate in the browser with OpenRouter or Strix (usage: /login openrouter | /login strix | /login strix <token>)",
+        description: "Connect Strix or configure a model provider (usage: /login strix | /login openrouter <key>)",
     },
     CommandSpec {
         name: "status",
@@ -114,11 +118,15 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "config",
-        description: "Inspect the local command config",
+        description: "Inspect local runtime configuration",
+    },
+    CommandSpec {
+        name: "settings",
+        description: "Show useful connection, sync, editor, and AI settings",
     },
     CommandSpec {
         name: "logout",
-        description: "Clear the active OpenRouter login",
+        description: "Sign out",
     },
     CommandSpec {
         name: "obsidian pair",
@@ -150,7 +158,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "ask",
-        description: "Ask OpenRouter a question",
+        description: "Ask the selected AI provider a question",
     },
     CommandSpec {
         name: "note list",
@@ -214,9 +222,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
 ];
 
-pub const THINKING_FRAMES: [&str; 10] = [
-    "◡", "⊙", "◠", "⊙", "◡", "⊙", "◉", "●", "◉", "⊙",
-];
+pub const THINKING_FRAMES: [&str; 10] = ["◡", "⊙", "◠", "⊙", "◡", "⊙", "◉", "●", "◉", "⊙"];
 
 const OPENROUTER_CHAT_MODEL: &str = "nvidia/nemotron-3-nano-30b-a3b:free";
 const OPENROUTER_SERVICE: &str = "Aleph";
@@ -304,6 +310,7 @@ pub struct App {
     chat_render_dirty: bool,
     chat_cache_stable_len: usize,
     login_picker_selected: usize,
+    settings_selected: usize,
     ghost_stream_rx: Option<Receiver<ChatStreamUpdate>>,
     ghost_streaming: bool,
     ghost_result: Option<String>,
@@ -475,6 +482,7 @@ impl App {
             chat_render_dirty: false,
             chat_cache_stable_len: 0,
             login_picker_selected: 0,
+            settings_selected: 0,
             ghost_stream_rx: None,
             ghost_streaming: false,
             ghost_result: None,
@@ -491,7 +499,8 @@ impl App {
                     app.notes = notes;
                     app.selected_note = 0;
                     app.add_strix_log("Loaded cached Strix notes");
-                    app.last_action = String::from("Loaded cached Strix notes. Run /sync to refresh.");
+                    app.last_action =
+                        String::from("Loaded cached Strix notes. Run /sync to refresh.");
                 }
             }
         }
@@ -523,7 +532,10 @@ impl App {
         }
 
         if area != "notes" && area != "note" {
-            return Err(format!("Unknown Aleph CLI area '{}'. Try 'notes' or 'obsidian'.", area));
+            return Err(format!(
+                "Unknown Aleph CLI area '{}'. Try 'notes' or 'obsidian'.",
+                area
+            ));
         }
 
         let action = args.get(1).map(|value| value.as_str()).unwrap_or("list");
@@ -581,7 +593,9 @@ impl App {
                     .ok_or_else(|| String::from("Usage: aleph notes write <id|title> <content>"))?;
                 let content = args.get(3..).unwrap_or(&[]).join(" ");
                 if content.is_empty() {
-                    return Err(String::from("Provide content or pass '-' to read content from stdin."));
+                    return Err(String::from(
+                        "Provide content or pass '-' to read content from stdin.",
+                    ));
                 }
                 self.ensure_cached_strix_notes_loaded();
                 let local_index = self.resolve_note_index(id);
@@ -612,12 +626,14 @@ impl App {
                 )])
             }
             "append" => {
-                let id = args
-                    .get(2)
-                    .ok_or_else(|| String::from("Usage: aleph notes append <id|title> <content>"))?;
+                let id = args.get(2).ok_or_else(|| {
+                    String::from("Usage: aleph notes append <id|title> <content>")
+                })?;
                 let content = args.get(3..).unwrap_or(&[]).join(" ");
                 if content.is_empty() {
-                    return Err(String::from("Provide content or pass '-' to read content from stdin."));
+                    return Err(String::from(
+                        "Provide content or pass '-' to read content from stdin.",
+                    ));
                 }
                 self.ensure_cached_strix_notes_loaded();
                 let local_index = self.resolve_note_index(id);
@@ -664,8 +680,9 @@ impl App {
                             format!("failed to create '{}': {}", parent.display(), error)
                         })?;
                     }
-                    fs::write(&path, &content)
-                        .map_err(|error| format!("failed to write '{}': {}", path.display(), error))?;
+                    fs::write(&path, &content).map_err(|error| {
+                        format!("failed to write '{}': {}", path.display(), error)
+                    })?;
                     note.obsidian_path = Some(path);
                 }
                 self.upsert_synced_note(note.clone());
@@ -688,11 +705,17 @@ impl App {
                 let path = if target.is_empty() {
                     match self.obsidian_vaults.as_slice() {
                         [vault] => vault.path.clone(),
-                        [] => return Err(String::from("No Obsidian vaults found. Run `aleph obsidian pair <path>`.")),
+                        [] => {
+                            return Err(String::from(
+                                "No Obsidian vaults found. Run `aleph obsidian pair <path>`.",
+                            ))
+                        }
                         _ => {
-                            return Ok(std::iter::once(String::from("Multiple vaults found. Re-run with a number or name:"))
-                                .chain(self.format_obsidian_vault_lines())
-                                .collect())
+                            return Ok(std::iter::once(String::from(
+                                "Multiple vaults found. Re-run with a number or name:",
+                            ))
+                            .chain(self.format_obsidian_vault_lines())
+                            .collect())
                         }
                     }
                 } else {
@@ -700,13 +723,18 @@ impl App {
                         .unwrap_or_else(|| PathBuf::from(Self::expand_home(target)))
                 };
                 let message = self.pair_obsidian_vault(path)?;
-                Ok(vec![message, String::from("Run `aleph obsidian sync` to import notes.")])
+                Ok(vec![
+                    message,
+                    String::from("Run `aleph obsidian sync` to import notes."),
+                ])
             }
             "vaults" | "list" => {
                 self.refresh_obsidian_vaults();
                 let mut lines = self.format_obsidian_vault_lines();
                 if lines.is_empty() {
-                    lines.push(String::from("No Obsidian vaults found. Run `aleph obsidian pair <path>`."));
+                    lines.push(String::from(
+                        "No Obsidian vaults found. Run `aleph obsidian pair <path>`.",
+                    ));
                 }
                 Ok(lines)
             }
@@ -718,13 +746,20 @@ impl App {
                 format!("Obsidian: {}", self.obsidian_status_label()),
                 format!("Detected vaults: {}", self.obsidian_vaults.len()),
                 format!("Config: {}", Self::obsidian_config_path().display()),
-                format!("Pairing fallback: {}", Self::obsidian_pairing_path().display()),
+                format!(
+                    "Pairing fallback: {}",
+                    Self::obsidian_pairing_path().display()
+                ),
             ]),
             "open" => {
                 let target = args.get(1..).unwrap_or(&[]).join(" ");
-                self.open_obsidian_target(&target).map(|message| vec![message])
+                self.open_obsidian_target(&target)
+                    .map(|message| vec![message])
             }
-            _ => Err(format!("Unknown obsidian action '{}'. Try pair, vaults, sync, status, or open.", action)),
+            _ => Err(format!(
+                "Unknown obsidian action '{}'. Try pair, vaults, sync, status, or open.",
+                action
+            )),
         }
     }
 
@@ -750,20 +785,25 @@ impl App {
                             self.refresh_connection_state();
                             self.rebuild_chat_render_cache();
                             self.set_result_panel(
-                                "OpenRouter login",
+                                "OpenRouter provider",
                                 vec![
-                                    String::from("OpenRouter browser login completed successfully."),
-                                    String::from("The API key has been stored locally."),
-                                    String::from("You can start chatting right away."),
+                                    String::from(
+                                        "OpenRouter authorization completed successfully.",
+                                    ),
+                                    String::from(
+                                        "The API key has been stored locally as a model provider.",
+                                    ),
+                                    String::from("AI chat can use OpenRouter now."),
                                 ],
                             );
-                            self.last_action = String::from("Connected to OpenRouter via browser login.");
+                            self.last_action =
+                                String::from("Configured OpenRouter as a model provider.");
                         }
                         Err(error) => {
                             self.openrouter_api_key = None;
                             self.refresh_connection_state();
-                            self.set_result_panel("OpenRouter login failed", vec![error]);
-                            self.last_action = String::from("OpenRouter login failed.");
+                            self.set_result_panel("OpenRouter provider failed", vec![error]);
+                            self.last_action = String::from("OpenRouter provider setup failed.");
                         }
                     }
 
@@ -773,8 +813,8 @@ impl App {
                 }
                 Ok(Err(error)) => {
                     self.refresh_connection_state();
-                    self.set_result_panel("OpenRouter login failed", vec![error]);
-                    self.last_action = String::from("OpenRouter login failed.");
+                    self.set_result_panel("OpenRouter provider failed", vec![error]);
+                    self.last_action = String::from("OpenRouter provider setup failed.");
                     self.openrouter_login_rx = None;
                     self.openrouter_login_cancel = None;
                     login_finished = true;
@@ -783,10 +823,12 @@ impl App {
                 Err(TryRecvError::Disconnected) => {
                     self.refresh_connection_state();
                     self.set_result_panel(
-                        "OpenRouter login failed",
-                        vec![String::from("The browser login flow disconnected before completion.")],
+                        "OpenRouter provider failed",
+                        vec![String::from(
+                            "The browser login flow disconnected before completion.",
+                        )],
                     );
-                    self.last_action = String::from("OpenRouter login disconnected.");
+                    self.last_action = String::from("OpenRouter provider setup disconnected.");
                     self.openrouter_login_rx = None;
                     self.openrouter_login_cancel = None;
                     login_finished = true;
@@ -813,11 +855,16 @@ impl App {
                                 "Strix login",
                                 vec![
                                     String::from("Strix browser login completed successfully."),
-                                    String::from("The native app access token has been stored locally."),
-                                    String::from("Aleph can now call Strix-native APIs as they come online."),
+                                    String::from(
+                                        "The native app access token has been stored locally.",
+                                    ),
+                                    String::from(
+                                        "Aleph can now call Strix-native APIs as they come online.",
+                                    ),
                                 ],
                             );
-                            self.last_action = String::from("Connected to Strix via browser login.");
+                            self.last_action =
+                                String::from("Connected to Strix via browser login.");
                         }
                         Err(error) => {
                             self.strix_access_token = None;
@@ -844,7 +891,9 @@ impl App {
                     self.refresh_connection_state();
                     self.set_result_panel(
                         "Strix login failed",
-                        vec![String::from("The browser login flow disconnected before completion.")],
+                        vec![String::from(
+                            "The browser login flow disconnected before completion.",
+                        )],
                     );
                     self.last_action = String::from("Strix login disconnected.");
                     self.strix_login_rx = None;
@@ -936,7 +985,8 @@ impl App {
                         .rev()
                         .find(|message| message.role == "assistant")
                     {
-                        message.content = String::from("AI chat disconnected before a response arrived.");
+                        message.content =
+                            String::from("AI chat disconnected before a response arrived.");
                     }
 
                     self.streaming_buffer.clear();
@@ -1115,6 +1165,13 @@ impl App {
         self.ai_provider
     }
 
+    pub fn ai_provider_label(&self) -> &'static str {
+        match self.ai_provider {
+            AiProvider::OpenRouter => "OpenRouter",
+            AiProvider::Strix => "Strix",
+        }
+    }
+
     pub fn strix_logs(&self) -> &[String] {
         &self.strix_logs
     }
@@ -1133,6 +1190,14 @@ impl App {
 
     pub fn is_login_picker(&self) -> bool {
         self.panel_mode == PanelMode::LoginPicker
+    }
+
+    pub fn is_settings(&self) -> bool {
+        self.panel_mode == PanelMode::Settings
+    }
+
+    pub fn settings_selected(&self) -> usize {
+        self.settings_selected
     }
 
     pub fn is_note_list(&self) -> bool {
@@ -1207,7 +1272,10 @@ impl App {
         self.selected_suggestion
     }
 
-    pub fn visible_commands_window(&self, window_size: usize) -> (Vec<&'static CommandSpec>, usize) {
+    pub fn visible_commands_window(
+        &self,
+        window_size: usize,
+    ) -> (Vec<&'static CommandSpec>, usize) {
         // Use suggestion_filter if initialized, otherwise fall back to prompt
         let query = if let Some(ref filter) = self.suggestion_filter {
             filter.clone()
@@ -1291,6 +1359,7 @@ impl App {
 
     fn is_command_visible(&self, cmd: &CommandSpec) -> bool {
         match cmd.name {
+            "config" => false, // Hidden alias for /settings
             "login" => !self.connected,
             "logout" => self.connected,
             _ => true,
@@ -1340,6 +1409,10 @@ impl App {
             self.handle_vault_picker_key(key_event);
             return;
         }
+        if self.is_settings() {
+            self.handle_settings_key(key_event);
+            return;
+        }
 
         match key_event.code {
             KeyCode::Char('c')
@@ -1354,7 +1427,9 @@ impl App {
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => self.submit_prompt(),
             KeyCode::Backspace if key_event.kind == KeyEventKind::Press => self.backspace(),
             KeyCode::Delete if key_event.kind == KeyEventKind::Press => self.delete(),
-            KeyCode::Left if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            KeyCode::Left
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
                 self.move_left()
             }
             KeyCode::Right
@@ -1363,7 +1438,9 @@ impl App {
                 self.move_right()
             }
             KeyCode::Home if key_event.kind == KeyEventKind::Press => self.cursor = 0,
-            KeyCode::End if key_event.kind == KeyEventKind::Press => self.cursor = self.prompt.len(),
+            KeyCode::End if key_event.kind == KeyEventKind::Press => {
+                self.cursor = self.prompt.len()
+            }
             KeyCode::Up if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 self.cycle_suggestion(-1)
             }
@@ -1394,7 +1471,10 @@ impl App {
             return;
         }
 
-        if self.is_full_editor() && self.ai_overlay_visible && matches!(mouse_event.kind, MouseEventKind::Down(_)) {
+        if self.is_full_editor()
+            && self.ai_overlay_visible
+            && matches!(mouse_event.kind, MouseEventKind::Down(_))
+        {
             self.close_ai_overlay();
         }
     }
@@ -1427,7 +1507,9 @@ impl App {
             }
             KeyCode::Backspace if key_event.kind == KeyEventKind::Press => self.editor_backspace(),
             KeyCode::Delete if key_event.kind == KeyEventKind::Press => self.editor_delete(),
-            KeyCode::Left if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            KeyCode::Left
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
                 self.editor_move_left()
             }
             KeyCode::Right
@@ -1596,7 +1678,8 @@ impl App {
                     && !key_event.modifiers.contains(KeyModifiers::CONTROL)
                     && !key_event.modifiers.contains(KeyModifiers::ALT) =>
             {
-                self.chat_input_buffer.insert(self.chat_input_cursor, character);
+                self.chat_input_buffer
+                    .insert(self.chat_input_cursor, character);
                 self.chat_input_cursor += character.len_utf8();
             }
             _ => {}
@@ -1869,8 +1952,8 @@ impl App {
                         self.set_result_panel(
                             "Already connected",
                             vec![
-                                format!("You are already connected to {}.", provider),
-                                String::from("Use /logout first if you want to switch providers or re-authenticate."),
+                                format!("You are already connected through {}.", provider),
+                                String::from("Use /logout first if you want to switch credentials or re-authenticate."),
                                 String::from("Use /status to see your current connection details."),
                             ],
                         );
@@ -1896,15 +1979,15 @@ impl App {
                     } else {
                         let maybe_provider = args_trimmed.to_lowercase();
                         if maybe_provider == "openrouter" {
-                            // /login openrouter -> browser login
+                            // /login openrouter -> browser authorization for an API key
                             if self.start_openrouter_browser_login() {
                                 return;
                             }
                             self.set_result_panel(
-                                "OpenRouter login failed",
-                                vec![String::from("Unable to start the browser-based OpenRouter login flow.")],
+                                "OpenRouter provider failed",
+                                vec![String::from("Unable to start the browser-based OpenRouter authorization flow.")],
                             );
-                            self.last_action = String::from("OpenRouter login failed.");
+                            self.last_action = String::from("OpenRouter provider setup failed.");
                             return;
                         } else if maybe_provider == "strix" {
                             if self.start_strix_browser_login() {
@@ -1912,7 +1995,9 @@ impl App {
                             }
                             self.set_result_panel(
                                 "Strix login failed",
-                                vec![String::from("Unable to start the browser-based Strix login flow.")],
+                                vec![String::from(
+                                    "Unable to start the browser-based Strix login flow.",
+                                )],
                             );
                             self.last_action = String::from("Strix login failed.");
                             return;
@@ -1932,7 +2017,9 @@ impl App {
                             }
                             self.set_result_panel(
                                 "Strix login failed",
-                                vec![String::from("Unable to start the browser-based Strix login flow.")],
+                                vec![String::from(
+                                    "Unable to start the browser-based Strix login flow.",
+                                )],
                             );
                             self.last_action = String::from("Strix login failed.");
                             return;
@@ -1948,7 +2035,9 @@ impl App {
                                     "Strix login",
                                     vec![
                                         String::from("Strix authentication configured."),
-                                        String::from("The native access token has been stored locally."),
+                                        String::from(
+                                            "The native access token has been stored locally.",
+                                        ),
                                     ],
                                 );
                                 self.last_action = String::from("Connected to Strix.");
@@ -1969,19 +2058,23 @@ impl App {
                                 self.refresh_connection_state();
                                 self.rebuild_chat_render_cache();
                                 self.set_result_panel(
-                                    "OpenRouter login",
+                                    "OpenRouter provider",
                                     vec![
-                                        String::from("OpenRouter login saved locally."),
-                                        String::from("AI chat is ready to use now."),
+                                        String::from("OpenRouter API key saved locally."),
+                                        String::from(
+                                            "AI chat can use OpenRouter as a model provider now.",
+                                        ),
                                     ],
                                 );
-                                self.last_action = String::from("Connected to OpenRouter.");
+                                self.last_action =
+                                    String::from("Configured OpenRouter as a model provider.");
                             }
                             Err(error) => {
                                 self.openrouter_api_key = None;
                                 self.refresh_connection_state();
-                                self.set_result_panel("OpenRouter login failed", vec![error]);
-                                self.last_action = String::from("OpenRouter login failed.");
+                                self.set_result_panel("OpenRouter provider failed", vec![error]);
+                                self.last_action =
+                                    String::from("OpenRouter provider setup failed.");
                             }
                         }
                     }
@@ -2018,8 +2111,8 @@ impl App {
                 self.set_result_panel(
                     "Signed out",
                     vec![
-                        String::from("The current OpenRouter login has been cleared."),
-                        String::from("The current Strix login has also been cleared."),
+                        String::from("Saved model-provider credentials have been cleared."),
+                        String::from("Saved Strix account credentials have also been cleared."),
                         String::from("Use /login openrouter or /login strix to connect again."),
                     ],
                 );
@@ -2040,30 +2133,30 @@ impl App {
                 self.set_result_panel("Obsidian vaults", lines);
                 self.last_action = String::from("Listed Obsidian vaults.");
             }
-            "obsidian sync" => {
-                match self.sync_obsidian_notes() {
-                    Ok(count) => {
-                        let vault = self
-                            .obsidian_vault_path
-                            .as_ref()
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_else(|| String::from("unknown vault"));
-                        self.set_result_panel(
-                            "Obsidian sync",
-                            vec![
-                                format!("Imported {} Markdown notes.", count),
-                                format!("Vault: {}", vault),
-                                String::from("Use /note list, /search, /note edit, and /obsidian open."),
-                            ],
-                        );
-                        self.last_action = format!("Synced {} Obsidian notes.", count);
-                    }
-                    Err(error) => {
-                        self.set_result_panel("Obsidian sync failed", vec![error]);
-                        self.last_action = String::from("Obsidian sync failed.");
-                    }
+            "obsidian sync" => match self.sync_obsidian_notes() {
+                Ok(count) => {
+                    let vault = self
+                        .obsidian_vault_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| String::from("unknown vault"));
+                    self.set_result_panel(
+                        "Obsidian sync",
+                        vec![
+                            format!("Imported {} Markdown notes.", count),
+                            format!("Vault: {}", vault),
+                            String::from(
+                                "Use /note list, /search, /note edit, and /obsidian open.",
+                            ),
+                        ],
+                    );
+                    self.last_action = format!("Synced {} Obsidian notes.", count);
                 }
-            }
+                Err(error) => {
+                    self.set_result_panel("Obsidian sync failed", vec![error]);
+                    self.last_action = String::from("Obsidian sync failed.");
+                }
+            },
             "obsidian status" => {
                 self.refresh_obsidian_vaults();
                 let paired = self
@@ -2077,31 +2170,46 @@ impl App {
                         format!("Paired vault: {}", paired),
                         format!("Detected vaults: {}", self.obsidian_vaults.len()),
                         format!("Config: {}", Self::obsidian_config_path().display()),
-                        format!("Pairing fallback: {}", Self::obsidian_pairing_path().display()),
+                        format!(
+                            "Pairing fallback: {}",
+                            Self::obsidian_pairing_path().display()
+                        ),
                         String::from("Sync mode: direct Markdown filesystem integration"),
                         String::from("Open mode: obsidian:// URI, no Obsidian CLI required"),
                     ],
                 );
                 self.last_action = String::from("Refreshed Obsidian status.");
             }
-            "obsidian open" => {
-                match self.open_obsidian_target(args.trim()) {
-                    Ok(message) => {
-                        self.set_result_panel("Obsidian open", vec![message]);
-                        self.last_action = String::from("Opened Obsidian target.");
-                    }
-                    Err(error) => {
-                        self.set_result_panel("Obsidian open failed", vec![error]);
-                        self.last_action = String::from("Obsidian open failed.");
-                    }
+            "obsidian open" => match self.open_obsidian_target(args.trim()) {
+                Ok(message) => {
+                    self.set_result_panel("Obsidian open", vec![message]);
+                    self.last_action = String::from("Opened Obsidian target.");
                 }
-            }
+                Err(error) => {
+                    self.set_result_panel("Obsidian open failed", vec![error]);
+                    self.last_action = String::from("Obsidian open failed.");
+                }
+            },
             "status" => {
                 self.set_result_panel(
                     "Status",
                     vec![
-                        format!("OpenRouter: {}", if self.is_openrouter_connected() { "connected" } else { "offline" }),
-                        format!("Strix: {}", if self.is_strix_connected() { "connected" } else { "offline" }),
+                        format!(
+                            "OpenRouter: {}",
+                            if self.is_openrouter_connected() {
+                                "connected"
+                            } else {
+                                "offline"
+                            }
+                        ),
+                        format!(
+                            "Strix: {}",
+                            if self.is_strix_connected() {
+                                "connected"
+                            } else {
+                                "offline"
+                            }
+                        ),
                         format!("Obsidian: {}", self.obsidian_status_label()),
                         format!("Notes: {}", self.notes.len()),
                         format!("Cache: {}", Self::strix_cache_path().display()),
@@ -2112,24 +2220,22 @@ impl App {
                 );
                 self.last_action = String::from("Refreshed provider status.");
             }
-            "sync" => {
-                match self.sync_strix_notes() {
-                    Ok(count) => {
-                        self.set_result_panel(
+            "sync" => match self.sync_strix_notes() {
+                Ok(count) => {
+                    self.set_result_panel(
                             "Strix sync",
                             vec![
                                 format!("Pulled {} notes from Strix.", count),
                                 String::from("Use /search, /note list, /note read, and /note edit against the synced notes."),
                             ],
                         );
-                        self.last_action = format!("Synced {} Strix notes.", count);
-                    }
-                    Err(error) => {
-                        self.set_result_panel("Strix sync failed", vec![error]);
-                        self.last_action = String::from("Strix sync failed.");
-                    }
+                    self.last_action = format!("Synced {} Strix notes.", count);
                 }
-            }
+                Err(error) => {
+                    self.set_result_panel("Strix sync failed", vec![error]);
+                    self.last_action = String::from("Strix sync failed.");
+                }
+            },
             "doctor" => {
                 self.set_result_panel(
                     "Doctor",
@@ -2142,18 +2248,8 @@ impl App {
                 );
                 self.last_action = String::from("Ran diagnostics.");
             }
-            "config" => {
-                self.set_result_panel(
-                    "Config",
-                    vec![
-                        String::from("Theme: dark purple on black"),
-                        String::from("Editor: embedded terminal note editor"),
-                        String::from("AI chat: OpenRouter-backed"),
-                        String::from("Strix auth: OAuth-style browser flow with PKCE"),
-                        String::from("Login: /login openrouter, /login strix, or provider token env vars"),
-                    ],
-                );
-                self.last_action = String::from("Opened config summary.");
+            "config" | "settings" => {
+                self.open_settings_panel();
             }
             "search" => {
                 let query = args.trim();
@@ -2168,7 +2264,10 @@ impl App {
                     }
                     let mut lines = self.search_notes(query);
                     if lines.is_empty() {
-                        lines.push(format!("No cached Strix matches for '{}'. Run /sync to refresh.", query));
+                        lines.push(format!(
+                            "No cached Strix matches for '{}'. Run /sync to refresh.",
+                            query
+                        ));
                     }
                     self.set_result_panel(format!("Search: {}", query), lines);
                     self.last_action = format!("Searched cached Strix notes for {}.", query);
@@ -2200,7 +2299,7 @@ impl App {
             "ask" => {
                 let query = args.trim();
                 let lines = if query.is_empty() {
-                    vec![String::from("Ask OpenRouter a question after the command, for example: /ask what should ship next?")]
+                    vec![String::from("Ask the selected AI provider a question after the command, for example: /ask what should ship next?")]
                 } else {
                     if self.start_chat_turn(query.to_string()) {
                         self.reset_prompt();
@@ -2247,13 +2346,20 @@ impl App {
                         let source_indicator = if note.obsidian_path.is_some() {
                             String::from(" [obsidian]")
                         } else {
-                            note.remote_id.as_deref().map(|id| format!(" [{}]", id)).unwrap_or_default()
+                            note.remote_id
+                                .as_deref()
+                                .map(|id| format!(" [{}]", id))
+                                .unwrap_or_default()
                         };
                         format!(
                             "{:>2}. #{} {:<14} {}{}{}",
                             list_index + 1,
                             note.id,
-                            if note.title.len() > 14 { format!("{}…", &note.title[..13]) } else { note.title.clone() },
+                            if note.title.len() > 14 {
+                                format!("{}…", &note.title[..13])
+                            } else {
+                                note.title.clone()
+                            },
                             folder_indicator,
                             Self::preview_text(&note.content, 32),
                             source_indicator
@@ -2263,7 +2369,8 @@ impl App {
 
                 self.note_list_selected = 0;
                 self.panel_mode = PanelMode::NoteList;
-                self.panel_title = format!("Notes — {} (↑/↓ to navigate, Enter to open)", folder_name);
+                self.panel_title =
+                    format!("Notes — {} (↑/↓ to navigate, Enter to open)", folder_name);
                 self.panel_lines = lines;
                 self.last_action = String::from("Listed notes. Use arrow keys to navigate.");
             }
@@ -2271,7 +2378,10 @@ impl App {
                 if self.is_strix_connected() {
                     self.ensure_cached_strix_notes_loaded();
                 }
-                if self.is_strix_connected() && !args.trim().is_empty() && self.resolve_note_index(args.trim()).is_none() {
+                if self.is_strix_connected()
+                    && !args.trim().is_empty()
+                    && self.resolve_note_index(args.trim()).is_none()
+                {
                     if let Ok(note) = self.load_strix_note(args.trim(), true) {
                         self.upsert_synced_note(note);
                     }
@@ -2279,7 +2389,9 @@ impl App {
                 let Some(index) = self.resolve_note_index(args.trim()) else {
                     self.set_result_panel(
                         "Note not found",
-                        vec![String::from("Try /note read 1 or /note read Strix gateway.")],
+                        vec![String::from(
+                            "Try /note read 1 or /note read Strix gateway.",
+                        )],
                     );
                     self.last_action = String::from("Note not found.");
                     return;
@@ -2329,13 +2441,23 @@ impl App {
                 if let Some(path) = note.obsidian_path.as_ref() {
                     if let Some(parent) = path.parent() {
                         if let Err(error) = fs::create_dir_all(parent) {
-                            self.set_result_panel("Obsidian create failed", vec![format!("failed to create '{}': {}", parent.display(), error)]);
+                            self.set_result_panel(
+                                "Obsidian create failed",
+                                vec![format!(
+                                    "failed to create '{}': {}",
+                                    parent.display(),
+                                    error
+                                )],
+                            );
                             self.last_action = String::from("Obsidian note create failed.");
                             return;
                         }
                     }
                     if let Err(error) = fs::write(path, "") {
-                        self.set_result_panel("Obsidian create failed", vec![format!("failed to write '{}': {}", path.display(), error)]);
+                        self.set_result_panel(
+                            "Obsidian create failed",
+                            vec![format!("failed to write '{}': {}", path.display(), error)],
+                        );
                         self.last_action = String::from("Obsidian note create failed.");
                         return;
                     }
@@ -2415,7 +2537,7 @@ impl App {
                 if self.notes.is_empty() {
                     self.set_result_panel(
                         "Edit failed",
-                        vec![String::from("No notes are available yet." )],
+                        vec![String::from("No notes are available yet.")],
                     );
                     self.last_action = String::from("No note available to edit.");
                     return;
@@ -2428,10 +2550,7 @@ impl App {
                 };
 
                 let Some(index) = resolved_index else {
-                    self.set_result_panel(
-                        "Edit failed",
-                        vec![String::from("Note not found.")],
-                    );
+                    self.set_result_panel("Edit failed", vec![String::from("Note not found.")]);
                     self.last_action = String::from("Note not found.");
                     return;
                 };
@@ -2492,7 +2611,10 @@ impl App {
 
                 self.set_result_panel(
                     "Note moved",
-                    vec![format!("Moved '{}' to folder '{}'.", note_title, folder_name)],
+                    vec![format!(
+                        "Moved '{}' to folder '{}'.",
+                        note_title, folder_name
+                    )],
                 );
                 self.last_action = format!("Moved note to folder: {}", folder_name);
             }
@@ -2529,7 +2651,9 @@ impl App {
                 if folder_ref.is_empty() {
                     self.set_result_panel(
                         "Delete failed",
-                        vec![String::from("Provide a folder ID or name after /folder delete.")],
+                        vec![String::from(
+                            "Provide a folder ID or name after /folder delete.",
+                        )],
                     );
                     self.last_action = String::from("Folder reference was empty.");
                     return;
@@ -2638,7 +2762,10 @@ impl App {
                 self.memories.push(memory.to_string());
                 self.set_result_panel(
                     "Memory saved",
-                    vec![memory.to_string(), String::from("Stored in the local demo memory list.")],
+                    vec![
+                        memory.to_string(),
+                        String::from("Stored in the local demo memory list."),
+                    ],
                 );
                 self.last_action = String::from("Saved a memory.");
             }
@@ -2710,7 +2837,8 @@ impl App {
 
     fn add_strix_log(&mut self, message: impl Into<String>) {
         let timestamp = self.uptime();
-        self.strix_logs.push(format!("[{}] {}", timestamp, message.into()));
+        self.strix_logs
+            .push(format!("[{}] {}", timestamp, message.into()));
         // Keep only last 50 log entries
         if self.strix_logs.len() > 50 {
             self.strix_logs.drain(0..self.strix_logs.len() - 50);
@@ -2732,7 +2860,9 @@ impl App {
 
     fn start_openrouter_browser_login(&mut self) -> bool {
         if self.openrouter_login_rx.is_some() {
-            self.last_action = String::from("OpenRouter login is already running. Use /logout to cancel it first.");
+            self.last_action = String::from(
+                "OpenRouter provider setup is already running. Use /logout to cancel it first.",
+            );
             return false;
         }
 
@@ -2741,14 +2871,14 @@ impl App {
         self.openrouter_login_rx = Some(receiver);
         self.openrouter_login_cancel = Some(cancel_flag.clone());
         self.set_result_panel(
-            "OpenRouter browser login",
+            "OpenRouter provider setup",
             vec![
-                String::from("A browser window will open for OpenRouter sign-in."),
+                String::from("A browser window will open for OpenRouter authorization."),
                 String::from("After you authorize Aleph, the API key will be stored locally."),
                 String::from("If the browser does not open, copy the auth URL from the terminal."),
             ],
         );
-        self.last_action = String::from("Starting OpenRouter browser login.");
+        self.last_action = String::from("Starting OpenRouter provider setup.");
 
         thread::spawn(move || {
             let result = Self::run_openrouter_browser_login_flow(cancel_flag);
@@ -2769,8 +2899,12 @@ impl App {
             urlencoding::encode(&code_challenge),
         );
 
-        let listener = TcpListener::bind(("127.0.0.1", OPENROUTER_AUTH_PORT))
-            .map_err(|error| format!("failed to bind local OpenRouter callback listener: {}", error))?;
+        let listener = TcpListener::bind(("127.0.0.1", OPENROUTER_AUTH_PORT)).map_err(|error| {
+            format!(
+                "failed to bind local OpenRouter callback listener: {}",
+                error
+            )
+        })?;
         listener
             .set_nonblocking(true)
             .map_err(|error| format!("failed to configure the callback listener: {}", error))?;
@@ -2780,14 +2914,16 @@ impl App {
         let deadline = Instant::now() + Duration::from_secs(600);
         let (mut stream, _) = loop {
             if cancel_flag.load(Ordering::Relaxed) {
-                return Err(String::from("OpenRouter browser login was canceled."));
+                return Err(String::from("OpenRouter authorization was canceled."));
             }
 
             match listener.accept() {
                 Ok(connection) => break connection,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
-                        return Err(String::from("OpenRouter browser login timed out waiting for the callback."));
+                        return Err(String::from(
+                            "OpenRouter authorization timed out waiting for the callback.",
+                        ));
                     }
                     thread::sleep(Duration::from_millis(100));
                 }
@@ -2801,11 +2937,11 @@ impl App {
 
         Self::write_openrouter_callback_response(
             &mut stream,
-            "OpenRouter login completed. You can return to Aleph now.",
+            "OpenRouter authorization completed. You can return to Aleph now.",
         )?;
 
         if cancel_flag.load(Ordering::Relaxed) {
-            return Err(String::from("OpenRouter browser login was canceled."));
+            return Err(String::from("OpenRouter authorization was canceled."));
         }
 
         Self::exchange_openrouter_code_for_key(&code, &code_verifier)
@@ -2813,7 +2949,8 @@ impl App {
 
     fn start_strix_browser_login(&mut self) -> bool {
         if self.strix_login_rx.is_some() {
-            self.last_action = String::from("Strix login is already running. Use /logout to cancel it first.");
+            self.last_action =
+                String::from("Strix login is already running. Use /logout to cancel it first.");
             return false;
         }
 
@@ -2825,7 +2962,9 @@ impl App {
             "Strix browser login",
             vec![
                 String::from("A browser window will open for Strix sign-in."),
-                String::from("After you authenticate, Aleph receives a native app token via localhost."),
+                String::from(
+                    "After you authenticate, Aleph receives a native app token via localhost.",
+                ),
                 format!("Server: {}", Self::strix_auth_base_url()),
             ],
         );
@@ -2858,9 +2997,9 @@ impl App {
 
         let listener = TcpListener::bind(("127.0.0.1", STRIX_AUTH_PORT))
             .map_err(|error| format!("failed to bind local Strix callback listener: {}", error))?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|error| format!("failed to configure the Strix callback listener: {}", error))?;
+        listener.set_nonblocking(true).map_err(|error| {
+            format!("failed to configure the Strix callback listener: {}", error)
+        })?;
 
         Self::open_browser(&auth_url)?;
 
@@ -2874,7 +3013,9 @@ impl App {
                 Ok(connection) => break connection,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
-                        return Err(String::from("Strix browser login timed out waiting for the callback."));
+                        return Err(String::from(
+                            "Strix browser login timed out waiting for the callback.",
+                        ));
                     }
                     thread::sleep(Duration::from_millis(100));
                 }
@@ -2891,7 +3032,9 @@ impl App {
         let returned_state = Self::query_parameter(&request_path, "state")
             .ok_or_else(|| String::from("Strix callback did not include state"))?;
         if returned_state != state {
-            return Err(String::from("Strix callback state did not match the login request."));
+            return Err(String::from(
+                "Strix callback state did not match the login request.",
+            ));
         }
         let code = Self::query_parameter(&request_path, "code")
             .ok_or_else(|| String::from("Strix callback did not include an authorization code"))?;
@@ -2981,16 +3124,16 @@ impl App {
         let request_path = {
             let mut reader = BufReader::new(stream);
             let mut request_line = String::new();
-            reader
-                .read_line(&mut request_line)
-                .map_err(|error| format!("failed to read {} callback request: {}", provider, error))?;
+            reader.read_line(&mut request_line).map_err(|error| {
+                format!("failed to read {} callback request: {}", provider, error)
+            })?;
 
             let mut header = String::new();
             loop {
                 header.clear();
-                let bytes_read = reader
-                    .read_line(&mut header)
-                    .map_err(|error| format!("failed to read {} callback headers: {}", provider, error))?;
+                let bytes_read = reader.read_line(&mut header).map_err(|error| {
+                    format!("failed to read {} callback headers: {}", provider, error)
+                })?;
                 if bytes_read == 0 || header == "\r\n" {
                     break;
                 }
@@ -3005,7 +3148,10 @@ impl App {
 
         let request_path_only = request_path.split('?').next().unwrap_or(&request_path);
         if request_path_only != expected_path {
-            return Err(format!("{} callback arrived on an unexpected path.", provider));
+            return Err(format!(
+                "{} callback arrived on an unexpected path.",
+                provider
+            ));
         }
 
         Ok(request_path)
@@ -3017,7 +3163,7 @@ impl App {
     ) -> Result<(), String> {
         Self::write_oauth_callback_response(
             stream,
-            "OpenRouter login complete",
+            "OpenRouter authorization complete",
             message,
             "OpenRouter",
         )
@@ -3060,7 +3206,12 @@ impl App {
             .post("https://openrouter.ai/api/v1/auth/keys")
             .json(&payload)
             .send()
-            .map_err(|error| format!("failed to exchange the OpenRouter authorization code: {}", error))?;
+            .map_err(|error| {
+                format!(
+                    "failed to exchange the OpenRouter authorization code: {}",
+                    error
+                )
+            })?;
 
         let status = response.status();
         let body = response
@@ -3081,7 +3232,6 @@ impl App {
             .filter(|key| !key.is_empty())
             .ok_or_else(|| String::from("OpenRouter auth response did not include an API key"))
     }
-
 
     fn exchange_strix_code_for_token(
         auth_base_url: &str,
@@ -3106,7 +3256,9 @@ impl App {
             .post(format!("{}/api/auth/native/token", auth_base_url))
             .json(&payload)
             .send()
-            .map_err(|error| format!("failed to exchange the Strix authorization code: {}", error))?;
+            .map_err(|error| {
+                format!("failed to exchange the Strix authorization code: {}", error)
+            })?;
 
         let status = response.status();
         let body = response
@@ -3134,7 +3286,9 @@ impl App {
         for pair in query.split('&') {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
             if key == name {
-                return urlencoding::decode(value).ok().map(|decoded| decoded.into_owned());
+                return urlencoding::decode(value)
+                    .ok()
+                    .map(|decoded| decoded.into_owned());
             }
         }
 
@@ -3220,7 +3374,9 @@ impl App {
             ));
             spans.push(Span::styled(
                 trimmed[2..].to_string(),
-                Style::default().fg(CHAT_TEXT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                Style::default()
+                    .fg(CHAT_TEXT)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             ));
             return Line::from(spans);
         } else if trimmed.starts_with("## ") {
@@ -3240,7 +3396,9 @@ impl App {
             ));
             spans.push(Span::styled(
                 trimmed[4..].to_string(),
-                Style::default().fg(CHAT_TEXT).add_modifier(Modifier::BOLD | Modifier::ITALIC),
+                Style::default()
+                    .fg(CHAT_TEXT)
+                    .add_modifier(Modifier::BOLD | Modifier::ITALIC),
             ));
             return Line::from(spans);
         } else if let Some(stripped) = trimmed.strip_prefix("- ") {
@@ -3260,7 +3418,10 @@ impl App {
                 if indent_len > 0 {
                     spans.push(Span::raw(line[..indent_len].to_string()));
                 }
-                spans.push(Span::styled(trimmed[..=pos + 1].to_string(), Style::default().fg(CHAT_ACCENT)));
+                spans.push(Span::styled(
+                    trimmed[..=pos + 1].to_string(),
+                    Style::default().fg(CHAT_ACCENT),
+                ));
                 remaining = &trimmed[pos + 2..];
             }
         }
@@ -3313,12 +3474,16 @@ impl App {
             AiProvider::OpenRouter => {
                 let Some(api_key) = openrouter_api_key else {
                     let _ = sender.send(ChatStreamUpdate::Error(String::from(
-                        "OpenRouter is not connected. Run /login openrouter first.",
+                        "OpenRouter is not configured as a model provider. Run /login openrouter first.",
                     )));
                     return true;
                 };
                 thread::spawn(move || {
-                    if let Err(error) = Self::send_openrouter_chat_streaming(&api_key, &conversation, sender.clone()) {
+                    if let Err(error) = Self::send_openrouter_chat_streaming(
+                        &api_key,
+                        &conversation,
+                        sender.clone(),
+                    ) {
                         let _ = sender.send(ChatStreamUpdate::Error(error));
                     }
                 });
@@ -3332,7 +3497,13 @@ impl App {
                 };
                 let base_url = Self::strix_api_base_url();
                 thread::spawn(move || {
-                    if let Err(error) = Self::send_strix_chat(&base_url, &access_token, &query, &strix_notes, sender.clone()) {
+                    if let Err(error) = Self::send_strix_chat(
+                        &base_url,
+                        &access_token,
+                        &query,
+                        &strix_notes,
+                        sender.clone(),
+                    ) {
                         let _ = sender.send(ChatStreamUpdate::Error(error));
                     }
                 });
@@ -3349,7 +3520,8 @@ impl App {
             String::from("You are Aleph, a concise terminal assistant. Keep answers practical and grounded. If the user asks for detail, expand, but default to short, useful responses."),
         ));
 
-        let mut recent_messages: Vec<_> = self.chat_messages.iter().rev().take(12).cloned().collect();
+        let mut recent_messages: Vec<_> =
+            self.chat_messages.iter().rev().take(12).cloned().collect();
         recent_messages.reverse();
 
         for message in recent_messages {
@@ -3388,7 +3560,11 @@ impl App {
 
             let is_user = message.role == "user";
             let prefix = if is_user { "You" } else { "Aleph" };
-            let color = if is_user { CHAT_ACCENT_SOFT } else { CHAT_ACCENT };
+            let color = if is_user {
+                CHAT_ACCENT_SOFT
+            } else {
+                CHAT_ACCENT
+            };
 
             lines.push(Line::from(vec![
                 Span::styled(
@@ -3434,7 +3610,8 @@ impl App {
                     if content_line.is_empty() {
                         self.chat_render_cache.push(Line::from(""));
                     } else {
-                        self.chat_render_cache.push(Self::render_chat_markdown_line_owned(content_line));
+                        self.chat_render_cache
+                            .push(Self::render_chat_markdown_line_owned(content_line));
                     }
                 }
             }
@@ -3448,10 +3625,12 @@ impl App {
     ) -> Result<(), String> {
         let messages: Vec<_> = conversation
             .iter()
-            .map(|(role, content)| serde_json::json!({
-                "role": role,
-                "content": content,
-            }))
+            .map(|(role, content)| {
+                serde_json::json!({
+                    "role": role,
+                    "content": content,
+                })
+            })
             .collect();
 
         let payload = serde_json::json!({
@@ -3499,7 +3678,9 @@ impl App {
 
             let trimmed = line.trim_end_matches(['\r', '\n']);
             if trimmed.is_empty() {
-                if !event_data.is_empty() && Self::handle_openrouter_stream_event(&event_data, &sender)? {
+                if !event_data.is_empty()
+                    && Self::handle_openrouter_stream_event(&event_data, &sender)?
+                {
                     return Ok(());
                 }
                 event_data.clear();
@@ -3563,7 +3744,10 @@ impl App {
                 }
             }
 
-            if let Some(finish_reason) = choice.get("finish_reason").and_then(|reason| reason.as_str()) {
+            if let Some(finish_reason) = choice
+                .get("finish_reason")
+                .and_then(|reason| reason.as_str())
+            {
                 if finish_reason == "error" {
                     let message = value
                         .get("error")
@@ -3584,7 +3768,6 @@ impl App {
     pub fn is_openrouter_connected(&self) -> bool {
         self.connected && self.openrouter_api_key.is_some()
     }
-
 
     pub fn is_strix_connected(&self) -> bool {
         self.connected && self.strix_access_token.is_some()
@@ -3691,7 +3874,8 @@ impl App {
         if !status.is_success() {
             return Err(format!("Strix returned {}: {}", status, body));
         }
-        serde_json::from_str(&body).map_err(|error| format!("failed to parse Strix response: {}", error))
+        serde_json::from_str(&body)
+            .map_err(|error| format!("failed to parse Strix response: {}", error))
     }
 
     fn send_strix_chat(
@@ -3720,7 +3904,8 @@ impl App {
             "question": query,
             "notes": notes_payload,
         });
-        let value = Self::strix_json_request_with(base_url, token, "POST", "/nest/ask", Some(payload))?;
+        let value =
+            Self::strix_json_request_with(base_url, token, "POST", "/nest/ask", Some(payload))?;
         let answer = value
             .get("answer")
             .or_else(|| value.get("result").and_then(|result| result.get("answer")))
@@ -3747,7 +3932,11 @@ impl App {
         let existing_by_remote_id: HashMap<String, Note> = self
             .notes
             .iter()
-            .filter_map(|note| note.remote_id.as_ref().map(|remote_id| (remote_id.clone(), note.clone())))
+            .filter_map(|note| {
+                note.remote_id
+                    .as_ref()
+                    .map(|remote_id| (remote_id.clone(), note.clone()))
+            })
             .collect();
         let mut merged = Vec::with_capacity(remote_notes.len() + self.notes.len());
         let mut remote_ids = Vec::new();
@@ -3792,7 +3981,13 @@ impl App {
                 let path = self.obsidian_vaults[0].path.clone();
                 match self.pair_obsidian_vault(path) {
                     Ok(message) => {
-                        self.set_result_panel("Obsidian paired", vec![message, String::from("Run /obsidian sync to import Markdown notes.")]);
+                        self.set_result_panel(
+                            "Obsidian paired",
+                            vec![
+                                message,
+                                String::from("Run /obsidian sync to import Markdown notes."),
+                            ],
+                        );
                         self.last_action = String::from("Paired Obsidian vault.");
                     }
                     Err(error) => {
@@ -3812,7 +4007,13 @@ impl App {
 
         match self.pair_obsidian_vault(target_path) {
             Ok(message) => {
-                self.set_result_panel("Obsidian paired", vec![message, String::from("Run /obsidian sync to import Markdown notes.")]);
+                self.set_result_panel(
+                    "Obsidian paired",
+                    vec![
+                        message,
+                        String::from("Run /obsidian sync to import Markdown notes."),
+                    ],
+                );
                 self.last_action = String::from("Paired Obsidian vault.");
             }
             Err(error) => {
@@ -3835,15 +4036,20 @@ impl App {
     }
 
     fn pair_obsidian_vault(&mut self, path: PathBuf) -> Result<String, String> {
-        let canonical = fs::canonicalize(&path)
-            .map_err(|error| format!("failed to open vault path '{}': {}", path.display(), error))?;
+        let canonical = fs::canonicalize(&path).map_err(|error| {
+            format!("failed to open vault path '{}': {}", path.display(), error)
+        })?;
         if !canonical.is_dir() {
             return Err(format!("'{}' is not a directory.", canonical.display()));
         }
 
         self.store_obsidian_vault_path(&canonical)?;
         self.obsidian_vault_path = Some(canonical.clone());
-        if !self.obsidian_vaults.iter().any(|vault| vault.path == canonical) {
+        if !self
+            .obsidian_vaults
+            .iter()
+            .any(|vault| vault.path == canonical)
+        {
             self.obsidian_vaults.push(ObsidianVault {
                 id: Self::stable_vault_id(&canonical),
                 name: Self::vault_display_name(&canonical),
@@ -3855,10 +4061,9 @@ impl App {
     }
 
     fn sync_obsidian_notes(&mut self) -> Result<usize, String> {
-        let vault_path = self
-            .obsidian_vault_path
-            .clone()
-            .ok_or_else(|| String::from("No Obsidian vault is paired. Run /obsidian pair first."))?;
+        let vault_path = self.obsidian_vault_path.clone().ok_or_else(|| {
+            String::from("No Obsidian vault is paired. Run /obsidian pair first.")
+        })?;
         let files = Self::collect_markdown_files(&vault_path)?;
         let folder_root_id = self.ensure_folder_path(&[String::from("Obsidian")], None);
         let vault_name = Self::vault_display_name(&vault_path);
@@ -3957,7 +4162,13 @@ impl App {
                 parent = Some(existing);
                 continue;
             }
-            let id = self.folders.iter().map(|folder| folder.id).max().unwrap_or(0) + 1;
+            let id = self
+                .folders
+                .iter()
+                .map(|folder| folder.id)
+                .max()
+                .unwrap_or(0)
+                + 1;
             self.folders.push(Folder {
                 id,
                 name: part.clone(),
@@ -3970,15 +4181,15 @@ impl App {
     }
 
     fn open_obsidian_target(&mut self, target: &str) -> Result<String, String> {
-        let vault_path = self
-            .obsidian_vault_path
-            .as_ref()
-            .ok_or_else(|| String::from("No Obsidian vault is paired. Run /obsidian pair first."))?;
+        let vault_path = self.obsidian_vault_path.as_ref().ok_or_else(|| {
+            String::from("No Obsidian vault is paired. Run /obsidian pair first.")
+        })?;
         let vault_name = Self::vault_display_name(vault_path);
         let target_note = if target.is_empty() {
             self.active_note()
         } else {
-            self.resolve_note_index(target).and_then(|index| self.notes.get(index))
+            self.resolve_note_index(target)
+                .and_then(|index| self.notes.get(index))
         };
 
         let uri = if let Some(note) = target_note {
@@ -4060,7 +4271,10 @@ impl App {
 
     fn resolve_obsidian_vault_target(&self, target: &str) -> Option<PathBuf> {
         if let Ok(index) = target.parse::<usize>() {
-            return self.obsidian_vaults.get(index.saturating_sub(1)).map(|vault| vault.path.clone());
+            return self
+                .obsidian_vaults
+                .get(index.saturating_sub(1))
+                .map(|vault| vault.path.clone());
         }
 
         let lowered = target.to_lowercase();
@@ -4083,7 +4297,10 @@ impl App {
         for entry in entries {
             let entry = entry.map_err(|error| format!("failed to read vault entry: {}", error))?;
             let path = entry.path();
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
             if name.starts_with('.') || name == "node_modules" || name == "target" {
                 continue;
             }
@@ -4170,7 +4387,9 @@ impl App {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        let cleaned = cleaned.trim_matches(|character| character == '.' || character == ' ').trim();
+        let cleaned = cleaned
+            .trim_matches(|character| character == '.' || character == ' ')
+            .trim();
         if cleaned.is_empty() {
             String::from("Untitled note")
         } else {
@@ -4220,7 +4439,9 @@ impl App {
         }
         if cfg!(target_os = "windows") {
             if let Ok(appdata) = std::env::var("APPDATA") {
-                return PathBuf::from(appdata).join("obsidian").join("obsidian.json");
+                return PathBuf::from(appdata)
+                    .join("obsidian")
+                    .join("obsidian.json");
             }
         }
         if cfg!(target_os = "macos") {
@@ -4233,10 +4454,15 @@ impl App {
             }
         }
         if let Ok(config_home) = std::env::var("XDG_CONFIG_HOME") {
-            return PathBuf::from(config_home).join("obsidian").join("obsidian.json");
+            return PathBuf::from(config_home)
+                .join("obsidian")
+                .join("obsidian.json");
         }
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".config").join("obsidian").join("obsidian.json");
+            return PathBuf::from(home)
+                .join(".config")
+                .join("obsidian")
+                .join("obsidian.json");
         }
         PathBuf::from("obsidian.json")
     }
@@ -4304,7 +4530,10 @@ impl App {
             return PathBuf::from(dir).join("Aleph").join("obsidian-vault");
         }
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".config").join("aleph").join("obsidian-vault");
+            return PathBuf::from(home)
+                .join(".config")
+                .join("aleph")
+                .join("obsidian-vault");
         }
         std::env::temp_dir().join("aleph-obsidian-vault")
     }
@@ -4539,7 +4768,10 @@ impl App {
         }
 
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".cache").join("aleph").join("strix-notes.json");
+            return PathBuf::from(home)
+                .join(".cache")
+                .join("aleph")
+                .join("strix-notes.json");
         }
 
         std::env::temp_dir().join("aleph-strix-notes.json")
@@ -4570,8 +4802,9 @@ impl App {
     fn save_cached_strix_notes(notes: &[Note]) -> Result<(), String> {
         let path = Self::strix_cache_path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create Strix note cache directory: {}", error))?;
+            fs::create_dir_all(parent).map_err(|error| {
+                format!("failed to create Strix note cache directory: {}", error)
+            })?;
         }
 
         let cached_notes = notes
@@ -4721,12 +4954,19 @@ impl App {
                 continue;
             }
 
-            if let Some(task) = trimmed.strip_prefix("- [ ] ").or_else(|| trimmed.strip_prefix("- [x] ")) {
+            if let Some(task) = trimmed
+                .strip_prefix("- [ ] ")
+                .or_else(|| trimmed.strip_prefix("- [x] "))
+            {
                 if !task_list_open {
                     html.push_str("<ul data-type=\"taskList\">");
                     task_list_open = true;
                 }
-                let checked = if trimmed.starts_with("- [x] ") { "true" } else { "false" };
+                let checked = if trimmed.starts_with("- [x] ") {
+                    "true"
+                } else {
+                    "false"
+                };
                 html.push_str(&format!(
                     "<li data-type=\"taskItem\" data-task-item=\"true\" data-checked=\"{}\"><label><input type=\"checkbox\"><span></span></label><div><p>{}</p></div></li>",
                     checked,
@@ -4747,7 +4987,10 @@ impl App {
             } else if let Some(text) = trimmed.strip_prefix("# ") {
                 html.push_str(&format!("<h1>{}</h1>", Self::escape_html(text)));
             } else if let Some(text) = trimmed.strip_prefix("- ") {
-                html.push_str(&format!("<ul><li><p>{}</p></li></ul>", Self::escape_html(text)));
+                html.push_str(&format!(
+                    "<ul><li><p>{}</p></li></ul>",
+                    Self::escape_html(text)
+                ));
             } else {
                 html.push_str(&format!("<p>{}</p>", Self::escape_html(trimmed)));
             }
@@ -4793,7 +5036,7 @@ impl App {
         let entry = Self::openrouter_key_entry()?;
         entry
             .set_password(api_key.trim())
-            .map_err(|error| format!("failed to save OpenRouter login: {}", error))
+            .map_err(|error| format!("failed to save OpenRouter API key: {}", error))
     }
 
     fn clear_openrouter_api_key(&self) {
@@ -4804,7 +5047,7 @@ impl App {
 
     fn openrouter_key_entry() -> Result<Entry, String> {
         Entry::new(OPENROUTER_SERVICE, OPENROUTER_ACCOUNT)
-            .map_err(|error| format!("failed to open OpenRouter credential store: {}", error))
+            .map_err(|error| format!("failed to open OpenRouter API key store: {}", error))
     }
 
     fn open_note_editor(&mut self, index: usize) {
@@ -4860,8 +5103,12 @@ impl App {
     fn exit_editor(&mut self) {
         self.save_editor();
         let index = self.editor_note_index.unwrap_or(0);
-        let note_title = self.notes.get(index).map(|n| n.title.clone()).unwrap_or_default();
-        
+        let note_title = self
+            .notes
+            .get(index)
+            .map(|n| n.title.clone())
+            .unwrap_or_default();
+
         self.selected_note = index;
         self.set_result_panel(
             format!("Saved note: {}", note_title),
@@ -4928,7 +5175,8 @@ impl App {
                 .as_deref()
                 .map(|remote_id| remote_id.eq_ignore_ascii_case(trimmed))
                 .unwrap_or(false);
-            if remote_matches || note.title.eq_ignore_ascii_case(trimmed) || title.contains(&lower) {
+            if remote_matches || note.title.eq_ignore_ascii_case(trimmed) || title.contains(&lower)
+            {
                 Some(index)
             } else {
                 None
@@ -4951,7 +5199,12 @@ impl App {
                     .as_deref()
                     .map(|remote_id| format!("#{} {}", note.id, remote_id))
                     .unwrap_or_else(|| format!("#{}", note.id));
-                format!("{} {} — {}", id_label, note.title, Self::preview_text(&note.content, 56))
+                format!(
+                    "{} {} — {}",
+                    id_label,
+                    note.title,
+                    Self::preview_text(&note.content, 56)
+                )
             })
             .collect()
     }
@@ -4964,7 +5217,11 @@ impl App {
             return preview.to_string();
         }
 
-        preview.chars().take(limit.saturating_sub(1)).collect::<String>() + "…"
+        preview
+            .chars()
+            .take(limit.saturating_sub(1))
+            .collect::<String>()
+            + "…"
     }
 
     fn resolve_folder_id(&self, target: &str) -> Option<usize> {
@@ -5024,17 +5281,15 @@ impl App {
 
     fn list_folders(&self) -> Vec<String> {
         if self.folders.is_empty() {
-            return vec![String::from("No folders created yet. Use /folder create <name>")];
+            return vec![String::from(
+                "No folders created yet. Use /folder create <name>",
+            )];
         }
 
         self.folders
             .iter()
             .map(|folder| {
-                let prefix = if folder.parent_id.is_some() {
-                    "  "
-                } else {
-                    ""
-                };
+                let prefix = if folder.parent_id.is_some() { "  " } else { "" };
                 let note_count = self
                     .notes
                     .iter()
@@ -5178,7 +5433,8 @@ impl App {
             .next_back()
             .map(|character| character.len_utf8())
             .unwrap_or(1);
-        self.editor_buffer.drain(self.editor_cursor - previous..self.editor_cursor);
+        self.editor_buffer
+            .drain(self.editor_cursor - previous..self.editor_cursor);
         self.editor_cursor -= previous;
     }
 
@@ -5192,7 +5448,8 @@ impl App {
             .next()
             .map(|character| character.len_utf8())
             .unwrap_or(1);
-        self.editor_buffer.drain(self.editor_cursor..self.editor_cursor + next);
+        self.editor_buffer
+            .drain(self.editor_cursor..self.editor_cursor + next);
     }
 
     fn toggle_word_wrap(&mut self) {
@@ -5266,7 +5523,8 @@ impl App {
             }
             KeyCode::Backspace => {
                 if self.title_cursor > 0 {
-                    let previous = Self::previous_char_boundary(&self.title_buffer, self.title_cursor);
+                    let previous =
+                        Self::previous_char_boundary(&self.title_buffer, self.title_cursor);
                     self.title_buffer.drain(previous..self.title_cursor);
                     self.title_cursor = previous;
                 }
@@ -5279,12 +5537,14 @@ impl App {
             }
             KeyCode::Left => {
                 if self.title_cursor > 0 {
-                    self.title_cursor = Self::previous_char_boundary(&self.title_buffer, self.title_cursor);
+                    self.title_cursor =
+                        Self::previous_char_boundary(&self.title_buffer, self.title_cursor);
                 }
             }
             KeyCode::Right => {
                 if self.title_cursor < self.title_buffer.len() {
-                    self.title_cursor = Self::next_char_boundary(&self.title_buffer, self.title_cursor);
+                    self.title_cursor =
+                        Self::next_char_boundary(&self.title_buffer, self.title_cursor);
                 }
             }
             KeyCode::Home => {
@@ -5516,8 +5776,9 @@ impl App {
                     self.close_ai_overlay();
                     return;
                 }
-                KeyCode::Char(' ') if key_event.kind == KeyEventKind::Press
-                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                KeyCode::Char(' ')
+                    if key_event.kind == KeyEventKind::Press
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
                     self.toggle_ai_overlay();
                     return;
@@ -5626,7 +5887,9 @@ impl App {
             }
             KeyCode::Backspace if key_event.kind == KeyEventKind::Press => self.editor_backspace(),
             KeyCode::Delete if key_event.kind == KeyEventKind::Press => self.editor_delete(),
-            KeyCode::Left if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            KeyCode::Left
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
                 self.editor_move_left()
             }
             KeyCode::Right
@@ -5713,7 +5976,8 @@ impl App {
                         .next_back()
                         .map(|c| c.len_utf8())
                         .unwrap_or(1);
-                    self.ai_input_buffer.drain(self.ai_input_cursor - prev..self.ai_input_cursor);
+                    self.ai_input_buffer
+                        .drain(self.ai_input_cursor - prev..self.ai_input_cursor);
                     self.ai_input_cursor -= prev;
                 }
             }
@@ -5724,10 +5988,13 @@ impl App {
                         .next()
                         .map(|c| c.len_utf8())
                         .unwrap_or(1);
-                    self.ai_input_buffer.drain(self.ai_input_cursor..self.ai_input_cursor + next);
+                    self.ai_input_buffer
+                        .drain(self.ai_input_cursor..self.ai_input_cursor + next);
                 }
             }
-            KeyCode::Left if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            KeyCode::Left
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
                 if self.ai_input_cursor > 0 {
                     let prev = self.ai_input_buffer[..self.ai_input_cursor]
                         .chars()
@@ -5737,7 +6004,9 @@ impl App {
                     self.ai_input_cursor -= prev;
                 }
             }
-            KeyCode::Right if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            KeyCode::Right
+                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
                 if self.ai_input_cursor < self.ai_input_buffer.len() {
                     let next = self.ai_input_buffer[self.ai_input_cursor..]
                         .chars()
@@ -5797,7 +6066,98 @@ impl App {
         self.panel_title = String::from("Sign in");
         self.panel_lines = vec![String::from("picker")];
         self.login_picker_selected = 0;
-        self.last_action = String::from("Choose an AI provider.");
+        self.last_action = String::from("Choose a Strix account or model provider.");
+    }
+
+    fn open_settings_panel(&mut self) {
+        self.panel_mode = PanelMode::Settings;
+        self.panel_title = String::from("Settings");
+        self.panel_lines.clear();
+        self.settings_selected = 0;
+        self.last_action = String::from("Open settings to manage connections and preferences.");
+    }
+
+    fn handle_settings_key(&mut self, key_event: KeyEvent) {
+        if key_event.kind != KeyEventKind::Press && key_event.kind != KeyEventKind::Repeat {
+            return;
+        }
+        match key_event.code {
+            KeyCode::Esc => {
+                self.panel_mode = PanelMode::Commands;
+                self.panel_title = String::from("Commands");
+                self.panel_lines.clear();
+                self.last_action = String::from("Closed settings.");
+            }
+            KeyCode::Up => {
+                if self.settings_selected > 0 {
+                    self.settings_selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if self.settings_selected < 3 {
+                    self.settings_selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                match self.settings_selected {
+                    0 => {
+                        // AI Provider toggle
+                        self.ai_provider = match self.ai_provider {
+                            AiProvider::OpenRouter => AiProvider::Strix,
+                            AiProvider::Strix => AiProvider::OpenRouter,
+                        };
+                        self.last_action = format!("Switched AI provider to {:?}", self.ai_provider);
+                    }
+                    1 => {
+                        // Pair Obsidian vault
+                        self.open_vault_picker();
+                    }
+                    2 => {
+                        // Sign out / Logout
+                        self.openrouter_api_key = None;
+                        self.strix_access_token = None;
+                        self.chat_stream_rx = None;
+                        self.openrouter_login_rx = None;
+                        if let Some(cancel_flag) = &self.openrouter_login_cancel {
+                            cancel_flag.store(true, Ordering::Relaxed);
+                        }
+                        self.openrouter_login_cancel = None;
+                        self.strix_login_rx = None;
+                        if let Some(cancel_flag) = &self.strix_login_cancel {
+                            cancel_flag.store(true, Ordering::Relaxed);
+                        }
+                        self.strix_login_cancel = None;
+                        self.thinking = false;
+                        self.thinking_ticks_remaining = 0;
+                        self.streaming_buffer.clear();
+                        self.streaming_active = false;
+                        self.clear_openrouter_api_key();
+                        self.clear_strix_access_token();
+                        self.refresh_connection_state();
+                        self.chat_messages.clear();
+                        self.chat_input_buffer.clear();
+                        self.chat_input_cursor = 0;
+                        self.rebuild_chat_render_cache();
+                        self.panel_mode = PanelMode::Commands;
+                        self.panel_title = String::from("Commands");
+                        self.panel_lines.clear();
+                        self.last_action = String::from("Signed out.");
+                    }
+                    3 => {
+                        // Close settings
+                        self.panel_mode = PanelMode::Commands;
+                        self.panel_title = String::from("Commands");
+                        self.panel_lines.clear();
+                        self.last_action = String::from("Closed settings.");
+                    }
+                    _ => {}
+                }
+            }
+            KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.request_quit();
+            }
+            _ => {}
+        }
     }
 
     fn handle_login_picker_key(&mut self, key_event: KeyEvent) {
@@ -5824,14 +6184,14 @@ impl App {
             KeyCode::Enter => {
                 match self.login_picker_selected {
                     0 => {
-                        // OpenRouter: start browser login
+                        // OpenRouter: start browser authorization for a model-provider API key
                         self.panel_mode = PanelMode::Commands;
                         if !self.start_openrouter_browser_login() {
                             self.set_result_panel(
-                                "OpenRouter login failed",
-                                vec![String::from("Unable to start the browser-based OpenRouter login flow.")],
+                                "OpenRouter provider failed",
+                                vec![String::from("Unable to start the browser-based OpenRouter authorization flow.")],
                             );
-                            self.last_action = String::from("OpenRouter login failed.");
+                            self.last_action = String::from("OpenRouter provider setup failed.");
                         }
                     }
                     1 => {
@@ -5839,7 +6199,9 @@ impl App {
                         if !self.start_strix_browser_login() {
                             self.set_result_panel(
                                 "Strix login failed",
-                                vec![String::from("Unable to start the browser-based Strix login flow.")],
+                                vec![String::from(
+                                    "Unable to start the browser-based Strix login flow.",
+                                )],
                             );
                             self.last_action = String::from("Strix login failed.");
                         }
@@ -5903,23 +6265,32 @@ impl App {
             KeyCode::Up => {
                 if self.obsidian_vault_selected > 0 {
                     self.obsidian_vault_selected -= 1;
-                    self.last_action = format!("Selected vault {}", self.obsidian_vault_selected + 1);
+                    self.last_action =
+                        format!("Selected vault {}", self.obsidian_vault_selected + 1);
                 }
             }
             KeyCode::Down => {
                 if self.obsidian_vault_selected + 1 < self.obsidian_vaults.len() {
                     self.obsidian_vault_selected += 1;
-                    self.last_action = format!("Selected vault {}", self.obsidian_vault_selected + 1);
+                    self.last_action =
+                        format!("Selected vault {}", self.obsidian_vault_selected + 1);
                 }
             }
             KeyCode::Enter => {
-                if let Some(vault) = self.obsidian_vaults.get(self.obsidian_vault_selected).cloned() {
+                if let Some(vault) = self
+                    .obsidian_vaults
+                    .get(self.obsidian_vault_selected)
+                    .cloned()
+                {
                     match self.pair_obsidian_vault(vault.path) {
                         Ok(message) => {
                             self.panel_mode = PanelMode::Commands;
                             self.set_result_panel(
                                 "Obsidian paired",
-                                vec![message, String::from("Run /obsidian sync to import Markdown notes.")],
+                                vec![
+                                    message,
+                                    String::from("Run /obsidian sync to import Markdown notes."),
+                                ],
                             );
                             self.last_action = String::from("Paired Obsidian vault.");
                         }
@@ -5978,7 +6349,7 @@ impl App {
         match provider {
             AiProvider::OpenRouter => {
                 let Some(api_key) = openrouter_api_key else {
-                    self.ghost_result = Some(String::from("OpenRouter is not connected. Run /login openrouter first."));
+                    self.ghost_result = Some(String::from("OpenRouter is not configured as a model provider. Run /login openrouter first."));
                     self.ghost_streaming = false;
                     self.thinking = false;
                     self.thinking_ticks_remaining = 0;
@@ -5986,14 +6357,20 @@ impl App {
                     return;
                 };
                 thread::spawn(move || {
-                    if let Err(error) = Self::send_openrouter_chat_streaming(&api_key, &conversation, sender.clone()) {
+                    if let Err(error) = Self::send_openrouter_chat_streaming(
+                        &api_key,
+                        &conversation,
+                        sender.clone(),
+                    ) {
                         let _ = sender.send(ChatStreamUpdate::Error(error));
                     }
                 });
             }
             AiProvider::Strix => {
                 let Some(access_token) = strix_access_token else {
-                    self.ghost_result = Some(String::from("Strix is not connected. Run /login strix first."));
+                    self.ghost_result = Some(String::from(
+                        "Strix is not connected. Run /login strix first.",
+                    ));
                     self.ghost_streaming = false;
                     self.thinking = false;
                     self.thinking_ticks_remaining = 0;
@@ -6012,7 +6389,13 @@ impl App {
                     folder_id: None,
                 }];
                 thread::spawn(move || {
-                    if let Err(error) = Self::send_strix_chat(&base_url, &access_token, &strix_instruction, &notes, sender.clone()) {
+                    if let Err(error) = Self::send_strix_chat(
+                        &base_url,
+                        &access_token,
+                        &strix_instruction,
+                        &notes,
+                        sender.clone(),
+                    ) {
                         let _ = sender.send(ChatStreamUpdate::Error(error));
                     }
                 });
@@ -6239,7 +6622,10 @@ mod tests {
 
     #[test]
     fn obsidian_filenames_are_sanitized() {
-        assert_eq!(App::safe_obsidian_filename("Daily/Plan: Q2?"), "Daily-Plan- Q2-");
+        assert_eq!(
+            App::safe_obsidian_filename("Daily/Plan: Q2?"),
+            "Daily-Plan- Q2-"
+        );
         assert_eq!(App::safe_obsidian_filename("   ...   "), "Untitled note");
     }
 
@@ -6265,8 +6651,12 @@ mod tests {
     #[test]
     fn upsert_existing_synced_note_updates_cache() {
         static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        let _guard = ENV_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap();
-        let cache_path = std::env::temp_dir().join(format!("aleph-strix-cache-test-{}.json", App::now_millis()));
+        let _guard = ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        let cache_path =
+            std::env::temp_dir().join(format!("aleph-strix-cache-test-{}.json", App::now_millis()));
         std::env::set_var("ALEPH_STRIX_CACHE", &cache_path);
 
         let mut app = App::new();
