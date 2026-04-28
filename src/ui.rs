@@ -771,10 +771,38 @@ fn render_ai_overlay(frame: &mut Frame, app: &App, area: Rect, cursor_row: u16, 
 
     let mut lines: Vec<Line> = Vec::new();
 
-    if messages.is_empty() && !app.is_ghost_streaming() && app.ghost_result().is_none() {
+    if app.has_pending_ai_edit() {
+        lines.push(Line::from(vec![Span::styled(
+            format!("  {}", app.pending_ai_proposal_label()),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(Line::from(vec![
+            Span::styled("  Enter", Style::default().fg(ACCENT_SOFT)),
+            Span::styled(" apply  ", Style::default().fg(MUTED)),
+            Span::styled("Ctrl+R", Style::default().fg(ACCENT_SOFT)),
+            Span::styled(" reject", Style::default().fg(MUTED)),
+        ]));
+        if let Some(instruction) = app.pending_ai_instruction() {
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {}", instruction),
+                Style::default().fg(MUTED),
+            )]));
+        }
+        lines.push(Line::from(""));
+        for line in app.pending_ai_diff_lines().into_iter().take(10) {
+            let style = if line.starts_with("+ ") {
+                Style::default().fg(Color::Rgb(124, 184, 145))
+            } else if line.starts_with("- ") {
+                Style::default().fg(Color::Rgb(209, 118, 128))
+            } else {
+                Style::default().fg(MUTED)
+            };
+            lines.push(Line::from(vec![Span::styled(format!("  {}", line), style)]));
+        }
+    } else if messages.is_empty() && !app.is_ghost_streaming() && app.ghost_result().is_none() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
-            "  Type an instruction for the Ghost",
+            "  Type an instruction for the AI editor",
             Style::default().fg(MUTED),
         )]));
         lines.push(Line::from(vec![
@@ -790,7 +818,9 @@ fn render_ai_overlay(frame: &mut Frame, app: &App, area: Rect, cursor_row: u16, 
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("  Esc", Style::default().fg(ACCENT_SOFT)),
+            Span::styled("  Enter", Style::default().fg(ACCENT_SOFT)),
+            Span::styled(" propose edits  ", Style::default().fg(MUTED)),
+            Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
             Span::styled(" dismiss", Style::default().fg(MUTED)),
         ]));
     } else if app.is_ghost_streaming() {
@@ -811,7 +841,7 @@ fn render_ai_overlay(frame: &mut Frame, app: &App, area: Rect, cursor_row: u16, 
     } else if let Some(result) = app.ghost_result() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
-            "  Ghost:",
+            "  AI editor:",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )]));
         for line in result.lines().take(8) {
@@ -1362,11 +1392,11 @@ fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
     // Header
     let header = Paragraph::new(vec![
         Line::from(vec![Span::styled(
-            "Choose AI provider",
+            "Choose model provider",
             Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
         )]),
         Line::from(vec![Span::styled(
-            "Select OpenRouter for external models or Strix for the native gateway",
+            "Select OpenRouter or Strix as your model provider",
             Style::default().fg(MUTED),
         )]),
     ])
@@ -1597,6 +1627,10 @@ fn render_note_list_panel(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(BORDER));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
 
     let selected = app
         .note_list_selected()
@@ -1621,7 +1655,31 @@ fn render_note_list_panel(frame: &mut Frame, app: &App, area: Rect) {
     if !app.panel_lines().is_empty() {
         table_state.select(Some(selected));
     }
-    frame.render_stateful_widget(table, inner, &mut table_state);
+    frame.render_stateful_widget(table, sections[0], &mut table_state);
+
+    let footer = if app.note_list_delete_is_pending() {
+        Line::from(vec![
+            Span::styled("Delete", Style::default().fg(Color::Rgb(209, 118, 128))),
+            Span::raw(" confirm · "),
+            Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
+            Span::raw(" cancel"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(ACCENT)),
+            Span::raw(" open · "),
+            Span::styled("Delete", Style::default().fg(ACCENT_SOFT)),
+            Span::raw(" delete · "),
+            Span::styled("Esc", Style::default().fg(MUTED)),
+            Span::raw(" close"),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(footer)
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(MUTED)),
+        sections[1],
+    );
 }
 
 fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
@@ -1826,14 +1884,19 @@ fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(MUTED)
     };
 
-    let title = if app.is_streaming() {
-        format!("Aleph Chat {} streaming...", app.thinking_frame())
-    } else if app.is_thinking() {
-        format!("Aleph {} focusing...", app.thinking_frame())
-    } else if app.is_openrouter_connected() {
-        String::from("Aleph Chat · OpenRouter connected")
+    let mode_label = if app.is_agent_mode_enabled() {
+        "Agent"
     } else {
-        String::from("Aleph Chat · OpenRouter offline")
+        "Chat"
+    };
+    let title = if app.is_streaming() {
+        format!("Aleph {} {} streaming...", mode_label, app.thinking_frame())
+    } else if app.is_thinking() {
+        format!("Aleph {} {} focusing...", mode_label, app.thinking_frame())
+    } else if app.is_openrouter_connected() {
+        format!("Aleph {} · OpenRouter connected", mode_label)
+    } else {
+        format!("Aleph {} · OpenRouter offline", mode_label)
     };
 
     let top_meta = Paragraph::new(Line::from(vec![Span::styled(title, meta_style)]))
@@ -1882,6 +1945,8 @@ fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" send · "),
         Span::styled("PgUp/PgDn", Style::default().fg(ACCENT_SOFT)),
         Span::raw(" scroll · "),
+        Span::styled("Ctrl+G", Style::default().fg(ACCENT_SOFT)),
+        Span::raw(" mode · "),
         Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
         Span::raw(" exit · "),
         Span::styled("Ctrl+C", Style::default().fg(ACCENT)),
@@ -1916,22 +1981,63 @@ fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     let header = Paragraph::new(vec![Line::from(vec![Span::styled(
-        "Manage your connections and preferences",
+        "Manage your connections, model provider, and preferences",
         Style::default().fg(MUTED),
     )])]);
     frame.render_widget(header, sections[0]);
 
     let selected = app.settings_selected();
-    let ai_provider_label = if app.is_openrouter_connected() || app.is_strix_connected() {
-        if app.is_openrouter_connected() { "OpenRouter" } else { "Strix" }
-    } else {
-        "None"
+    let model_provider_label = match app.ai_provider() {
+        crate::app::AiProvider::OpenRouter => {
+            if app.is_openrouter_connected() {
+                "OpenRouter (connected)"
+            } else {
+                "OpenRouter (login required)"
+            }
+        }
+        crate::app::AiProvider::Strix => {
+            if app.is_strix_connected() {
+                "Strix (connected)"
+            } else {
+                "Strix (login required)"
+            }
+        }
     };
 
     let settings_items: Vec<(String, String, bool)> = vec![
-        ("AI Provider".to_string(), format!("{} (press Enter to toggle)", ai_provider_label), app.is_openrouter_connected() || app.is_strix_connected()),
-        ("Obsidian Vault".to_string(), if app.obsidian_vault_path().is_some() { "Paired".to_string() } else { "Not paired".to_string() }, app.obsidian_vault_path().is_some()),
-        ("Sign out".to_string(), "Clear all saved credentials".to_string(), app.is_openrouter_connected() || app.is_strix_connected()),
+        (
+            "Model Provider".to_string(),
+            format!("{} (Enter to cycle)", model_provider_label),
+            true,
+        ),
+        (
+            "Mode".to_string(),
+            if app.is_agent_mode_enabled() {
+                "Agent (tool routing on)".to_string()
+            } else {
+                "Chat (answers only)".to_string()
+            },
+            true,
+        ),
+        (
+            "Save Notes".to_string(),
+            format!("{} (Enter to cycle)", app.note_save_target_label()),
+            true,
+        ),
+        (
+            "Obsidian Vault".to_string(),
+            if app.obsidian_vault_path().is_some() {
+                "Paired".to_string()
+            } else {
+                "Not paired".to_string()
+            },
+            app.obsidian_vault_path().is_some(),
+        ),
+        (
+            "Sign out".to_string(),
+            "Clear all saved credentials".to_string(),
+            app.is_openrouter_connected() || app.is_strix_connected(),
+        ),
         ("Close".to_string(), "Exit settings".to_string(), true),
     ];
 

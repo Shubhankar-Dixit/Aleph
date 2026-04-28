@@ -84,11 +84,27 @@ pub enum CursorStyle {
     Line,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NoteSaveTarget {
+    Local,
+    Obsidian,
+    Strix,
+}
+
 #[derive(Clone)]
 pub struct EditorState {
     pub buffer: String,
     pub cursor: usize,
     pub scroll_offset: usize,
+}
+
+#[derive(Clone)]
+pub struct AiEditProposal {
+    pub note_index: Option<usize>,
+    pub title: Option<String>,
+    pub instruction: String,
+    pub proposed: String,
+    pub diff_lines: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -123,6 +139,14 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "settings",
         description: "Show useful connection, sync, editor, and AI settings",
+    },
+    CommandSpec {
+        name: "mode agent",
+        description: "Use Codex-style agent routing for note actions",
+    },
+    CommandSpec {
+        name: "mode chat",
+        description: "Use plain chat responses without taking note actions",
     },
     CommandSpec {
         name: "logout",
@@ -161,6 +185,10 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Ask the selected AI provider a question",
     },
     CommandSpec {
+        name: "agent edit",
+        description: "Natural-language note edits use the AI editor, show a diff, and require approval",
+    },
+    CommandSpec {
         name: "note list",
         description: "List local notes",
     },
@@ -170,11 +198,11 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "note create",
-        description: "Create a note and open the editor",
+        description: "Create a note and open the editor (usage: /note create <title> :: <body>)",
     },
     CommandSpec {
         name: "note append",
-        description: "Append text to the selected note",
+        description: "Append text (usage: /note append <text> | /note append <note> :: <text>)",
     },
     CommandSpec {
         name: "note edit",
@@ -228,7 +256,7 @@ const OPENROUTER_CHAT_MODEL: &str = "nvidia/nemotron-3-nano-30b-a3b:free";
 const OPENROUTER_SERVICE: &str = "Aleph";
 const OPENROUTER_ACCOUNT: &str = "openrouter_api_key";
 const OPENROUTER_AUTH_CALLBACK: &str = "/aleph/openrouter/callback";
-const OPENROUTER_AUTH_PORT: u16 = 43878;
+const OPENROUTER_AUTH_PORT: u16 = 3000;
 const STRIX_SERVICE: &str = "Aleph";
 const STRIX_ACCOUNT: &str = "strix_access_token";
 const STRIX_AUTH_CALLBACK: &str = "/aleph/strix/callback";
@@ -248,6 +276,13 @@ enum ChatStreamUpdate {
     Delta(String),
     Done,
     Error(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentAction {
+    Chat,
+    CreateNote,
+    EditNote,
 }
 
 #[allow(dead_code)]
@@ -302,6 +337,7 @@ pub struct App {
     obsidian_vault_path: Option<PathBuf>,
     obsidian_vaults: Vec<ObsidianVault>,
     obsidian_vault_selected: usize,
+    note_save_target: NoteSaveTarget,
     ai_provider: AiProvider,
     strix_logs: Vec<String>,
     streaming_buffer: String,
@@ -309,13 +345,17 @@ pub struct App {
     chat_render_cache: Vec<Line<'static>>,
     chat_render_dirty: bool,
     chat_cache_stable_len: usize,
+    agent_mode_enabled: bool,
     login_picker_selected: usize,
     settings_selected: usize,
     ghost_stream_rx: Option<Receiver<ChatStreamUpdate>>,
     ghost_streaming: bool,
     ghost_result: Option<String>,
+    pending_ai_edit: Option<AiEditProposal>,
+    ai_draft_create_title: Option<String>,
     note_list_selected: usize,
     note_list_indices: Vec<usize>,
+    note_list_pending_delete: Option<usize>,
     editing_title: bool,
     title_buffer: String,
     title_cursor: usize,
@@ -335,6 +375,13 @@ impl App {
             AiProvider::Strix
         } else {
             AiProvider::OpenRouter
+        };
+        let note_save_target = if strix_access_token.is_some() {
+            NoteSaveTarget::Strix
+        } else if obsidian_vault_path.is_some() {
+            NoteSaveTarget::Obsidian
+        } else {
+            NoteSaveTarget::Local
         };
 
         let mut app = Self {
@@ -474,6 +521,7 @@ impl App {
             obsidian_vault_path,
             obsidian_vaults,
             obsidian_vault_selected: 0,
+            note_save_target,
             ai_provider,
             strix_logs: Vec::new(),
             streaming_buffer: String::new(),
@@ -481,13 +529,17 @@ impl App {
             chat_render_cache: Vec::new(),
             chat_render_dirty: false,
             chat_cache_stable_len: 0,
+            agent_mode_enabled: true,
             login_picker_selected: 0,
             settings_selected: 0,
             ghost_stream_rx: None,
             ghost_streaming: false,
             ghost_result: None,
+            pending_ai_edit: None,
+            ai_draft_create_title: None,
             note_list_selected: 0,
             note_list_indices: Vec::new(),
+            note_list_pending_delete: None,
             editing_title: false,
             title_buffer: String::new(),
             title_cursor: 0,
@@ -849,6 +901,7 @@ impl App {
                     match self.store_strix_access_token(&access_token) {
                         Ok(()) => {
                             self.strix_access_token = Some(access_token);
+                            self.note_save_target = NoteSaveTarget::Strix;
                             self.refresh_connection_state();
                             self.add_strix_log("Browser login completed successfully");
                             self.set_result_panel(
@@ -1166,6 +1219,10 @@ impl App {
     }
 
     pub fn ai_provider_label(&self) -> &'static str {
+        self.model_provider_label()
+    }
+
+    pub fn model_provider_label(&self) -> &'static str {
         match self.ai_provider {
             AiProvider::OpenRouter => "OpenRouter",
             AiProvider::Strix => "Strix",
@@ -1182,6 +1239,10 @@ impl App {
 
     pub fn is_streaming(&self) -> bool {
         self.streaming_active
+    }
+
+    pub fn is_agent_mode_enabled(&self) -> bool {
+        self.agent_mode_enabled
     }
 
     pub fn login_picker_selected(&self) -> usize {
@@ -1216,6 +1277,14 @@ impl App {
         &self.note_list_indices
     }
 
+    pub fn note_list_delete_is_pending(&self) -> bool {
+        self.note_list_indices
+            .get(self.note_list_selected)
+            .copied()
+            .map(|index| self.note_list_pending_delete == Some(index))
+            .unwrap_or(false)
+    }
+
     pub fn obsidian_vaults(&self) -> &[ObsidianVault] {
         &self.obsidian_vaults
     }
@@ -1230,6 +1299,14 @@ impl App {
 
     pub fn is_obsidian_paired(&self) -> bool {
         self.obsidian_vault_path.is_some()
+    }
+
+    pub fn note_save_target_label(&self) -> &'static str {
+        match self.note_save_target {
+            NoteSaveTarget::Local => "Local",
+            NoteSaveTarget::Obsidian => "Obsidian",
+            NoteSaveTarget::Strix => "Strix",
+        }
     }
 
     pub fn is_editing_title(&self) -> bool {
@@ -1250,6 +1327,35 @@ impl App {
 
     pub fn ghost_result(&self) -> Option<&str> {
         self.ghost_result.as_deref()
+    }
+
+    pub fn has_pending_ai_edit(&self) -> bool {
+        self.pending_ai_edit.is_some()
+    }
+
+    pub fn pending_ai_diff_lines(&self) -> Vec<String> {
+        let Some(proposal) = self.pending_ai_edit.as_ref() else {
+            return Vec::new();
+        };
+
+        proposal.diff_lines.clone()
+    }
+
+    pub fn pending_ai_instruction(&self) -> Option<&str> {
+        self.pending_ai_edit
+            .as_ref()
+            .map(|proposal| proposal.instruction.as_str())
+    }
+
+    pub fn pending_ai_proposal_label(&self) -> &'static str {
+        match self
+            .pending_ai_edit
+            .as_ref()
+            .and_then(|proposal| proposal.note_index)
+        {
+            Some(_) => "Proposed note edits",
+            None => "Proposed new note",
+        }
     }
 
     pub fn is_openrouter_login_pending(&self) -> bool {
@@ -1610,11 +1716,19 @@ impl App {
             {
                 self.request_quit();
             }
+            KeyCode::Char('g')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.toggle_agent_mode();
+            }
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
                 // Send chat message
-                let msg = self.chat_input_buffer.trim();
+                let msg = self.chat_input_buffer.trim().to_string();
                 if !msg.is_empty() {
-                    if self.start_chat_turn(msg.to_string()) {
+                    if (self.agent_mode_enabled && self.try_start_agent_action(&msg))
+                        || self.start_chat_turn(msg)
+                    {
                         self.chat_input_buffer.clear();
                         self.chat_input_cursor = 0;
                     }
@@ -1825,6 +1939,12 @@ impl App {
 
         if !raw.starts_with('/') {
             let query = raw.clone();
+            if self.agent_mode_enabled && self.try_start_agent_action(&query) {
+                self.history.push(raw);
+                self.history_index = None;
+                self.reset_prompt();
+                return;
+            }
             if self.start_chat_turn(query) {
                 self.history.push(raw);
                 self.history_index = None;
@@ -1903,8 +2023,7 @@ impl App {
             command,
             "search"
                 | "ask"
-                | "note create"
-                | "note append"
+                | "agent edit"
                 | "note move"
                 | "folder create"
                 | "folder delete"
@@ -1912,6 +2031,247 @@ impl App {
                 | "memory save"
                 | "memory search"
         )
+    }
+
+    fn toggle_agent_mode(&mut self) {
+        self.agent_mode_enabled = !self.agent_mode_enabled;
+        self.last_action = if self.agent_mode_enabled {
+            String::from("Agent mode enabled. Aleph will route note-writing requests to tools.")
+        } else {
+            String::from("Chat mode enabled. Aleph will answer without taking note actions.")
+        };
+    }
+
+    fn cycle_note_save_target(&mut self) {
+        let next = match self.note_save_target {
+            NoteSaveTarget::Local => {
+                if self.is_obsidian_paired() {
+                    NoteSaveTarget::Obsidian
+                } else if self.is_strix_connected() {
+                    NoteSaveTarget::Strix
+                } else {
+                    NoteSaveTarget::Local
+                }
+            }
+            NoteSaveTarget::Obsidian => {
+                if self.is_strix_connected() {
+                    NoteSaveTarget::Strix
+                } else {
+                    NoteSaveTarget::Local
+                }
+            }
+            NoteSaveTarget::Strix => NoteSaveTarget::Local,
+        };
+
+        if next == self.note_save_target {
+            self.last_action = String::from(
+                "Only Local note saving is available until Obsidian is paired or Strix is connected.",
+            );
+            return;
+        }
+
+        self.note_save_target = next;
+        self.last_action = format!("Note save target: {}", self.note_save_target_label());
+    }
+
+    fn try_start_agent_action(&mut self, query: &str) -> bool {
+        match self.classify_agent_action(query) {
+            AgentAction::CreateNote => self.start_note_create_agent(query),
+            AgentAction::EditNote => self.try_start_home_note_agent(query),
+            AgentAction::Chat => false,
+        }
+    }
+
+    fn classify_agent_action(&self, query: &str) -> AgentAction {
+        if Self::looks_like_note_create_request(query) {
+            return AgentAction::CreateNote;
+        }
+        if Self::looks_like_note_edit_request(query) {
+            return AgentAction::EditNote;
+        }
+        AgentAction::Chat
+    }
+
+    fn start_note_create_agent(&mut self, query: &str) -> bool {
+        let title =
+            Self::infer_note_title_from_request(query).unwrap_or_else(|| String::from("AI draft"));
+        self.panel_mode = PanelMode::FullEditor;
+        self.panel_title = format!("Drafting: {}", title);
+        self.panel_lines.clear();
+        self.editor_note_index = None;
+        self.editor_buffer.clear();
+        self.editor_cursor = 0;
+        self.editor_scroll_offset = 0;
+        self.open_ai_overlay();
+        self.ai_draft_create_title = Some(title.clone());
+        self.ai_input_buffer = query.trim().to_string();
+        self.ai_input_cursor = self.ai_input_buffer.len();
+        self.ghost_submit_instruction();
+        self.last_action = format!("AI is drafting a new note: {}", title);
+        true
+    }
+
+    fn looks_like_note_create_request(query: &str) -> bool {
+        let lower = query.to_lowercase();
+        let mentions_note = lower.contains("note")
+            || lower.contains("notes")
+            || lower.contains("draft")
+            || lower.contains("write-up")
+            || lower.contains("writeup");
+        let wants_create = [
+            "write a note",
+            "write me a note",
+            "write notes",
+            "create a note",
+            "create note",
+            "make a note",
+            "make note",
+            "draft a note",
+            "draft note",
+            "compose a note",
+            "compose note",
+            "new note",
+            "add a note",
+            "take a note",
+            "write-up",
+            "writeup",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+        mentions_note && wants_create
+    }
+
+    fn infer_note_title_from_request(query: &str) -> Option<String> {
+        let trimmed = query.trim();
+        for marker in [" titled ", " called ", " named "] {
+            if let Some((_, rest)) = trimmed.to_lowercase().split_once(marker) {
+                let start = trimmed.len().saturating_sub(rest.len());
+                let title = trimmed[start..]
+                    .split(['.', ',', ';'])
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+                if !title.is_empty() {
+                    return Some(title.chars().take(80).collect());
+                }
+            }
+        }
+
+        for marker in [" about ", " on "] {
+            if let Some((_, rest)) = trimmed.to_lowercase().split_once(marker) {
+                let start = trimmed.len().saturating_sub(rest.len());
+                let topic = trimmed[start..]
+                    .split(['.', ';'])
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+                if !topic.is_empty() {
+                    return Some(Self::title_case_note_topic(topic));
+                }
+            }
+        }
+
+        None
+    }
+
+    fn title_case_note_topic(topic: &str) -> String {
+        let words = topic
+            .split_whitespace()
+            .take(8)
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => {
+                        let mut titled = first.to_uppercase().collect::<String>();
+                        titled.push_str(chars.as_str());
+                        titled
+                    }
+                    None => String::new(),
+                }
+            })
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>();
+
+        if words.is_empty() {
+            String::from("AI draft")
+        } else {
+            words.join(" ")
+        }
+    }
+
+    fn try_start_home_note_agent(&mut self, query: &str) -> bool {
+        if !Self::looks_like_note_edit_request(query) {
+            return false;
+        }
+
+        let Some(index) = self.resolve_agent_note_target(query) else {
+            self.set_result_panel(
+                "AI note edit",
+                vec![
+                    String::from("I can edit notes when a note is selected or named."),
+                    String::from("Try /note list, select a note, then ask again."),
+                ],
+            );
+            self.last_action = String::from("AI note edit needs a note target.");
+            return true;
+        };
+
+        self.open_note_editor(index);
+        self.open_ai_overlay();
+        self.ai_input_buffer = query.trim().to_string();
+        self.ai_input_cursor = self.ai_input_buffer.len();
+        self.ghost_submit_instruction();
+        self.last_action = format!(
+            "AI is preparing edits for note: {}",
+            self.notes[index].title
+        );
+        true
+    }
+
+    fn looks_like_note_edit_request(query: &str) -> bool {
+        let lower = query.to_lowercase();
+        let mentions_note = lower.contains("note")
+            || lower.contains("notes")
+            || lower.contains("this doc")
+            || lower.contains("current doc")
+            || lower.contains("draft");
+        let wants_write = [
+            "edit",
+            "rewrite",
+            "update",
+            "change",
+            "append",
+            "add",
+            "insert",
+            "write",
+            "draft",
+            "improve",
+            "fix",
+            "clean up",
+            "summarize",
+            "turn this into",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+        mentions_note && wants_write
+    }
+
+    fn resolve_agent_note_target(&self, query: &str) -> Option<usize> {
+        let lower = query.to_lowercase();
+        for marker in ["note ", "notes ", "doc ", "draft "] {
+            if let Some(pos) = lower.find(marker) {
+                let candidate = query[pos + marker.len()..]
+                    .split(['.', ',', ':', ';'])
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+                if let Some(index) = self.resolve_note_index(candidate) {
+                    return Some(index);
+                }
+            }
+        }
+        self.current_note_index()
     }
 
     fn parse_command<'a>(prompt: &'a str) -> Option<(&'static CommandSpec, &'a str)> {
@@ -2029,6 +2389,7 @@ impl App {
                         match self.store_strix_access_token(token) {
                             Ok(()) => {
                                 self.strix_access_token = Some(token.to_string());
+                                self.note_save_target = NoteSaveTarget::Strix;
                                 self.refresh_connection_state();
                                 self.add_strix_log("Connected to Strix successfully");
                                 self.set_result_panel(
@@ -2083,6 +2444,9 @@ impl App {
             "logout" => {
                 self.openrouter_api_key = None;
                 self.strix_access_token = None;
+                if self.note_save_target == NoteSaveTarget::Strix {
+                    self.note_save_target = NoteSaveTarget::Local;
+                }
                 self.chat_stream_rx = None;
                 self.openrouter_login_rx = None;
                 if let Some(cancel_flag) = &self.openrouter_login_cancel {
@@ -2211,6 +2575,7 @@ impl App {
                             }
                         ),
                         format!("Obsidian: {}", self.obsidian_status_label()),
+                        format!("Note save target: {}", self.note_save_target_label()),
                         format!("Notes: {}", self.notes.len()),
                         format!("Cache: {}", Self::strix_cache_path().display()),
                         format!("Memories: {}", self.memories.len()),
@@ -2250,6 +2615,26 @@ impl App {
             }
             "config" | "settings" => {
                 self.open_settings_panel();
+            }
+            "mode agent" => {
+                self.agent_mode_enabled = true;
+                self.set_result_panel(
+                    "Agent mode",
+                    vec![String::from(
+                        "Agent mode is enabled. Aleph will route note-writing requests to note tools.",
+                    )],
+                );
+                self.last_action = String::from("Agent mode enabled.");
+            }
+            "mode chat" => {
+                self.agent_mode_enabled = false;
+                self.set_result_panel(
+                    "Chat mode",
+                    vec![String::from(
+                        "Chat mode is enabled. Aleph will answer normally without taking note actions.",
+                    )],
+                );
+                self.last_action = String::from("Chat mode enabled.");
             }
             "search" => {
                 let query = args.trim();
@@ -2310,68 +2695,38 @@ impl App {
                 self.set_result_panel("Ask", lines);
                 self.last_action = String::from("Prepared an ask response.");
             }
-            "note list" => {
-                if self.is_strix_connected() {
-                    self.ensure_cached_strix_notes_loaded();
+            "agent edit" => {
+                let instruction = args.trim();
+                if instruction.is_empty() {
+                    self.set_result_panel(
+                        "AI note edit",
+                        vec![String::from(
+                            "Describe the note change after /agent edit, for example: /agent edit make the selected note more concise",
+                        )],
+                    );
+                    self.last_action = String::from("AI note edit needs an instruction.");
+                    return;
                 }
-                let folder_id = self.current_folder_id;
-                let folder_name = folder_id
-                    .and_then(|id| self.get_folder_name(id))
-                    .unwrap_or_else(|| String::from("All notes"));
-
-                // Collect indices of notes that match the folder filter
-                self.note_list_indices = self
-                    .notes
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, note)| {
-                        // If we're in a folder, only show notes from that folder
-                        folder_id.is_none() || note.folder_id == folder_id
-                    })
-                    .map(|(index, _)| index)
-                    .collect();
-
-                let lines = self
-                    .note_list_indices
-                    .iter()
-                    .enumerate()
-                    .map(|(list_index, &note_index)| {
-                        let note = &self.notes[note_index];
-                        let folder_indicator = if let Some(fid) = note.folder_id {
-                            let fname = self.get_folder_name(fid).unwrap_or_default();
-                            format!("[{}] ", &fname[..fname.len().min(8)])
-                        } else {
-                            String::from("[—] ")
-                        };
-                        let source_indicator = if note.obsidian_path.is_some() {
-                            String::from(" [obsidian]")
-                        } else {
-                            note.remote_id
-                                .as_deref()
-                                .map(|id| format!(" [{}]", id))
-                                .unwrap_or_default()
-                        };
-                        format!(
-                            "{:>2}. #{} {:<14} {}{}{}",
-                            list_index + 1,
-                            note.id,
-                            if note.title.len() > 14 {
-                                format!("{}…", &note.title[..13])
-                            } else {
-                                note.title.clone()
-                            },
-                            folder_indicator,
-                            Self::preview_text(&note.content, 32),
-                            source_indicator
-                        )
-                    })
-                    .collect::<Vec<_>>();
-
-                self.note_list_selected = 0;
-                self.panel_mode = PanelMode::NoteList;
-                self.panel_title =
-                    format!("Notes — {} (↑/↓ to navigate, Enter to open)", folder_name);
-                self.panel_lines = lines;
+                if let Some(index) = self.current_note_index() {
+                    self.open_note_editor(index);
+                    self.open_ai_overlay();
+                    self.ai_input_buffer = instruction.to_string();
+                    self.ai_input_cursor = self.ai_input_buffer.len();
+                    self.ghost_submit_instruction();
+                    self.last_action = format!(
+                        "AI is preparing edits for note: {}",
+                        self.notes[index].title
+                    );
+                } else {
+                    self.set_result_panel(
+                        "AI note edit",
+                        vec![String::from("No note is selected right now.")],
+                    );
+                    self.last_action = String::from("AI note edit needs a note target.");
+                }
+            }
+            "note list" => {
+                self.open_note_list_panel();
                 self.last_action = String::from("Listed notes. Use arrow keys to navigate.");
             }
             "note read" => {
@@ -2422,80 +2777,61 @@ impl App {
                 self.last_action = format!("Opened note: {}", note_title);
             }
             "note create" => {
-                let title = if args.trim().is_empty() {
+                let (title_arg, initial_content) = Self::split_note_body_args(args.trim());
+                let title = if title_arg.trim().is_empty() {
                     String::from("Untitled note")
                 } else {
-                    args.trim().to_string()
+                    title_arg.trim().to_string()
                 };
-                let note_id = self.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
-                let mut note = Note {
-                    id: note_id,
-                    remote_id: None,
-                    obsidian_path: self.obsidian_note_path_for_title(&title),
-                    title: title.clone(),
-                    content: String::new(),
-                    raw_content: String::new(),
-                    updated_at: String::from("draft"),
-                    folder_id: self.current_folder_id,
-                };
-                if let Some(path) = note.obsidian_path.as_ref() {
-                    if let Some(parent) = path.parent() {
-                        if let Err(error) = fs::create_dir_all(parent) {
-                            self.set_result_panel(
-                                "Obsidian create failed",
-                                vec![format!(
-                                    "failed to create '{}': {}",
-                                    parent.display(),
-                                    error
-                                )],
-                            );
-                            self.last_action = String::from("Obsidian note create failed.");
-                            return;
-                        }
-                    }
-                    if let Err(error) = fs::write(path, "") {
-                        self.set_result_panel(
-                            "Obsidian create failed",
-                            vec![format!("failed to write '{}': {}", path.display(), error)],
+                match self.create_note_from_content(&title, initial_content) {
+                    Ok(index) => {
+                        self.open_note_editor(index);
+                        self.last_action = format!(
+                            "Created note in {}: {}",
+                            self.note_save_target_label(),
+                            title
                         );
-                        self.last_action = String::from("Obsidian note create failed.");
-                        return;
+                    }
+                    Err(error) => {
+                        self.set_result_panel("Note create failed", vec![error]);
+                        self.last_action = String::from("Note create failed.");
                     }
                 }
-                if self.is_strix_connected() {
-                    match self.create_strix_note(&title, "") {
-                        Ok(remote_note) => {
-                            let obsidian_path = note.obsidian_path.clone();
-                            note = remote_note;
-                            note.obsidian_path = obsidian_path;
-                        }
-                        Err(error) => {
-                            self.set_result_panel("Strix create failed", vec![error]);
-                            self.last_action = String::from("Strix note create failed.");
-                            return;
-                        }
-                    }
-                }
-                self.notes.push(note);
-                let index = self.notes.len() - 1;
-                self.open_note_editor(index);
-                self.last_action = format!("Created note: {}", title);
             }
             "note append" => {
-                let Some(index) = self.current_note_index() else {
+                let (target_arg, append_arg) = Self::split_note_body_args(args.trim());
+                let resolved_target = if append_arg.is_empty() {
+                    self.current_note_index()
+                } else {
+                    self.resolve_note_index(target_arg)
+                };
+
+                let Some(index) = resolved_target else {
                     self.set_result_panel(
                         "Append failed",
-                        vec![String::from("No note is selected right now.")],
+                        vec![if append_arg.is_empty() {
+                            String::from("No note is selected right now.")
+                        } else {
+                            format!("Note '{}' was not found.", target_arg.trim())
+                        }],
                     );
-                    self.last_action = String::from("No selected note to append to.");
+                    self.last_action = String::from("No target note to append to.");
                     return;
                 };
 
-                let append_text = args.trim();
+                let append_text = if append_arg.is_empty() {
+                    target_arg.trim()
+                } else {
+                    append_arg.trim()
+                };
                 if append_text.is_empty() {
                     self.set_result_panel(
                         "Append failed",
-                        vec![String::from("Provide text after /note append.")],
+                        vec![
+                            String::from("Provide text after /note append."),
+                            String::from("Usage: /note append <text>"),
+                            String::from("   or: /note append <note> :: <text>"),
+                        ],
                     );
                     self.last_action = String::from("Append text was empty.");
                     return;
@@ -2512,14 +2848,9 @@ impl App {
                     note.updated_at = updated_at;
                     (note.title.clone(), note.content.clone())
                 };
-                if let Err(error) = self.write_note_to_obsidian(index) {
-                    self.set_result_panel("Obsidian write failed", vec![error]);
-                    self.last_action = String::from("Obsidian note append failed.");
-                    return;
-                }
-                if let Err(error) = self.push_note_to_strix(index) {
-                    self.set_result_panel("Strix push failed", vec![error]);
-                    self.last_action = String::from("Strix note append failed.");
+                if let Err(error) = self.persist_note(index) {
+                    self.set_result_panel("Append save failed", vec![error]);
+                    self.last_action = String::from("Note append save failed.");
                     return;
                 }
                 self.selected_note = index;
@@ -2805,6 +3136,161 @@ impl App {
         }
     }
 
+    fn split_note_body_args(args: &str) -> (&str, &str) {
+        args.split_once("::").unwrap_or((args, ""))
+    }
+
+    fn open_note_list_panel(&mut self) {
+        if self.is_strix_connected() {
+            self.ensure_cached_strix_notes_loaded();
+        }
+
+        let previous_selected_note = self
+            .note_list_indices
+            .get(self.note_list_selected)
+            .copied()
+            .and_then(|index| self.notes.get(index).map(|note| note.id));
+        let folder_id = self.current_folder_id;
+        let folder_name = folder_id
+            .and_then(|id| self.get_folder_name(id))
+            .unwrap_or_else(|| String::from("All notes"));
+
+        self.note_list_indices = self
+            .notes
+            .iter()
+            .enumerate()
+            .filter(|(_, note)| folder_id.is_none() || note.folder_id == folder_id)
+            .map(|(index, _)| index)
+            .collect();
+
+        self.panel_lines = self
+            .note_list_indices
+            .iter()
+            .enumerate()
+            .map(|(list_index, &note_index)| self.note_list_line(list_index, note_index))
+            .collect::<Vec<_>>();
+
+        self.note_list_selected = previous_selected_note
+            .and_then(|note_id| {
+                self.note_list_indices
+                    .iter()
+                    .position(|&index| self.notes.get(index).map(|note| note.id) == Some(note_id))
+            })
+            .unwrap_or(0)
+            .min(self.note_list_indices.len().saturating_sub(1));
+        self.panel_mode = PanelMode::NoteList;
+        self.panel_title = format!("Notes - {} (Enter open, Delete delete)", folder_name);
+    }
+
+    fn note_list_line(&self, list_index: usize, note_index: usize) -> String {
+        let note = &self.notes[note_index];
+        let folder_indicator = if let Some(fid) = note.folder_id {
+            let fname = self.get_folder_name(fid).unwrap_or_default();
+            format!("[{}] ", &fname[..fname.len().min(8)])
+        } else {
+            String::from("[-] ")
+        };
+        let source_indicator = if note.obsidian_path.is_some() {
+            String::from(" [obsidian]")
+        } else {
+            note.remote_id
+                .as_deref()
+                .map(|id| format!(" [{}]", id))
+                .unwrap_or_default()
+        };
+        format!(
+            "{:>2}. #{} {:<14} {}{}{}",
+            list_index + 1,
+            note.id,
+            if note.title.len() > 14 {
+                format!("{}...", &note.title[..11])
+            } else {
+                note.title.clone()
+            },
+            folder_indicator,
+            Self::preview_text(&note.content, 32),
+            source_indicator
+        )
+    }
+
+    fn create_note_from_content(&mut self, title: &str, content: &str) -> Result<usize, String> {
+        let title = if title.trim().is_empty() {
+            String::from("Untitled note")
+        } else {
+            title.trim().to_string()
+        };
+        let note_id = self.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+        let note = Note {
+            id: note_id,
+            remote_id: None,
+            obsidian_path: None,
+            title: title.clone(),
+            content: content.to_string(),
+            raw_content: content.to_string(),
+            updated_at: self.uptime(),
+            folder_id: self.current_folder_id,
+        };
+
+        self.notes.push(note);
+        let index = self.notes.len() - 1;
+        if let Err(error) = self.persist_note(index) {
+            self.notes.pop();
+            return Err(error);
+        }
+        Ok(index)
+    }
+
+    fn delete_note_at_index(&mut self, index: usize) -> Result<String, String> {
+        let Some(note) = self.notes.get(index).cloned() else {
+            return Err(String::from("Note not found."));
+        };
+
+        if let Some(path) = note.obsidian_path.as_ref() {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("failed to delete '{}': {}", path.display(), error));
+                }
+            }
+        }
+
+        if note.remote_id.is_some() && self.is_strix_connected() {
+            self.delete_strix_note(&note)?;
+        }
+
+        self.notes.remove(index);
+        self.note_list_pending_delete = None;
+        self.selected_note = if self.notes.is_empty() {
+            0
+        } else if self.selected_note > index {
+            self.selected_note - 1
+        } else {
+            self.selected_note.min(self.notes.len() - 1)
+        };
+        self.note_list_indices = self
+            .note_list_indices
+            .iter()
+            .filter_map(|&note_index| {
+                if note_index == index {
+                    None
+                } else if note_index > index {
+                    Some(note_index - 1)
+                } else {
+                    Some(note_index)
+                }
+            })
+            .collect();
+        self.note_list_selected = self
+            .note_list_selected
+            .min(self.note_list_indices.len().saturating_sub(1));
+        if self.is_strix_connected() {
+            let _ = Self::save_cached_strix_notes(&self.notes);
+        }
+
+        Ok(note.title)
+    }
+
     fn set_result_panel(&mut self, title: impl Into<String>, lines: Vec<String>) {
         self.panel_mode = PanelMode::Commands;
         self.panel_title = title.into();
@@ -2892,7 +3378,7 @@ impl App {
         let (code_verifier, code_challenge) = Self::build_pkce_pair();
         let callback_nonce = Self::build_login_nonce();
         let callback_path = format!("{}/{}", OPENROUTER_AUTH_CALLBACK, callback_nonce);
-        let callback_url = format!("http://127.0.0.1:{}{}", OPENROUTER_AUTH_PORT, callback_path);
+        let callback_url = format!("http://localhost:{}{}", OPENROUTER_AUTH_PORT, callback_path);
         let auth_url = format!(
             "https://openrouter.ai/auth?callback_url={}&code_challenge={}&code_challenge_method=S256",
             urlencoding::encode(&callback_url),
@@ -4045,6 +4531,9 @@ impl App {
 
         self.store_obsidian_vault_path(&canonical)?;
         self.obsidian_vault_path = Some(canonical.clone());
+        if self.note_save_target == NoteSaveTarget::Local {
+            self.note_save_target = NoteSaveTarget::Obsidian;
+        }
         if !self
             .obsidian_vaults
             .iter()
@@ -4640,9 +5129,23 @@ impl App {
         Ok(Self::note_from_strix_value(0, note))
     }
 
+    fn delete_strix_note(&self, note: &Note) -> Result<(), String> {
+        let Some(remote_id) = note.remote_id.as_deref() else {
+            return Ok(());
+        };
+        let path = format!(
+            "/api/auth/native/notes/{}",
+            urlencoding::encode(remote_id.trim())
+        );
+        let _ = self.strix_json_request("DELETE", &path, None)?;
+        Ok(())
+    }
+
     fn push_note_to_strix(&mut self, index: usize) -> Result<(), String> {
         if !self.is_strix_connected() {
-            return Ok(());
+            return Err(String::from(
+                "Strix save target requires a Strix connection. Use /login strix first.",
+            ));
         }
         let Some(note) = self.notes.get(index).cloned() else {
             return Ok(());
@@ -5078,15 +5581,51 @@ impl App {
             note.raw_content = self.editor_buffer.clone();
             note.updated_at = updated_at;
         }
-        if let Err(error) = self.write_note_to_obsidian(index) {
-            self.last_action = format!("Obsidian write failed: {}", error);
-            self.save_shimmer_ticks = 4;
-            return;
-        }
-        if let Err(error) = self.push_note_to_strix(index) {
-            self.last_action = format!("Strix push failed: {}", error);
+        if let Err(error) = self.persist_note(index) {
+            self.last_action = format!("Note save failed: {}", error);
         }
         self.save_shimmer_ticks = 4;
+    }
+
+    fn persist_note(&mut self, index: usize) -> Result<(), String> {
+        match self.note_save_target {
+            NoteSaveTarget::Local => Ok(()),
+            NoteSaveTarget::Obsidian => {
+                self.ensure_note_obsidian_path(index)?;
+                self.write_note_to_obsidian(index)
+            }
+            NoteSaveTarget::Strix => self.push_note_to_strix(index),
+        }
+    }
+
+    fn ensure_note_obsidian_path(&mut self, index: usize) -> Result<(), String> {
+        if self.obsidian_vault_path.is_none() {
+            return Err(String::from(
+                "Obsidian save target requires a paired vault. Use /obsidian pair first.",
+            ));
+        }
+
+        if self
+            .notes
+            .get(index)
+            .and_then(|note| note.obsidian_path.as_ref())
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let title = self
+            .notes
+            .get(index)
+            .map(|note| note.title.clone())
+            .unwrap_or_else(|| String::from("Untitled note"));
+        let path = self
+            .obsidian_note_path_for_title(&title)
+            .ok_or_else(|| String::from("Unable to choose an Obsidian note path."))?;
+        if let Some(note) = self.notes.get_mut(index) {
+            note.obsidian_path = Some(path);
+        }
+        Ok(())
     }
 
     fn write_note_to_obsidian(&self, index: usize) -> Result<(), String> {
@@ -5772,14 +6311,37 @@ impl App {
 
         if self.ai_overlay_visible {
             match key_event.code {
+                KeyCode::Enter
+                    if key_event.kind == KeyEventKind::Press && self.has_pending_ai_edit() =>
+                {
+                    self.apply_pending_ai_edit();
+                    return;
+                }
+                KeyCode::Char('r')
+                    if key_event.kind == KeyEventKind::Press
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.has_pending_ai_edit() =>
+                {
+                    self.reject_pending_ai_edit();
+                    return;
+                }
                 KeyCode::Esc if key_event.kind == KeyEventKind::Press => {
-                    self.close_ai_overlay();
+                    if self.has_pending_ai_edit() {
+                        self.reject_pending_ai_edit();
+                    } else {
+                        self.close_ai_overlay();
+                    }
                     return;
                 }
                 KeyCode::Char(' ')
                     if key_event.kind == KeyEventKind::Press
                         && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
+                    if self.has_pending_ai_edit() {
+                        self.last_action =
+                            String::from("Apply or reject the pending AI edits first.");
+                        return;
+                    }
                     self.toggle_ai_overlay();
                     return;
                 }
@@ -5833,6 +6395,11 @@ impl App {
                     return;
                 }
                 _ => {
+                    if self.has_pending_ai_edit() {
+                        self.last_action =
+                            String::from("Apply or reject the pending AI edits first.");
+                        return;
+                    }
                     self.handle_ai_input_key(key_event);
                     return;
                 }
@@ -6040,7 +6607,9 @@ impl App {
         self.ai_input_buffer.clear();
         self.ai_input_cursor = 0;
         self.ghost_result = None;
-        self.last_action = String::from("Summoned the Ghost.");
+        self.pending_ai_edit = None;
+        self.ai_draft_create_title = None;
+        self.last_action = String::from("Opened AI note editor.");
     }
 
     fn close_ai_overlay(&mut self) {
@@ -6049,6 +6618,8 @@ impl App {
         self.thinking = false;
         self.thinking_ticks_remaining = 0;
         self.ghost_result = None;
+        self.pending_ai_edit = None;
+        self.ai_draft_create_title = None;
         self.ghost_streaming = false;
         self.ghost_stream_rx = None;
     }
@@ -6094,28 +6665,70 @@ impl App {
                 }
             }
             KeyCode::Down => {
-                if self.settings_selected < 3 {
+                if self.settings_selected < 5 {
                     self.settings_selected += 1;
                 }
             }
             KeyCode::Enter => {
                 match self.settings_selected {
                     0 => {
-                        // AI Provider toggle
-                        self.ai_provider = match self.ai_provider {
+                        let next_provider = match self.ai_provider {
                             AiProvider::OpenRouter => AiProvider::Strix,
                             AiProvider::Strix => AiProvider::OpenRouter,
                         };
-                        self.last_action = format!("Switched AI provider to {:?}", self.ai_provider);
+
+                        self.set_ai_provider(next_provider);
+
+                        match next_provider {
+                            AiProvider::OpenRouter => {
+                                if self.is_openrouter_connected() {
+                                    self.rebuild_chat_render_cache();
+                                    self.last_action =
+                                        String::from("Switched model provider to OpenRouter.");
+                                } else if !self.start_openrouter_browser_login() {
+                                    self.set_result_panel(
+                                        "OpenRouter provider failed",
+                                        vec![String::from(
+                                            "Unable to start the browser-based OpenRouter authorization flow.",
+                                        )],
+                                    );
+                                    self.last_action =
+                                        String::from("OpenRouter provider setup failed.");
+                                }
+                            }
+                            AiProvider::Strix => {
+                                if self.is_strix_connected() {
+                                    self.last_action =
+                                        String::from("Switched model provider to Strix.");
+                                } else if !self.start_strix_browser_login() {
+                                    self.set_result_panel(
+                                        "Strix login failed",
+                                        vec![String::from(
+                                            "Unable to start the browser-based Strix login flow.",
+                                        )],
+                                    );
+                                    self.last_action = String::from("Strix login failed.");
+                                }
+                            }
+                        }
                     }
                     1 => {
+                        self.toggle_agent_mode();
+                    }
+                    2 => {
+                        self.cycle_note_save_target();
+                    }
+                    3 => {
                         // Pair Obsidian vault
                         self.open_vault_picker();
                     }
-                    2 => {
+                    4 => {
                         // Sign out / Logout
                         self.openrouter_api_key = None;
                         self.strix_access_token = None;
+                        if self.note_save_target == NoteSaveTarget::Strix {
+                            self.note_save_target = NoteSaveTarget::Local;
+                        }
                         self.chat_stream_rx = None;
                         self.openrouter_login_rx = None;
                         if let Some(cancel_flag) = &self.openrouter_login_cancel {
@@ -6143,7 +6756,7 @@ impl App {
                         self.panel_lines.clear();
                         self.last_action = String::from("Signed out.");
                     }
-                    3 => {
+                    5 => {
                         // Close settings
                         self.panel_mode = PanelMode::Commands;
                         self.panel_title = String::from("Commands");
@@ -6222,6 +6835,7 @@ impl App {
         }
         match key_event.code {
             KeyCode::Esc => {
+                self.note_list_pending_delete = None;
                 self.panel_mode = PanelMode::Commands;
                 self.panel_title = String::from("Commands");
                 self.panel_lines.clear();
@@ -6229,19 +6843,51 @@ impl App {
             }
             KeyCode::Up => {
                 if self.note_list_selected > 0 {
+                    self.note_list_pending_delete = None;
                     self.note_list_selected -= 1;
                     self.last_action = format!("Selected note {}", self.note_list_selected + 1);
                 }
             }
             KeyCode::Down => {
                 if self.note_list_selected + 1 < self.note_list_indices.len() {
+                    self.note_list_pending_delete = None;
                     self.note_list_selected += 1;
                     self.last_action = format!("Selected note {}", self.note_list_selected + 1);
                 }
             }
             KeyCode::Enter => {
+                self.note_list_pending_delete = None;
                 if let Some(&note_index) = self.note_list_indices.get(self.note_list_selected) {
                     self.open_note_editor(note_index);
+                }
+            }
+            KeyCode::Delete | KeyCode::Backspace => {
+                let Some(&note_index) = self.note_list_indices.get(self.note_list_selected) else {
+                    self.last_action = String::from("No note selected to delete.");
+                    return;
+                };
+                let note_title = self
+                    .notes
+                    .get(note_index)
+                    .map(|note| note.title.clone())
+                    .unwrap_or_else(|| String::from("Untitled note"));
+                if self.note_list_pending_delete == Some(note_index) {
+                    match self.delete_note_at_index(note_index) {
+                        Ok(title) => {
+                            self.open_note_list_panel();
+                            self.last_action = format!("Deleted note: {}", title);
+                        }
+                        Err(error) => {
+                            self.note_list_pending_delete = None;
+                            self.last_action = format!("Delete failed: {}", error);
+                        }
+                    }
+                } else {
+                    self.note_list_pending_delete = Some(note_index);
+                    self.last_action = format!(
+                        "Press Delete again to delete '{}'. Esc or move to cancel.",
+                        note_title
+                    );
                 }
             }
             KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -6317,24 +6963,31 @@ impl App {
         let provider = self.ai_provider;
         let openrouter_api_key = self.openrouter_api_key.clone();
         let strix_access_token = self.strix_access_token.clone();
+        let draft_create_title = self.ai_draft_create_title.clone();
 
         let editor_content = self.editor_buffer.clone();
         self.ghost_streaming = true;
         self.ghost_result = None;
+        self.pending_ai_edit = None;
         self.thinking = true;
         self.thinking_ticks_remaining = 20;
 
         // Build a conversation for the ghost editor
         let system_prompt = String::from(
             "You are a writing assistant embedded in a note editor. The user will give you the current note content and an instruction. \
-             Respond ONLY with the complete updated note content — no explanations, no markdown code fences, no preamble. \
-             If the user asks a question about the text, answer concisely in plain text. \
+             Respond ONLY with the complete updated note content: no explanations, no markdown code fences, no preamble. \
+             If the user asks a question about the text, answer by updating the note with the requested answer only when they clearly ask you to write it into the note. \
+             If the current note is empty and the user asks to write, draft, compose, or create a note, write the full new note content. \
              If the user asks to edit, rewrite, or add to the text, return the full updated text."
         );
 
+        let title_context = draft_create_title
+            .as_deref()
+            .map(|title| format!("New note title: {}\n\n", title))
+            .unwrap_or_default();
         let user_msg = format!(
-            "Current note content:\n---\n{}\n---\n\nInstruction: {}",
-            editor_content, instruction
+            "{}Current note content:\n---\n{}\n---\n\nInstruction: {}",
+            title_context, editor_content, instruction
         );
         let strix_instruction = format!("{}\n\n{}", system_prompt, user_msg);
 
@@ -6430,17 +7083,41 @@ impl App {
                     self.thinking_ticks_remaining = 0;
                     self.ghost_stream_rx = None;
 
-                    // Apply the result to the editor buffer
                     if let Some(ref result) = self.ghost_result {
-                        let result = result.trim().to_string();
-                        if !result.is_empty() {
-                            self.save_undo_state();
-                            self.editor_buffer = result;
-                            self.editor_cursor = self.editor_buffer.len().min(self.editor_cursor);
-                            self.last_action = String::from("Ghost applied edits.");
+                        let proposed = result.trim().to_string();
+                        if proposed.is_empty() {
+                            self.ghost_result =
+                                Some(String::from("AI returned an empty proposal."));
+                            self.last_action = String::from("AI note edit returned no changes.");
+                        } else if proposed == self.editor_buffer {
+                            self.ghost_result = Some(String::from("No changes proposed."));
+                            self.last_action = String::from("AI note edit found no changes.");
+                        } else if let Some(title) = self.ai_draft_create_title.clone() {
+                            let diff_lines = Self::build_line_diff("", &proposed);
+                            self.pending_ai_edit = Some(AiEditProposal {
+                                note_index: None,
+                                title: Some(title),
+                                instruction: String::from("AI note create"),
+                                proposed,
+                                diff_lines,
+                            });
+                            self.last_action = String::from(
+                                "AI drafted a note. Press Enter to create it or Ctrl+R to reject.",
+                            );
+                        } else if let Some(note_index) = self.editor_note_index {
+                            let diff_lines = Self::build_line_diff(&self.editor_buffer, &proposed);
+                            self.pending_ai_edit = Some(AiEditProposal {
+                                note_index: Some(note_index),
+                                title: None,
+                                instruction: String::from("AI note edit"),
+                                proposed,
+                                diff_lines,
+                            });
+                            self.last_action = String::from(
+                                "AI proposed edits. Press Enter to apply or Ctrl+R to reject.",
+                            );
                         }
                     }
-                    self.ghost_result = None;
                     finished = true;
                 }
                 Ok(ChatStreamUpdate::Error(error)) => {
@@ -6467,6 +7144,101 @@ impl App {
             }
         }
     }
+
+    fn apply_pending_ai_edit(&mut self) {
+        let Some(proposal) = self.pending_ai_edit.take() else {
+            return;
+        };
+
+        let Some(note_index) = proposal.note_index else {
+            let title = proposal
+                .title
+                .clone()
+                .unwrap_or_else(|| String::from("AI draft"));
+            match self.create_note_from_content(&title, &proposal.proposed) {
+                Ok(index) => {
+                    self.selected_note = index;
+                    self.open_note_editor(index);
+                    self.ghost_result = None;
+                    self.last_action = format!("Created AI note: {}", title);
+                    self.close_ai_overlay();
+                }
+                Err(error) => {
+                    self.ghost_result = Some(format!("Create failed: {}", error));
+                    self.last_action = String::from("AI note create failed.");
+                }
+            }
+            return;
+        };
+
+        if self.editor_note_index != Some(note_index) {
+            self.open_note_editor(note_index);
+        }
+
+        self.save_undo_state();
+        self.editor_buffer = proposal.proposed;
+        self.editor_cursor = self.editor_buffer.len();
+        self.ghost_result = None;
+        self.save_editor();
+        self.last_action = String::from("Applied AI note edits.");
+        self.close_ai_overlay();
+    }
+
+    fn reject_pending_ai_edit(&mut self) {
+        self.pending_ai_edit = None;
+        self.ghost_result = None;
+        self.ghost_streaming = false;
+        self.ghost_stream_rx = None;
+        self.thinking = false;
+        self.thinking_ticks_remaining = 0;
+        self.last_action = String::from("Rejected AI note edits.");
+    }
+
+    fn build_line_diff(original: &str, proposed: &str) -> Vec<String> {
+        let old_lines: Vec<&str> = original.lines().collect();
+        let new_lines: Vec<&str> = proposed.lines().collect();
+        let mut table = vec![vec![0usize; new_lines.len() + 1]; old_lines.len() + 1];
+
+        for old_index in (0..old_lines.len()).rev() {
+            for new_index in (0..new_lines.len()).rev() {
+                table[old_index][new_index] = if old_lines[old_index] == new_lines[new_index] {
+                    table[old_index + 1][new_index + 1] + 1
+                } else {
+                    table[old_index + 1][new_index].max(table[old_index][new_index + 1])
+                };
+            }
+        }
+
+        let mut diff = Vec::new();
+        let mut old_index = 0;
+        let mut new_index = 0;
+        while old_index < old_lines.len() && new_index < new_lines.len() {
+            if old_lines[old_index] == new_lines[new_index] {
+                diff.push(format!("  {}", old_lines[old_index]));
+                old_index += 1;
+                new_index += 1;
+            } else if table[old_index + 1][new_index] >= table[old_index][new_index + 1] {
+                diff.push(format!("- {}", old_lines[old_index]));
+                old_index += 1;
+            } else {
+                diff.push(format!("+ {}", new_lines[new_index]));
+                new_index += 1;
+            }
+        }
+        while old_index < old_lines.len() {
+            diff.push(format!("- {}", old_lines[old_index]));
+            old_index += 1;
+        }
+        while new_index < new_lines.len() {
+            diff.push(format!("+ {}", new_lines[new_index]));
+            new_index += 1;
+        }
+
+        if diff.is_empty() && !proposed.is_empty() {
+            diff.push(format!("+ {}", proposed));
+        }
+        diff
+    }
 }
 
 #[cfg(test)]
@@ -6488,6 +7260,15 @@ mod tests {
             code,
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Repeat,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
     }
@@ -6694,6 +7475,7 @@ mod tests {
     #[test]
     fn note_edit_opens_the_editor_and_saves_changes() {
         let mut app = App::new();
+        app.note_save_target = NoteSaveTarget::Local;
 
         for character in "/note edit".chars() {
             app.handle_key(press(KeyCode::Char(character)));
@@ -6727,5 +7509,257 @@ mod tests {
         });
 
         assert!(!app.is_full_editor());
+    }
+
+    #[test]
+    fn ai_edit_proposal_requires_explicit_apply() {
+        let mut app = App::new();
+        app.note_save_target = NoteSaveTarget::Local;
+        app.open_note_editor(0);
+        let original = app.editor_buffer.clone();
+        let proposed = format!("{}\n\nAdded by AI", original);
+        app.pending_ai_edit = Some(AiEditProposal {
+            note_index: Some(0),
+            title: None,
+            instruction: String::from("append a line"),
+            proposed: proposed.clone(),
+            diff_lines: App::build_line_diff(&original, &proposed),
+        });
+        app.ai_overlay_visible = true;
+
+        app.handle_key(press(KeyCode::Char('x')));
+        assert_eq!(app.editor_buffer, original);
+        assert!(app.has_pending_ai_edit());
+
+        app.handle_key(press(KeyCode::Enter));
+        assert_eq!(app.editor_buffer, proposed);
+        assert_eq!(app.notes[0].content, proposed);
+        assert!(!app.has_pending_ai_edit());
+    }
+
+    #[test]
+    fn ai_edit_proposal_can_be_rejected() {
+        let mut app = App::new();
+        app.open_note_editor(0);
+        let original = app.editor_buffer.clone();
+        let proposed = format!("{}\n\nAdded by AI", original);
+        app.pending_ai_edit = Some(AiEditProposal {
+            note_index: Some(0),
+            title: None,
+            instruction: String::from("append a line"),
+            proposed,
+            diff_lines: App::build_line_diff(&original, "changed"),
+        });
+        app.ai_overlay_visible = true;
+
+        app.handle_key(ctrl(KeyCode::Char('r')));
+
+        assert_eq!(app.editor_buffer, original);
+        assert!(!app.has_pending_ai_edit());
+    }
+
+    #[test]
+    fn note_create_accepts_initial_body() {
+        let mut app = App::new();
+        app.note_save_target = NoteSaveTarget::Local;
+
+        for character in "/note create Test note :: first line".chars() {
+            app.handle_key(press(KeyCode::Char(character)));
+        }
+        app.handle_key(press(KeyCode::Enter));
+
+        assert!(app.is_full_editor());
+        assert_eq!(app.editor_note_title(), Some("Test note"));
+        assert_eq!(app.editor_buffer(), "first line");
+    }
+
+    #[test]
+    fn note_append_can_target_a_note() {
+        let mut app = App::new();
+        app.note_save_target = NoteSaveTarget::Local;
+
+        for character in "/note append Feature ideas :: added target text".chars() {
+            app.handle_key(press(KeyCode::Char(character)));
+        }
+        app.handle_key(press(KeyCode::Enter));
+
+        let target = app
+            .notes
+            .iter()
+            .find(|note| note.title == "Feature ideas")
+            .unwrap();
+        assert!(target.content.contains("added target text"));
+    }
+
+    #[test]
+    fn note_list_delete_requires_second_press() {
+        let mut app = App::new();
+        let original_count = app.notes.len();
+
+        app.open_note_list_panel();
+        app.handle_note_list_key(press(KeyCode::Delete));
+
+        assert_eq!(app.notes.len(), original_count);
+        assert!(app.note_list_delete_is_pending());
+
+        app.handle_note_list_key(press(KeyCode::Delete));
+
+        assert_eq!(app.notes.len(), original_count - 1);
+        assert!(!app.note_list_delete_is_pending());
+    }
+
+    #[test]
+    fn note_list_delete_pending_is_cancelled_by_moving_selection() {
+        let mut app = App::new();
+        let original_count = app.notes.len();
+
+        app.open_note_list_panel();
+        app.handle_note_list_key(press(KeyCode::Delete));
+        app.handle_note_list_key(press(KeyCode::Down));
+
+        assert_eq!(app.notes.len(), original_count);
+        assert!(!app.note_list_delete_is_pending());
+    }
+
+    #[test]
+    fn note_list_delete_removes_obsidian_file() {
+        let root =
+            std::env::temp_dir().join(format!("aleph-note-delete-test-{}", App::now_millis()));
+        fs::create_dir_all(&root).unwrap();
+        let note_path = root.join("Delete Me.md");
+        fs::write(&note_path, "temporary note").unwrap();
+
+        let mut app = App::new();
+        app.notes = vec![test_note(1, None, "Delete Me", "temporary note")];
+        app.notes[0].obsidian_path = Some(note_path.clone());
+
+        app.open_note_list_panel();
+        app.handle_note_list_key(press(KeyCode::Delete));
+        app.handle_note_list_key(press(KeyCode::Delete));
+
+        assert!(app.notes.is_empty());
+        assert!(!note_path.exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn chat_note_create_request_opens_ai_draft_instead_of_chatting() {
+        let mut app = App::new();
+        app.openrouter_api_key = None;
+        app.strix_access_token = None;
+        app.refresh_connection_state();
+        app.panel_mode = PanelMode::AiChat;
+        app.chat_input_buffer = String::from("write a note about launch planning");
+        app.chat_input_cursor = app.chat_input_buffer.len();
+
+        app.handle_chat_key(press(KeyCode::Enter));
+
+        assert!(app.is_full_editor());
+        assert_eq!(
+            app.ai_draft_create_title.as_deref(),
+            Some("Launch Planning")
+        );
+        assert_eq!(app.chat_messages().len(), 0);
+    }
+
+    #[test]
+    fn chat_mode_keeps_note_requests_as_chat() {
+        let mut app = App::new();
+        app.openrouter_api_key = None;
+        app.strix_access_token = None;
+        app.refresh_connection_state();
+        app.agent_mode_enabled = false;
+        app.panel_mode = PanelMode::AiChat;
+        app.chat_input_buffer = String::from("write a note about launch planning");
+        app.chat_input_cursor = app.chat_input_buffer.len();
+
+        app.handle_chat_key(press(KeyCode::Enter));
+
+        assert!(app.is_ai_chat());
+        assert_eq!(app.chat_messages().len(), 2);
+        assert!(app.chat_messages()[0].content.contains("write a note"));
+    }
+
+    #[test]
+    fn mode_commands_switch_agent_routing() {
+        let mut app = App::new();
+
+        for character in "/mode chat".chars() {
+            app.handle_key(press(KeyCode::Char(character)));
+        }
+        app.handle_key(press(KeyCode::Enter));
+        assert!(!app.is_agent_mode_enabled());
+
+        for character in "/mode agent".chars() {
+            app.handle_key(press(KeyCode::Char(character)));
+        }
+        app.handle_key(press(KeyCode::Enter));
+        assert!(app.is_agent_mode_enabled());
+    }
+
+    #[test]
+    fn ai_create_proposal_creates_note_when_applied() {
+        let mut app = App::new();
+        app.openrouter_api_key = None;
+        app.strix_access_token = None;
+        app.obsidian_vault_path = None;
+        app.note_save_target = NoteSaveTarget::Local;
+        app.refresh_connection_state();
+        let original_count = app.notes.len();
+        app.panel_mode = PanelMode::FullEditor;
+        app.ai_overlay_visible = true;
+        app.pending_ai_edit = Some(AiEditProposal {
+            note_index: None,
+            title: Some(String::from("Launch Planning")),
+            instruction: String::from("write a note"),
+            proposed: String::from("# Launch Planning\n\nShip the smallest useful path."),
+            diff_lines: App::build_line_diff(
+                "",
+                "# Launch Planning\n\nShip the smallest useful path.",
+            ),
+        });
+
+        app.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(app.notes.len(), original_count + 1);
+        assert_eq!(app.editor_note_title(), Some("Launch Planning"));
+        assert!(app
+            .editor_buffer()
+            .contains("Ship the smallest useful path."));
+    }
+
+    #[test]
+    fn settings_cycles_note_save_target_through_available_targets() {
+        let mut app = App::new();
+        app.openrouter_api_key = None;
+        app.strix_access_token = Some(String::from("token"));
+        app.obsidian_vault_path = Some(PathBuf::from("/tmp"));
+        app.note_save_target = NoteSaveTarget::Local;
+        app.refresh_connection_state();
+
+        app.cycle_note_save_target();
+        assert_eq!(app.note_save_target, NoteSaveTarget::Obsidian);
+
+        app.cycle_note_save_target();
+        assert_eq!(app.note_save_target, NoteSaveTarget::Strix);
+
+        app.cycle_note_save_target();
+        assert_eq!(app.note_save_target, NoteSaveTarget::Local);
+    }
+
+    #[test]
+    fn local_save_target_does_not_assign_obsidian_or_strix_source() {
+        let mut app = App::new();
+        app.openrouter_api_key = None;
+        app.strix_access_token = Some(String::from("token"));
+        app.obsidian_vault_path = Some(PathBuf::from("/tmp"));
+        app.note_save_target = NoteSaveTarget::Local;
+        app.refresh_connection_state();
+
+        let index = app.create_note_from_content("Local only", "body").unwrap();
+
+        assert!(app.notes[index].remote_id.is_none());
+        assert!(app.notes[index].obsidian_path.is_none());
     }
 }
