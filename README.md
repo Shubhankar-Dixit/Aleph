@@ -8,7 +8,7 @@ Run the first visible shell with:
 cargo run
 ```
 
-The current codebase is intentionally a minimal Ratatui starter so the terminal surface can be seen and iterated on before any Strix integration lands.
+The current codebase is a Ratatui terminal client with local notes, Obsidian pairing, Strix sync, and AI chat/editing paths in progress.
 
 ## Obsidian Pairing
 
@@ -23,6 +23,12 @@ cargo run -- obsidian open "Daily note"
 ```
 
 Inside the TUI, use `/obsidian pair`, pick a detected vault, then run `/obsidian sync`. Imported Obsidian notes show up in `/note list`, can be searched with `/search`, and edits to imported Markdown notes are written back to the vault. New `/note create` notes are also created as Markdown files when a vault is paired.
+
+## Strix And AI
+
+Use `/login strix` to connect a Strix account. When Strix is connected, `/sync` pulls Strix notes and note writes can be pushed back to Strix. Use `/login openrouter <key>` to configure OpenRouter as an optional model provider; OpenRouter is not Aleph's app login identity.
+
+Use `/settings` to inspect the current Strix status, selected model provider, Obsidian vault, sync targets, credential storage, editor mode, and useful environment overrides.
 
 Useful overrides:
 

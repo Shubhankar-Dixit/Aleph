@@ -1,13 +1,29 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Table, Wrap,
+};
 
-use crate::app::{App, CursorStyle, PanelMode};
+mod markdown;
+
+use crate::app::{AiProvider, App, PanelMode};
+use markdown::{
+    render_markdown_line, render_markdown_line_with_cursor, render_markdown_line_with_selection,
+    render_panel_markdown_line,
+};
 
 const BG: Color = Color::Rgb(25, 26, 34);
 const ACCENT: Color = Color::Rgb(156, 146, 201);
 const ACCENT_SOFT: Color = Color::Rgb(115, 106, 155);
 const TEXT: Color = Color::Rgb(198, 198, 210);
 const MUTED: Color = Color::Rgb(120, 122, 138);
+const EDITOR_TEXT: Color = Color::Rgb(130, 132, 145);
+const EDITOR_MUTED: Color = Color::Rgb(98, 101, 116);
+const EDITOR_SELECTION_BG: Color = Color::Rgb(60, 62, 78);
+const DIFF_ADDED_FG: Color = Color::Rgb(120, 220, 140); // Green for additions
+const DIFF_REMOVED_FG: Color = Color::Rgb(220, 100, 100); // Red for removals
+const DIFF_ADDED_BG: Color = Color::Rgb(30, 60, 40); // Dark green background
+const DIFF_REMOVED_BG: Color = Color::Rgb(60, 30, 35); // Dark red background
 const PANEL: Color = Color::Rgb(35, 36, 48);
 const BORDER: Color = Color::Rgb(34, 65, 64);
 const GHOST_FRAMES: [&str; 4] = ["◌", "◎", "◍", "◉"];
@@ -16,16 +32,13 @@ const CURSOR: &str = "│";
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    frame.render_widget(
-        Block::default().style(Style::default().bg(BG)),
-        area,
-    );
+    frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
     if app.is_full_editor() {
         render_full_editor(frame, app, area);
         return;
     }
-    
+
     if app.is_ai_chat() {
         render_full_chat(frame, app, area);
         return;
@@ -49,16 +62,46 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .split(root[0]);
 
     let emblem = Paragraph::new(vec![
-        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⢀⢀⢀⡀", Style::default().fg(MUTED))]),
-        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⠀⠀⢀⠀⡴⠰⠞⠿⠛⠁⠓⠖⠲⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀", Style::default().fg(TEXT))]),
-        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⠀⢸⠆⢁⠶⠿⠇⠹⠁⠸⠷⠏⣈⡀⢰⠀⠈⠀⠀⠀⠀⠀⠀⠀", Style::default().fg(TEXT))]),
-        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⡁⠴⠛⢀⡀⠀⠀⢀⠀⠀⠀⠀⡀⠀⠀⠂⠄⠀⠀⠀⠀⠀⠀⠀", Style::default().fg(ACCENT))]),
-        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠠⠀⢠⣴⣿⠀⠄⠈⠉⠀⠀⢀⠀⢻⡗⠀⠀⠐⠡⣄⡀⠀⠀⠀⠀", Style::default().fg(ACCENT_SOFT))]),
-        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⣤⠒⢺⣿⣿⣆⠙⠄⢤⠠⠔⠘⢢⣞⠋⠀⢀⣰⣧⣬⡇⠀⠀⠀⠀", Style::default().fg(TEXT))]),
-        Line::from(vec![Span::styled("⠀⠀⠀⠀⠈⠪⡅⠲⢿⢽⣿⣿⣶⣶⣦⣶⣿⠇⠴⠋⠍⢉⣹⣿⠿⠀⠀⠀⠀⠀", Style::default().fg(TEXT))]),
-        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⠰⠆⠁⠀⢈⠉⠹⣹⠈⠁⠀⠆⢰⢆⢀⣾⣾⠉⠀⠀⠀⠀⠀⠀", Style::default().fg(MUTED))]),
-        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⠀⠀⠃⠷⠀⠄⣤⡀⠀⣠⠠⣤⠄⠼⠟⠉⠀⠀⠀⠀⠀⠀⠀⠀", Style::default().fg(MUTED))]),
-        Line::from(vec![Span::styled("⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠁⠈⠀", Style::default().fg(MUTED))]),
+        Line::from(vec![Span::styled(
+            "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⢀⢀⢀⡀",
+            Style::default().fg(MUTED),
+        )]),
+        Line::from(vec![Span::styled(
+            "⠀⠀⠀⠀⠀⠀⠀⠀⢀⠀⡴⠰⠞⠿⠛⠁⠓⠖⠲⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+            Style::default().fg(TEXT),
+        )]),
+        Line::from(vec![Span::styled(
+            "⠀⠀⠀⠀⠀⠀⠀⢸⠆⢁⠶⠿⠇⠹⠁⠸⠷⠏⣈⡀⢰⠀⠈⠀⠀⠀⠀⠀⠀⠀",
+            Style::default().fg(TEXT),
+        )]),
+        Line::from(vec![Span::styled(
+            "⠀⠀⠀⠀⠀⠀⡁⠴⠛⢀⡀⠀⠀⢀⠀⠀⠀⠀⡀⠀⠀⠂⠄⠀⠀⠀⠀⠀⠀⠀",
+            Style::default().fg(ACCENT),
+        )]),
+        Line::from(vec![Span::styled(
+            "⠀⠀⠀⠀⠀⠠⠀⢠⣴⣿⠀⠄⠈⠉⠀⠀⢀⠀⢻⡗⠀⠀⠐⠡⣄⡀⠀⠀⠀⠀",
+            Style::default().fg(ACCENT_SOFT),
+        )]),
+        Line::from(vec![Span::styled(
+            "⠀⠀⠀⠀⠀⣤⠒⢺⣿⣿⣆⠙⠄⢤⠠⠔⠘⢢⣞⠋⠀⢀⣰⣧⣬⡇⠀⠀⠀⠀",
+            Style::default().fg(TEXT),
+        )]),
+        Line::from(vec![Span::styled(
+            "⠀⠀⠀⠀⠈⠪⡅⠲⢿⢽⣿⣿⣶⣶⣦⣶⣿⠇⠴⠋⠍⢉⣹⣿⠿⠀⠀⠀⠀⠀",
+            Style::default().fg(TEXT),
+        )]),
+        Line::from(vec![Span::styled(
+            "⠀⠀⠀⠀⠀⠀⠰⠆⠁⠀⢈⠉⠹⣹⠈⠁⠀⠆⢰⢆⢀⣾⣾⠉⠀⠀⠀⠀⠀⠀",
+            Style::default().fg(MUTED),
+        )]),
+        Line::from(vec![Span::styled(
+            "⠀⠀⠀⠀⠀⠀⠀⠀⠃⠷⠀⠄⣤⡀⠀⣠⠠⣤⠄⠼⠟⠉⠀⠀⠀⠀⠀⠀⠀⠀",
+            Style::default().fg(MUTED),
+        )]),
+        Line::from(vec![Span::styled(
+            "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠁⠈⠀",
+            Style::default().fg(MUTED),
+        )]),
     ])
     .alignment(Alignment::Left);
     frame.render_widget(emblem, logo[0]);
@@ -71,7 +114,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     let title_block = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(root[1]);
 
     let title = Paragraph::new(Line::from(vec![Span::styled(
@@ -114,17 +161,18 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .split(root[3]);
 
     let prompt_block = Paragraph::new(Line::from(vec![
-        Span::styled(
-            ">",
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(">", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
         Span::raw("  "),
         Span::styled(app.prompt_before_cursor(), Style::default().fg(TEXT)),
         Span::styled(CURSOR, Style::default().fg(MUTED)),
         Span::styled(app.prompt_after_cursor(), Style::default().fg(TEXT)),
     ]))
     .alignment(Alignment::Left)
-    .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(BORDER)));
+    .block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(BORDER)),
+    );
     frame.render_widget(prompt_block, input_row[0]);
 
     let command_hint = if app.is_editing_note() {
@@ -149,16 +197,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
     } else {
         // Show auth indicator subtly
         let mut hint_spans = vec![];
-        
+
         if app.is_openrouter_connected() || app.is_strix_connected() {
             hint_spans.push(Span::styled("●", Style::default().fg(ACCENT)));
             hint_spans.push(Span::raw(" "));
         }
-        
+
         hint_spans.push(Span::styled("/ask", Style::default().fg(TEXT)));
         hint_spans.push(Span::raw(" "));
         hint_spans.push(Span::styled("/note", Style::default().fg(MUTED)));
-        
+
         Paragraph::new(Line::from(hint_spans))
             .style(Style::default().fg(MUTED))
             .alignment(Alignment::Right)
@@ -170,236 +218,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         PanelMode::VaultPicker => render_obsidian_vault_picker_panel(frame, app, root[4]),
         PanelMode::NoteList => render_note_list_panel(frame, app, root[4]),
         PanelMode::NoteEditor => render_note_editor_panel(frame, app, root[4]),
-        PanelMode::FullEditor | PanelMode::AiChat => {},
+        PanelMode::Settings => render_settings_panel(frame, app, root[4]),
+        PanelMode::FullEditor | PanelMode::AiChat => {}
     }
-}
-
-fn parse_markdown_spans(text: &str) -> Vec<Span<'_>> {
-    let mut spans = Vec::new();
-    let mut remaining = text;
-
-    while !remaining.is_empty() {
-        if let Some(pos) = remaining.find("**") {
-            if pos > 0 {
-                spans.push(Span::raw(&remaining[..pos]));
-            }
-            remaining = &remaining[pos + 2..];
-            if let Some(end_pos) = remaining.find("**") {
-                spans.push(Span::styled(&remaining[..end_pos], Style::default().add_modifier(Modifier::BOLD)));
-                remaining = &remaining[end_pos + 2..];
-            } else {
-                spans.push(Span::raw("**"));
-                spans.push(Span::raw(remaining));
-                break;
-            }
-        } else if let Some(pos) = remaining.find('*') {
-            if pos > 0 {
-                spans.push(Span::raw(&remaining[..pos]));
-            }
-            remaining = &remaining[pos + 1..];
-            if let Some(end_pos) = remaining.find('*') {
-                spans.push(Span::styled(&remaining[..end_pos], Style::default().add_modifier(Modifier::ITALIC)));
-                remaining = &remaining[end_pos + 1..];
-            } else {
-                spans.push(Span::raw("*"));
-                spans.push(Span::raw(remaining));
-                break;
-            }
-        } else if let Some(pos) = remaining.find('`') {
-            if pos > 0 {
-                spans.push(Span::raw(&remaining[..pos]));
-            }
-            remaining = &remaining[pos + 1..];
-            if let Some(end_pos) = remaining.find('`') {
-                spans.push(Span::styled(&remaining[..end_pos], Style::default().fg(ACCENT_SOFT)));
-                remaining = &remaining[end_pos + 1..];
-            } else {
-                spans.push(Span::raw("`"));
-                spans.push(Span::raw(remaining));
-                break;
-            }
-        } else {
-            spans.push(Span::raw(remaining));
-            break;
-        }
-    }
-
-    if spans.is_empty() {
-        spans.push(Span::raw(text));
-    }
-
-    spans
-}
-
-fn render_markdown_line(line: &str) -> Line<'_> {
-    let mut spans = Vec::new();
-    let mut remaining = line;
-    let trimmed = line.trim_start();
-    let indent_len = line.len() - trimmed.len();
-
-    if trimmed.starts_with("# ") {
-        spans.push(Span::styled(&line[..indent_len + 2], Style::default().fg(ACCENT_SOFT)));
-        spans.push(Span::styled(&trimmed[2..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)));
-        return Line::from(spans);
-    } else if trimmed.starts_with("## ") {
-        spans.push(Span::styled(&line[..indent_len + 3], Style::default().fg(MUTED)));
-        spans.push(Span::styled(&trimmed[3..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD)));
-        return Line::from(spans);
-    } else if trimmed.starts_with("### ") {
-        spans.push(Span::styled(&line[..indent_len + 4], Style::default().fg(MUTED)));
-        spans.push(Span::styled(&trimmed[4..], Style::default().fg(TEXT).add_modifier(Modifier::BOLD | Modifier::ITALIC)));
-        return Line::from(spans);
-    } else if let Some(stripped) = trimmed.strip_prefix("- ") {
-        if indent_len > 0 {
-            spans.push(Span::raw(&line[..indent_len]));
-        }
-        spans.push(Span::styled("• ", Style::default().fg(ACCENT)));
-        remaining = stripped;
-    } else if let Some(stripped) = trimmed.strip_prefix("* ") {
-        if indent_len > 0 {
-            spans.push(Span::raw(&line[..indent_len]));
-        }
-        spans.push(Span::styled("• ", Style::default().fg(ACCENT)));
-        remaining = stripped;
-    } else if let Some(pos) = trimmed.find(". ") {
-        if pos > 0 && trimmed[..pos].chars().all(|c| c.is_ascii_digit()) {
-            if indent_len > 0 {
-                spans.push(Span::raw(&line[..indent_len]));
-            }
-            spans.push(Span::styled(&trimmed[..=pos + 1], Style::default().fg(ACCENT)));
-            remaining = &trimmed[pos + 2..];
-        }
-    }
-
-    while !remaining.is_empty() {
-        if let Some(pos) = remaining.find("**") {
-            if pos > 0 {
-                spans.push(Span::raw(&remaining[..pos]));
-            }
-            remaining = &remaining[pos + 2..];
-            if let Some(end_pos) = remaining.find("**") {
-                spans.push(Span::styled(&remaining[..end_pos], Style::default().add_modifier(Modifier::BOLD)));
-                remaining = &remaining[end_pos + 2..];
-            } else {
-                spans.push(Span::raw("**"));
-                spans.push(Span::raw(remaining));
-                break;
-            }
-        } else if let Some(pos) = remaining.find('*') {
-            if pos > 0 {
-                spans.push(Span::raw(&remaining[..pos]));
-            }
-            remaining = &remaining[pos + 1..];
-            if let Some(end_pos) = remaining.find('*') {
-                spans.push(Span::styled(&remaining[..end_pos], Style::default().add_modifier(Modifier::ITALIC)));
-                remaining = &remaining[end_pos + 1..];
-            } else {
-                spans.push(Span::raw("*"));
-                spans.push(Span::raw(remaining));
-                break;
-            }
-        } else if let Some(pos) = remaining.find('`') {
-            if pos > 0 {
-                spans.push(Span::raw(&remaining[..pos]));
-            }
-            remaining = &remaining[pos + 1..];
-            if let Some(end_pos) = remaining.find('`') {
-                spans.push(Span::styled(&remaining[..end_pos], Style::default().fg(ACCENT_SOFT)));
-                remaining = &remaining[end_pos + 1..];
-            } else {
-                spans.push(Span::raw("`"));
-                spans.push(Span::raw(remaining));
-                break;
-            }
-        } else {
-            spans.push(Span::raw(remaining));
-            break;
-        }
-    }
-
-    if spans.is_empty() {
-        spans.push(Span::raw(line));
-    }
-
-    Line::from(spans)
-}
-
-fn render_markdown_line_with_cursor(line: &str, cursor_in_line: usize, cursor_style: CursorStyle) -> Line<'_> {
-    let cursor_glyph = if cursor_style == CursorStyle::Block {
-        "█"
-    } else {
-        CURSOR
-    };
-
-    let mut spans = Vec::new();
-    let trimmed = line.trim_start();
-    let indent_len = line.len() - trimmed.len();
-    
-    let mut text_start = 0;
-
-    if trimmed.starts_with("# ") {
-        text_start = indent_len + 2;
-    } else if trimmed.starts_with("## ") {
-        text_start = indent_len + 3;
-    } else if trimmed.starts_with("### ") {
-        text_start = indent_len + 4;
-    } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-        text_start = indent_len + 2;
-    } else if let Some(pos) = trimmed.find(". ") {
-        if pos > 0 && trimmed[..pos].chars().all(|c| c.is_ascii_digit()) {
-            text_start = indent_len + pos + 2;
-        }
-    }
-
-    if cursor_in_line < text_start {
-        // Cursor is within the prefix. Render it simply to avoid complex prefix splitting.
-        let mut before_cursor = parse_markdown_spans(&line[..cursor_in_line]);
-        before_cursor.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
-        before_cursor.extend(parse_markdown_spans(&line[cursor_in_line..]));
-        return Line::from(before_cursor);
-    }
-
-    // Apply prefix styling up to text_start
-    let mut remaining = line;
-    let mut prefix_spans = Vec::new();
-
-    if text_start > 0 {
-        if trimmed.starts_with("# ") {
-            prefix_spans.push(Span::styled(&line[..text_start], Style::default().fg(ACCENT_SOFT)));
-        } else if trimmed.starts_with("## ") || trimmed.starts_with("### ") {
-            prefix_spans.push(Span::styled(&line[..text_start], Style::default().fg(MUTED)));
-        } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-            if indent_len > 0 {
-                prefix_spans.push(Span::raw(&line[..indent_len]));
-            }
-            prefix_spans.push(Span::styled("• ", Style::default().fg(ACCENT)));
-        } else if let Some(pos) = trimmed.find(". ") {
-            if indent_len > 0 {
-                prefix_spans.push(Span::raw(&line[..indent_len]));
-            }
-            prefix_spans.push(Span::styled(&trimmed[..=pos + 1], Style::default().fg(ACCENT)));
-        }
-        remaining = &line[text_start..];
-    }
-
-    // Normal markdown parsing for the rest, injecting the cursor
-    let adjusted_cursor = cursor_in_line - text_start;
-    spans.extend(prefix_spans);
-
-    let before_cursor = &remaining[..adjusted_cursor];
-    let after_cursor = &remaining[adjusted_cursor..];
-
-    if trimmed.starts_with("# ") || trimmed.starts_with("## ") || trimmed.starts_with("### ") {
-        spans.push(Span::styled(before_cursor, Style::default().fg(TEXT).add_modifier(Modifier::BOLD)));
-        spans.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
-        spans.push(Span::styled(after_cursor, Style::default().fg(TEXT).add_modifier(Modifier::BOLD)));
-    } else {
-        spans.extend(parse_markdown_spans(before_cursor));
-        spans.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
-        spans.extend(parse_markdown_spans(after_cursor));
-    }
-
-    Line::from(spans)
 }
 
 fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
@@ -431,12 +252,17 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let editor_content_area = h_chunks[1];
 
     let title = app.editor_note_title().unwrap_or("Untitled");
-    let word_count = editor_word_count(app.editor_buffer());
+
+    // Get original and proposed text for diff rendering
+    let original_text = app.editor_buffer();
+    let editor_text = app.editor_display_buffer();
+    let is_ai_preview = app.has_live_ai_editor_preview();
+    let word_count = editor_word_count(editor_text);
 
     let meta_style = if app.save_shimmer_ticks() > 0 {
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(MUTED)
+        Style::default().fg(EDITOR_MUTED)
     };
 
     let mut meta_spans = vec![];
@@ -445,14 +271,27 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
         // Show title editing mode
         let cursor = app.title_cursor().min(app.title_buffer().len());
         meta_spans.push(Span::styled("Title: ", Style::default().fg(ACCENT)));
-        meta_spans.push(Span::styled(&app.title_buffer()[..cursor], Style::default().fg(TEXT)));
+        meta_spans.push(Span::styled(
+            &app.title_buffer()[..cursor],
+            Style::default().fg(EDITOR_TEXT),
+        ));
         meta_spans.push(Span::styled(CURSOR, Style::default().fg(ACCENT)));
-        meta_spans.push(Span::styled(&app.title_buffer()[cursor..], Style::default().fg(TEXT)));
+        meta_spans.push(Span::styled(
+            &app.title_buffer()[cursor..],
+            Style::default().fg(EDITOR_TEXT),
+        ));
         meta_spans.push(Span::raw("  "));
-        meta_spans.push(Span::styled("(Enter to save, Esc to cancel)", Style::default().fg(MUTED)));
+        meta_spans.push(Span::styled(
+            "(Enter to save, Esc to cancel)",
+            Style::default().fg(EDITOR_MUTED),
+        ));
     } else {
         meta_spans.push(Span::styled(
-            format!("{} / Draft / {} words", title, word_count),
+            if app.has_live_ai_editor_preview() {
+                format!("{} / AI preview / {} words", title, word_count)
+            } else {
+                format!("{} / Draft / {} words", title, word_count)
+            },
             meta_style,
         ));
     }
@@ -461,13 +300,15 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
         meta_spans.push(Span::raw("  "));
         meta_spans.push(Span::styled(
             format!("Find: {}", app.search_state().query),
-            Style::default().fg(ACCENT_SOFT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(ACCENT_SOFT)
+                .add_modifier(Modifier::BOLD),
         ));
         if let Some(current) = app.search_state().current_match {
             let total = app.search_state().matches.len();
             meta_spans.push(Span::styled(
                 format!(" ({}/{})", current + 1, total),
-                Style::default().fg(MUTED),
+                Style::default().fg(EDITOR_MUTED),
             ));
         }
     }
@@ -475,7 +316,7 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let top_meta = Paragraph::new(Line::from(meta_spans)).alignment(Alignment::Left);
     frame.render_widget(top_meta, v_chunks[0]);
 
-    let cursor = app.editor_cursor().min(app.editor_buffer().len());
+    let cursor = app.editor_display_cursor().min(editor_text.len());
 
     let wrap_setting = if app.editor_word_wrap() {
         Wrap { trim: false }
@@ -488,42 +329,99 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let mut cursor_visual_row: Option<u16> = None;
     let mut cursor_visual_col: u16 = 0;
     let mut visual_row: u16 = 0;
+    let selection = app.editor_selection();
+    let has_selection = selection.active && !is_ai_preview;
 
-    for line_text in app.editor_buffer().lines() {
-        let line_len = line_text.len();
-        let line_start = char_pos;
-        let line_end = char_pos + line_len;
+    // Use diff rendering for AI preview, otherwise normal rendering
+    if is_ai_preview {
+        // Render diff view
+        let diff_lines = compute_line_diff(original_text, editor_text);
+        for (line_text, line_type) in diff_lines {
+            lines.push(render_diff_line(line_text, line_type));
+        }
+    } else {
+        // Normal rendering with selection support
+        for line_text in editor_text.lines() {
+            let line_len = line_text.len();
+            let line_start = char_pos;
+            let line_end = char_pos + line_len;
 
-        if line_text.starts_with("# ") && line_start > 0 {
-            lines.push(Line::from(""));
+            if line_text.starts_with("# ") && line_start > 0 {
+                lines.push(Line::from(""));
+                visual_row = visual_row.saturating_add(1);
+            }
+
+            if cursor >= line_start && cursor <= line_end {
+                let cursor_in_line = cursor - line_start;
+                cursor_visual_row = Some(visual_row);
+                cursor_visual_col = line_text[..cursor_in_line].chars().count() as u16;
+
+                if has_selection {
+                    lines.push(render_markdown_line_with_selection(
+                        line_text,
+                        cursor_in_line,
+                        app.editor_cursor_style(),
+                        selection,
+                        line_start,
+                    ));
+                } else {
+                    lines.push(render_markdown_line_with_cursor(
+                        line_text,
+                        cursor_in_line,
+                        app.editor_cursor_style(),
+                    ));
+                }
+            } else if has_selection && selection.end > line_start && selection.start < line_end {
+                // Selection covers this line but cursor is elsewhere
+                lines.push(render_markdown_line_with_selection(
+                    line_text,
+                    0, // cursor not in this line
+                    app.editor_cursor_style(),
+                    selection,
+                    line_start,
+                ));
+            } else {
+                lines.push(render_markdown_line(line_text));
+            }
             visual_row = visual_row.saturating_add(1);
+
+            if line_text.starts_with("# ") {
+                lines.push(Line::from(""));
+                visual_row = visual_row.saturating_add(1);
+            }
+
+            char_pos += line_len + 1;
         }
 
-        if cursor >= line_start && cursor <= line_end {
-            let cursor_in_line = cursor - line_start;
-            cursor_visual_row = Some(visual_row);
-            cursor_visual_col = line_text[..cursor_in_line].chars().count() as u16;
-            
-            lines.push(render_markdown_line_with_cursor(line_text, cursor_in_line, app.editor_cursor_style()));
-        } else {
-            lines.push(render_markdown_line(line_text));
+        if editor_text.is_empty() {
+            if has_selection {
+                lines.push(render_markdown_line_with_selection(
+                    "",
+                    0,
+                    app.editor_cursor_style(),
+                    selection,
+                    0,
+                ));
+            } else {
+                lines.push(render_markdown_line_with_cursor(
+                    "",
+                    0,
+                    app.editor_cursor_style(),
+                ));
+            }
         }
-        visual_row = visual_row.saturating_add(1);
-
-        if line_text.starts_with("# ") {
-            lines.push(Line::from(""));
-            visual_row = visual_row.saturating_add(1);
-        }
-
-        char_pos += line_len + 1;
     }
 
-    let cursor_line = app.editor_buffer()[..cursor.min(app.editor_buffer().len())]
+    let cursor_line = editor_text[..cursor.min(editor_text.len())]
         .chars()
         .filter(|&c| c == '\n')
         .count();
 
-    let total_lines = app.editor_buffer().lines().count().max(1);
+    let total_lines = if is_ai_preview {
+        lines.len().max(1)
+    } else {
+        editor_text.lines().count().max(1)
+    };
     let visible_lines = editor_content_area.height as usize;
 
     let mut effective_scroll_offset = app.editor_scroll_offset();
@@ -532,7 +430,8 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     } else if cursor_line >= effective_scroll_offset + visible_lines {
         effective_scroll_offset = cursor_line.saturating_sub(visible_lines - 1);
     }
-    effective_scroll_offset = effective_scroll_offset.min(total_lines.saturating_sub(visible_lines));
+    effective_scroll_offset =
+        effective_scroll_offset.min(total_lines.saturating_sub(visible_lines));
 
     let paragraph = Paragraph::new(lines)
         .wrap(wrap_setting)
@@ -545,7 +444,7 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
             .constraints([
                 Constraint::Length(left_padding + center_width),
                 Constraint::Length(1),
-                Constraint::Min(0)
+                Constraint::Min(0),
             ])
             .split(v_chunks[2])[1];
 
@@ -561,30 +460,43 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let hints = Span::styled(
-        "Tab edit title · Ctrl+S save · Ctrl+F find · Ctrl+Space ghost",
-        Style::default().fg(MUTED),
+        if app.has_live_ai_editor_preview() {
+            "Enter accept AI preview · Ctrl+R reject · Esc reject"
+        } else {
+            "Tab edit title · Ctrl+S save · Ctrl+F find · Ctrl+Space ghost"
+        },
+        Style::default().fg(if app.has_live_ai_editor_preview() {
+            ACCENT_SOFT
+        } else {
+            MUTED
+        }),
     );
-    let bottom_hints = Paragraph::new(Line::from(hints))
-        .alignment(Alignment::Right);
+    let bottom_hints = Paragraph::new(Line::from(hints)).alignment(Alignment::Right);
     frame.render_widget(bottom_hints, v_chunks[4]);
 
     if app.ai_overlay_visible() {
         let cursor_row = cursor_visual_row
             .unwrap_or(0)
             .saturating_sub(effective_scroll_offset as u16);
-        render_ai_overlay(frame, app, editor_content_area, cursor_row, cursor_visual_col);
+        render_ai_overlay(
+            frame,
+            app,
+            editor_content_area,
+            cursor_row,
+            cursor_visual_col,
+        );
     }
 }
 
 fn render_ai_overlay(frame: &mut Frame, app: &App, area: Rect, cursor_row: u16, cursor_col: u16) {
     let messages = app.chat_messages();
-    
+
     // Expand significantly if there's a long conversation
     let is_extended = messages.len() > 3;
-    
+
     let base_width = if is_extended { 60 } else { 42 };
     let base_height = if is_extended { 20 } else { 10 };
-    
+
     let width = area.width.saturating_sub(4).min(base_width);
     let height = area.height.saturating_sub(4).min(base_height);
 
@@ -652,62 +564,100 @@ fn render_ai_overlay(frame: &mut Frame, app: &App, area: Rect, cursor_row: u16, 
 
     let mut lines: Vec<Line> = Vec::new();
 
-    if messages.is_empty() && !app.is_ghost_streaming() && app.ghost_result().is_none() {
-        lines.push(Line::from(""));
+    if app.has_pending_ai_edit() {
+        lines.push(Line::from(vec![Span::styled(
+            format!("  {}", app.pending_ai_proposal_label()),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )]));
         lines.push(Line::from(vec![
-            Span::styled("  Type an instruction for the Ghost", Style::default().fg(MUTED)),
+            Span::styled("  Enter", Style::default().fg(ACCENT_SOFT)),
+            Span::styled(" apply  ", Style::default().fg(MUTED)),
+            Span::styled("Ctrl+R", Style::default().fg(ACCENT_SOFT)),
+            Span::styled(" reject", Style::default().fg(MUTED)),
         ]));
+        if let Some(instruction) = app.pending_ai_instruction() {
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {}", instruction),
+                Style::default().fg(MUTED),
+            )]));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "  Preview is shown directly in the editor.",
+            Style::default().fg(MUTED),
+        )]));
+    } else if messages.is_empty() && !app.is_ghost_streaming() && app.ghost_result().is_none() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "  Type an instruction for the AI editor",
+            Style::default().fg(MUTED),
+        )]));
         lines.push(Line::from(vec![
             Span::styled("  e.g. ", Style::default().fg(MUTED)),
             Span::styled("\"make it more concise\"", Style::default().fg(ACCENT_SOFT)),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  e.g. ", Style::default().fg(MUTED)),
-            Span::styled("\"add a summary section\"", Style::default().fg(ACCENT_SOFT)),
+            Span::styled(
+                "\"add a summary section\"",
+                Style::default().fg(ACCENT_SOFT),
+            ),
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("  Esc", Style::default().fg(ACCENT_SOFT)),
+            Span::styled("  Enter", Style::default().fg(ACCENT_SOFT)),
+            Span::styled(" propose edits  ", Style::default().fg(MUTED)),
+            Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
             Span::styled(" dismiss", Style::default().fg(MUTED)),
         ]));
     } else if app.is_ghost_streaming() {
         let frame_char = GHOST_FRAMES[(app.tick() as usize) % GHOST_FRAMES.len()];
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {} Ghost is thinking...", frame_char),
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        if let Some(partial) = app.ghost_result() {
-            let preview: String = partial.chars().take(120).collect();
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {}…", preview), Style::default().fg(MUTED)),
-            ]));
-        }
+        lines.push(Line::from(vec![Span::styled(
+            format!("  {} Ghost is thinking...", frame_char),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "  Drafting live in the editor...",
+            Style::default().fg(MUTED),
+        )]));
     } else if let Some(result) = app.ghost_result() {
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("  Ghost:", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "  AI editor:",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )]));
         for line in result.lines().take(8) {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {}", line), Style::default().fg(TEXT)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {}", line),
+                Style::default().fg(TEXT),
+            )]));
         }
     } else {
         // If extended, show more messages, otherwise show latest 2
         let take_count = if is_extended { 6 } else { 2 };
-        for message in messages.iter().rev().take(take_count).collect::<Vec<_>>().into_iter().rev() {
-            let speaker = if message.role == "user" { "You:" } else { "Ghost:" };
-            let color = if message.role == "user" { ACCENT_SOFT } else { ACCENT };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    speaker,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-            ]));
+        for message in messages
+            .iter()
+            .rev()
+            .take(take_count)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            let speaker = if message.role == "user" {
+                "You:"
+            } else {
+                "Ghost:"
+            };
+            let color = if message.role == "user" {
+                ACCENT_SOFT
+            } else {
+                ACCENT
+            };
+            lines.push(Line::from(vec![Span::styled(
+                speaker,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )]));
 
             for content_line in message.content.lines() {
                 if content_line.is_empty() {
@@ -773,26 +723,36 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let mut ghost_lines = vec![
-            Line::from(""),
-        ];
+        let mut ghost_lines = vec![Line::from("")];
 
         // Show contextual prompt based on authentication status
         if app.is_openrouter_connected() || app.is_strix_connected() {
             ghost_lines.push(Line::from(vec![
                 Span::styled("  Type ", Style::default().fg(MUTED)),
-                Span::styled("/", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                Span::styled(" to see commands, or just ask a question", Style::default().fg(MUTED)),
+                Span::styled(
+                    "/",
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " to see commands, or just ask a question",
+                    Style::default().fg(MUTED),
+                ),
             ]));
             ghost_lines.push(Line::from(""));
             ghost_lines.push(Line::from(vec![
                 Span::styled("  Try: ", Style::default().fg(MUTED)),
-                Span::styled("/ask  /note list  /memory search", Style::default().fg(ACCENT_SOFT)),
+                Span::styled(
+                    "/ask  /note list  /memory search",
+                    Style::default().fg(ACCENT_SOFT),
+                ),
             ]));
         } else {
             ghost_lines.push(Line::from(vec![
                 Span::styled("  Type ", Style::default().fg(MUTED)),
-                Span::styled("/login", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "/login",
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" to get started, or ", Style::default().fg(MUTED)),
                 Span::styled("/", Style::default().fg(ACCENT)),
                 Span::styled(" for commands", Style::default().fg(MUTED)),
@@ -800,12 +760,14 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
             ghost_lines.push(Line::from(""));
             ghost_lines.push(Line::from(vec![
                 Span::styled("  Available: ", Style::default().fg(MUTED)),
-                Span::styled("/note list  /obsidian pair  /status", Style::default().fg(ACCENT_SOFT)),
+                Span::styled(
+                    "/note list  /obsidian pair  /status",
+                    Style::default().fg(ACCENT_SOFT),
+                ),
             ]));
         }
 
-        let ghost_text = Paragraph::new(ghost_lines)
-        .style(Style::default().fg(MUTED));
+        let ghost_text = Paragraph::new(ghost_lines).style(Style::default().fg(MUTED));
         frame.render_widget(ghost_text, inner);
         return;
     }
@@ -905,7 +867,7 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
         let content: Vec<Line> = app
             .panel_lines()
             .iter()
-            .map(|line| render_markdown_line(line))
+            .map(|line| render_panel_markdown_line(line))
             .collect();
         let paragraph = Paragraph::new(content).wrap(Wrap { trim: false });
         frame.render_widget(paragraph, inner);
@@ -962,7 +924,11 @@ fn render_connection_panel(
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(inner);
 
     let header = Paragraph::new(intro)
@@ -1022,11 +988,11 @@ fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect) {
     // Header
     let header = Paragraph::new(vec![
         Line::from(vec![Span::styled(
-            "Choose your AI provider",
+            "Choose connection",
             Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
         )]),
         Line::from(vec![Span::styled(
-            "Select how you want Aleph to connect to AI models.",
+            "Connect a Strix account or configure a model provider.",
             Style::default().fg(MUTED),
         )]),
     ])
@@ -1042,14 +1008,18 @@ fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect) {
         Row::new(vec![
             Cell::from(Span::styled(
                 if is_openrouter_selected { "▶" } else { " " },
-                Style::default().fg(if is_openrouter_selected { ACCENT } else { MUTED }),
+                Style::default().fg(if is_openrouter_selected {
+                    ACCENT
+                } else {
+                    MUTED
+                }),
             )),
             Cell::from(Span::styled(
                 "OpenRouter",
                 Style::default().fg(if is_openrouter_selected { TEXT } else { MUTED }),
             )),
             Cell::from(Span::styled(
-                "Browser-based login (Easy, recommended)",
+                "Model provider API key",
                 Style::default().fg(MUTED),
             )),
         ]),
@@ -1063,7 +1033,7 @@ fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(if is_strix_selected { TEXT } else { MUTED }),
             )),
             Cell::from(Span::styled(
-                "Browser login to your Strix account",
+                "Sign in to sync Strix and use Strix AI",
                 Style::default().fg(MUTED),
             )),
         ]),
@@ -1071,18 +1041,22 @@ fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     let selector_table = Table::new(
         selector_rows,
-        [Constraint::Length(3), Constraint::Length(15), Constraint::Min(0)],
+        [
+            Constraint::Length(3),
+            Constraint::Length(15),
+            Constraint::Min(0),
+        ],
     )
     .column_spacing(1)
     .style(Style::default().fg(TEXT));
-    
+
     // Highlight the selected row
     let mut table_state = ratatui::widgets::TableState::default();
     table_state.select(Some(app.login_picker_selected()));
     frame.render_stateful_widget(
         selector_table.row_highlight_style(Style::default().bg(BORDER).fg(TEXT)),
         sections[1],
-        &mut table_state
+        &mut table_state,
     );
 
     // Status / Help block
@@ -1093,16 +1067,17 @@ fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(status_block, sections[2]);
 
     let mut status_lines = Vec::new();
-    
+
     if is_openrouter_selected {
         if app.is_openrouter_login_pending() {
-            let pulse = crate::app::THINKING_FRAMES[(app.tick() as usize) % crate::app::THINKING_FRAMES.len()];
+            let pulse = crate::app::THINKING_FRAMES
+                [(app.tick() as usize) % crate::app::THINKING_FRAMES.len()];
             status_lines.push(Line::from(vec![Span::styled(
-                format!("{} Waiting for browser login...", pulse),
+                format!("{} Waiting for OpenRouter authorization...", pulse),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             )]));
             status_lines.push(Line::from(vec![Span::styled(
-                "Please complete the sign-in process in your browser.",
+                "Please complete authorization in your browser.",
                 Style::default().fg(MUTED),
             )]));
             status_lines.push(Line::from(vec![Span::styled(
@@ -1111,18 +1086,19 @@ fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect) {
             )]));
         } else {
             status_lines.push(Line::from(vec![Span::styled(
-                "OpenRouter provides access to models like Claude 3.5, GPT-4o, and Llama 3.",
+                "OpenRouter can be used as Aleph's external model provider.",
                 Style::default().fg(MUTED),
             )]));
             status_lines.push(Line::from(""));
             status_lines.push(Line::from(vec![Span::styled(
-                "Press Enter to open your browser and authenticate.",
+                "Press Enter to open your browser and authorize an API key.",
                 Style::default().fg(TEXT),
             )]));
         }
     } else {
         if app.is_strix_login_pending() {
-            let pulse = crate::app::THINKING_FRAMES[(app.tick() as usize) % crate::app::THINKING_FRAMES.len()];
+            let pulse = crate::app::THINKING_FRAMES
+                [(app.tick() as usize) % crate::app::THINKING_FRAMES.len()];
             status_lines.push(Line::from(vec![Span::styled(
                 format!("{} Waiting for Strix browser login...", pulse),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -1199,11 +1175,11 @@ fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
     // Header
     let header = Paragraph::new(vec![
         Line::from(vec![Span::styled(
-            "Choose your AI provider",
+            "Choose model provider",
             Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
         )]),
         Line::from(vec![Span::styled(
-            "Select OpenRouter for external AI or Strix for internal gateway",
+            "Select OpenRouter or Strix as your model provider",
             Style::default().fg(MUTED),
         )]),
     ])
@@ -1227,7 +1203,7 @@ fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(if is_openrouter { TEXT } else { MUTED }),
             )),
             Cell::from(Span::styled(
-                "External AI via API key",
+                "External models via API key",
                 Style::default().fg(MUTED),
             )),
         ]),
@@ -1241,7 +1217,7 @@ fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(if is_strix { TEXT } else { MUTED }),
             )),
             Cell::from(Span::styled(
-                "Native auth token",
+                "Strix account and gateway",
                 Style::default().fg(MUTED),
             )),
         ]),
@@ -1249,7 +1225,11 @@ fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     let selector_table = Table::new(
         selector_rows,
-        [Constraint::Length(3), Constraint::Length(14), Constraint::Min(0)],
+        [
+            Constraint::Length(3),
+            Constraint::Length(14),
+            Constraint::Min(0),
+        ],
     )
     .column_spacing(1)
     .style(Style::default().fg(TEXT));
@@ -1261,11 +1241,18 @@ fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     if logs.is_empty() {
         log_lines.push(Line::from(vec![Span::styled(
-            "No activity yet. Run /login to authenticate.",
+            "No activity yet. Run /login strix or /login openrouter <key>.",
             Style::default().fg(MUTED),
         )]));
     } else {
-        for log in logs.iter().rev().take(20).collect::<Vec<_>>().into_iter().rev() {
+        for log in logs
+            .iter()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
             log_lines.push(Line::from(vec![Span::styled(
                 log,
                 Style::default().fg(TEXT),
@@ -1274,7 +1261,10 @@ fn render_strix_sign_in_panel(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let logs_block = Block::default()
-        .title(Span::styled("Activity Log", Style::default().fg(ACCENT_SOFT)))
+        .title(Span::styled(
+            "Activity Log",
+            Style::default().fg(ACCENT_SOFT),
+        ))
         .borders(Borders::TOP)
         .border_style(Style::default().fg(BORDER));
     let logs_inner = logs_block.inner(sections[2]);
@@ -1351,7 +1341,11 @@ fn render_obsidian_vault_picker_panel(frame: &mut Frame, app: &App, area: Rect) 
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(inner);
 
     let header = Paragraph::new(vec![
@@ -1390,7 +1384,10 @@ fn render_obsidian_vault_picker_panel(frame: &mut Frame, app: &App, area: Rect) 
             })
             .collect()
     };
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), sections[1]);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        sections[1],
+    );
 
     let footer = Paragraph::new(Line::from(vec![
         Span::styled("Enter", Style::default().fg(ACCENT)),
@@ -1413,6 +1410,10 @@ fn render_note_list_panel(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(BORDER));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
 
     let selected = app
         .note_list_selected()
@@ -1437,7 +1438,35 @@ fn render_note_list_panel(frame: &mut Frame, app: &App, area: Rect) {
     if !app.panel_lines().is_empty() {
         table_state.select(Some(selected));
     }
-    frame.render_stateful_widget(table, inner, &mut table_state);
+    frame.render_stateful_widget(table, sections[0], &mut table_state);
+
+    let footer = if app.note_list_delete_is_pending() {
+        Line::from(vec![
+            Span::styled("Delete", Style::default().fg(Color::Rgb(209, 118, 128))),
+            Span::raw(" confirm · "),
+            Span::styled("Enter", Style::default().fg(Color::Rgb(209, 118, 128))),
+            Span::raw(" confirm · "),
+            Span::styled("d", Style::default().fg(Color::Rgb(209, 118, 128))),
+            Span::raw(" confirm · "),
+            Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
+            Span::raw(" cancel"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(ACCENT)),
+            Span::raw(" open · "),
+            Span::styled("Delete", Style::default().fg(ACCENT_SOFT)),
+            Span::raw(" delete · "),
+            Span::styled("Esc", Style::default().fg(MUTED)),
+            Span::raw(" close"),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(footer)
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(MUTED)),
+        sections[1],
+    );
 }
 
 fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
@@ -1446,15 +1475,18 @@ fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
         .map(|note| format!("Editing: {}", note))
         .unwrap_or_else(|| String::from("Editing note"));
 
-    let mut title_spans = vec![
-        Span::styled(base_title, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-    ];
+    let mut title_spans = vec![Span::styled(
+        base_title,
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    )];
 
     if app.search_state().active {
         title_spans.push(Span::raw("  "));
         title_spans.push(Span::styled(
             format!("Find: {}", app.search_state().query),
-            Style::default().fg(ACCENT_SOFT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(ACCENT_SOFT)
+                .add_modifier(Modifier::BOLD),
         ));
         if let Some(current) = app.search_state().current_match {
             let total = app.search_state().matches.len();
@@ -1479,7 +1511,11 @@ fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(h_chunks[0]);
 
     let helper = Paragraph::new(Line::from(vec![
@@ -1521,7 +1557,11 @@ fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
         if cursor >= line_start && cursor <= line_end {
             // Cursor is on this line
             let cursor_in_line = cursor - line_start;
-            lines.push(render_markdown_line_with_cursor(line_text, cursor_in_line, app.editor_cursor_style()));
+            lines.push(render_markdown_line_with_cursor(
+                line_text,
+                cursor_in_line,
+                app.editor_cursor_style(),
+            ));
         } else {
             lines.push(render_markdown_line(line_text));
         }
@@ -1553,7 +1593,8 @@ fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
         effective_scroll_offset = cursor_line.saturating_sub(visible_lines - 1);
     }
     // Clamp to valid range
-    effective_scroll_offset = effective_scroll_offset.min(total_lines.saturating_sub(visible_lines));
+    effective_scroll_offset =
+        effective_scroll_offset.min(total_lines.saturating_sub(visible_lines));
 
     let paragraph = Paragraph::new(lines)
         .wrap(wrap_setting)
@@ -1630,14 +1671,32 @@ fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(MUTED)
     };
 
-    let title = if app.is_streaming() {
-        format!("Aleph Chat {} streaming...", app.thinking_frame())
-    } else if app.is_thinking() {
-        format!("Aleph {} focusing...", app.thinking_frame())
-    } else if app.is_openrouter_connected() {
-        String::from("Aleph Chat · OpenRouter connected")
+    let mode_label = if app.is_agent_mode_enabled() {
+        "Agent"
     } else {
-        String::from("Aleph Chat · OpenRouter offline")
+        "Chat"
+    };
+    let provider_connected = match app.ai_provider() {
+        AiProvider::OpenRouter => app.is_openrouter_connected(),
+        AiProvider::Strix => app.is_strix_connected(),
+    };
+    let provider_status = if provider_connected {
+        "connected"
+    } else {
+        "offline"
+    };
+
+    let title = if app.is_streaming() {
+        format!("Aleph {} {} streaming...", mode_label, app.thinking_frame())
+    } else if app.is_thinking() {
+        format!("Aleph {} {} focusing...", mode_label, app.thinking_frame())
+    } else {
+        format!(
+            "Aleph {} · {} {}",
+            mode_label,
+            app.ai_provider_label(),
+            provider_status
+        )
     };
 
     let top_meta = Paragraph::new(Line::from(vec![Span::styled(title, meta_style)]))
@@ -1647,12 +1706,10 @@ fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line<'static>> = app.chat_render_lines().to_vec();
     if app.is_streaming() {
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{} typing...", app.thinking_frame()),
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("{} typing...", app.thinking_frame()),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )]));
     }
 
     let wrap_setting = Wrap { trim: false };
@@ -1673,7 +1730,10 @@ fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let after_cursor = &input_buffer[cursor..];
 
     let input_line = Paragraph::new(Line::from(vec![
-        Span::styled("> ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "> ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(before_cursor, Style::default().fg(TEXT)),
         Span::styled(CURSOR, Style::default().fg(MUTED)),
         Span::styled(after_cursor, Style::default().fg(TEXT)),
@@ -1685,13 +1745,232 @@ fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" send · "),
         Span::styled("PgUp/PgDn", Style::default().fg(ACCENT_SOFT)),
         Span::raw(" scroll · "),
+        Span::styled("Ctrl+G", Style::default().fg(ACCENT_SOFT)),
+        Span::raw(" mode · "),
         Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
         Span::raw(" exit · "),
         Span::styled("Ctrl+C", Style::default().fg(ACCENT)),
         Span::raw(" quit"),
     ];
-    let bottom_hints = Paragraph::new(Line::from(hints_spans)).alignment(Alignment::Right).style(Style::default().fg(MUTED));
+    let bottom_hints = Paragraph::new(Line::from(hints_spans))
+        .alignment(Alignment::Right)
+        .style(Style::default().fg(MUTED));
     frame.render_widget(bottom_hints, hints_area);
+}
+
+fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            app.panel_title(),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER))
+        .style(Style::default().bg(PANEL));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let header = Paragraph::new(vec![Line::from(vec![Span::styled(
+        "Manage your connections, model provider, and preferences",
+        Style::default().fg(MUTED),
+    )])]);
+    frame.render_widget(header, sections[0]);
+
+    let selected = app.settings_selected();
+    let model_provider_label = match app.ai_provider() {
+        crate::app::AiProvider::OpenRouter => {
+            if app.is_openrouter_connected() {
+                "OpenRouter (connected)"
+            } else {
+                "OpenRouter (login required)"
+            }
+        }
+        crate::app::AiProvider::Strix => {
+            if app.is_strix_connected() {
+                "Strix (connected)"
+            } else {
+                "Strix (login required)"
+            }
+        }
+    };
+
+    let settings_items: Vec<(String, String, bool)> = vec![
+        (
+            "Model Provider".to_string(),
+            format!("{} (Enter to cycle)", model_provider_label),
+            true,
+        ),
+        (
+            "Mode".to_string(),
+            if app.is_agent_mode_enabled() {
+                "Agent (tool routing on)".to_string()
+            } else {
+                "Chat (answers only)".to_string()
+            },
+            true,
+        ),
+        (
+            "Save Notes".to_string(),
+            format!("{} (Enter to cycle)", app.note_save_target_label()),
+            true,
+        ),
+        (
+            "Obsidian Vault".to_string(),
+            if app.obsidian_vault_path().is_some() {
+                "Paired".to_string()
+            } else {
+                "Not paired".to_string()
+            },
+            app.obsidian_vault_path().is_some(),
+        ),
+        (
+            "Sign out".to_string(),
+            "Clear all saved credentials".to_string(),
+            app.is_openrouter_connected() || app.is_strix_connected(),
+        ),
+        (
+            "Reset & Clear".to_string(),
+            "Clear cache and reset all settings".to_string(),
+            true,
+        ),
+        ("Close".to_string(), "Exit settings".to_string(), true),
+    ];
+
+    let lines: Vec<Line> = settings_items
+        .iter()
+        .enumerate()
+        .map(|(index, (name, value, _))| {
+            let marker = if index == selected { "▶ " } else { "  " };
+            let name_style = if index == selected {
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT)
+            };
+            let value_style = if index == selected {
+                Style::default().fg(ACCENT)
+            } else {
+                Style::default().fg(MUTED)
+            };
+            Line::from(vec![
+                Span::styled(marker, Style::default().fg(ACCENT)),
+                Span::styled(format!("{:<15}", name), name_style),
+                Span::styled(value, value_style),
+            ])
+        })
+        .collect();
+
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        sections[1],
+    );
+
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("↑/↓", Style::default().fg(ACCENT)),
+        Span::raw(" navigate · "),
+        Span::styled("Enter", Style::default().fg(ACCENT)),
+        Span::raw(" select · "),
+        Span::styled("Esc", Style::default().fg(MUTED)),
+        Span::raw(" close"),
+    ]))
+    .alignment(Alignment::Right)
+    .style(Style::default().fg(MUTED));
+    frame.render_widget(footer, sections[2]);
+}
+
+/// Represents a line in a diff view
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffLineType {
+    Unchanged,
+    Added,
+    Removed,
+}
+
+/// Compute a simple line-based diff between original and proposed text
+/// Returns a Vec of (line_text, line_type) tuples
+fn compute_line_diff<'a>(original: &'a str, proposed: &'a str) -> Vec<(&'a str, DiffLineType)> {
+    let original_lines: Vec<&str> = original.lines().collect();
+    let proposed_lines: Vec<&str> = proposed.lines().collect();
+
+    let mut result = Vec::new();
+    let mut orig_idx = 0;
+    let mut prop_idx = 0;
+
+    while orig_idx < original_lines.len() || prop_idx < proposed_lines.len() {
+        match (original_lines.get(orig_idx), proposed_lines.get(prop_idx)) {
+            (Some(orig), Some(prop)) => {
+                if orig == prop {
+                    result.push((*orig, DiffLineType::Unchanged));
+                    orig_idx += 1;
+                    prop_idx += 1;
+                } else {
+                    // Check if this line was replaced or just added/removed
+                    // Simple heuristic: if next proposed line matches current original, this is a removal
+                    if orig_idx + 1 < original_lines.len()
+                        && original_lines.get(orig_idx + 1) == Some(prop)
+                    {
+                        result.push((*orig, DiffLineType::Removed));
+                        orig_idx += 1;
+                    } else if prop_idx + 1 < proposed_lines.len()
+                        && proposed_lines.get(prop_idx + 1) == Some(orig)
+                    {
+                        result.push((*prop, DiffLineType::Added));
+                        prop_idx += 1;
+                    } else {
+                        // Treat as replacement: show removed then added
+                        result.push((*orig, DiffLineType::Removed));
+                        result.push((*prop, DiffLineType::Added));
+                        orig_idx += 1;
+                        prop_idx += 1;
+                    }
+                }
+            }
+            (Some(orig), None) => {
+                result.push((*orig, DiffLineType::Removed));
+                orig_idx += 1;
+            }
+            (None, Some(prop)) => {
+                result.push((*prop, DiffLineType::Added));
+                prop_idx += 1;
+            }
+            (None, None) => break,
+        }
+    }
+
+    result
+}
+
+/// Render a diff line with appropriate styling
+fn render_diff_line(line_text: &str, line_type: DiffLineType) -> Line<'_> {
+    match line_type {
+        DiffLineType::Unchanged => render_markdown_line(line_text),
+        DiffLineType::Added => {
+            let style = Style::default().fg(DIFF_ADDED_FG).bg(DIFF_ADDED_BG);
+            Line::from(vec![
+                Span::styled("+ ", style.add_modifier(Modifier::BOLD)),
+                Span::styled(line_text, style),
+            ])
+        }
+        DiffLineType::Removed => {
+            let style = Style::default()
+                .fg(DIFF_REMOVED_FG)
+                .bg(DIFF_REMOVED_BG)
+                .add_modifier(Modifier::CROSSED_OUT);
+            Line::from(vec![
+                Span::styled("- ", style.add_modifier(Modifier::BOLD)),
+                Span::styled(line_text, style),
+            ])
+        }
+    }
 }
 
 #[cfg(test)]
