@@ -2,6 +2,26 @@
 name = "aleph"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
+authors = ["Shubhankar Dixit"]
+description = "TUI for your notes — Obsidian vaults, Strix sync, and connect with Codex/Claude Code/etc. to manage your knowledge from the terminal."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Shubhankar-Dixit/Aleph"
+homepage = "https://github.com/Shubhankar-Dixit/Aleph"
+keywords = ["tui", "notes", "obsidian", "strix", "cli"]
+categories = ["command-line-utilities"]
+exclude = [
+    "aleph_idea.md",
+    "Ideas.md",
+    "ideas2.md",
+    "HOWTOTHINK.md",
+    "ascii.md",
+    "ascii-eye2.md",
+    "strix-agents.md",
+    "TODOS.md",
+    "SECURITY.MD",
+]
 
 [dependencies]
 anyhow = "1"
