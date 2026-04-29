@@ -20,237 +20,11 @@ use ratatui::prelude::{Color, Line, Modifier, Span, Style};
 use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum AiProvider {
-    OpenRouter,
-    Strix,
-}
+mod commands;
+mod model;
 
-#[derive(Clone, Copy)]
-pub struct CommandSpec {
-    pub name: &'static str,
-    pub description: &'static str,
-}
-
-#[derive(Clone)]
-pub struct Folder {
-    pub id: usize,
-    pub name: String,
-    pub parent_id: Option<usize>,
-}
-
-#[derive(Clone)]
-pub struct Note {
-    pub id: usize,
-    pub remote_id: Option<String>,
-    pub obsidian_path: Option<PathBuf>,
-    pub title: String,
-    pub content: String,
-    pub raw_content: String,
-    pub updated_at: String,
-    pub folder_id: Option<usize>,
-}
-
-#[derive(Clone)]
-pub struct ObsidianVault {
-    pub id: String,
-    pub name: String,
-    pub path: PathBuf,
-    pub source: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum PanelMode {
-    Commands,
-    NoteEditor,
-    FullEditor,
-    AiChat,
-    LoginPicker,
-    NoteList,
-    VaultPicker,
-    Settings,
-}
-
-#[derive(Clone)]
-pub struct ChatMessage {
-    pub role: String, // "user" or "assistant"
-    pub content: String,
-    pub timestamp: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CursorStyle {
-    Block,
-    Line,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum NoteSaveTarget {
-    Local,
-    Obsidian,
-    Strix,
-}
-
-#[derive(Clone)]
-pub struct EditorState {
-    pub buffer: String,
-    pub cursor: usize,
-    pub scroll_offset: usize,
-}
-
-#[derive(Clone)]
-pub struct AiEditProposal {
-    pub note_index: Option<usize>,
-    pub title: Option<String>,
-    pub instruction: String,
-    pub proposed: String,
-    pub diff_lines: Vec<String>,
-}
-
-#[derive(Clone)]
-pub struct SearchState {
-    pub query: String,
-    pub matches: Vec<usize>,
-    pub current_match: Option<usize>,
-    pub active: bool,
-}
-
-pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        name: "login",
-        description: "Connect Strix or configure a model provider (usage: /login strix | /login openrouter <key>)",
-    },
-    CommandSpec {
-        name: "status",
-        description: "Show session, note, and runtime health",
-    },
-    CommandSpec {
-        name: "sync",
-        description: "Pull notes from Strix into the current Aleph session",
-    },
-    CommandSpec {
-        name: "doctor",
-        description: "Run local diagnostics",
-    },
-    CommandSpec {
-        name: "config",
-        description: "Inspect local runtime configuration",
-    },
-    CommandSpec {
-        name: "settings",
-        description: "Show useful connection, sync, editor, and AI settings",
-    },
-    CommandSpec {
-        name: "mode agent",
-        description: "Use Codex-style agent routing for note actions",
-    },
-    CommandSpec {
-        name: "mode chat",
-        description: "Use plain chat responses without taking note actions",
-    },
-    CommandSpec {
-        name: "logout",
-        description: "Sign out",
-    },
-    CommandSpec {
-        name: "obsidian pair",
-        description: "Pair a local Obsidian vault (usage: /obsidian pair | /obsidian pair <path|number|name>)",
-    },
-    CommandSpec {
-        name: "obsidian vaults",
-        description: "List detected Obsidian vaults",
-    },
-    CommandSpec {
-        name: "obsidian sync",
-        description: "Import Markdown notes from the paired Obsidian vault",
-    },
-    CommandSpec {
-        name: "obsidian status",
-        description: "Show the paired Obsidian vault and discovery config",
-    },
-    CommandSpec {
-        name: "obsidian open",
-        description: "Open the paired vault or selected note in Obsidian",
-    },
-    CommandSpec {
-        name: "search",
-        description: "Search notes and memories",
-    },
-    CommandSpec {
-        name: "recall",
-        description: "Show recent note activity",
-    },
-    CommandSpec {
-        name: "ask",
-        description: "Ask the selected AI provider a question",
-    },
-    CommandSpec {
-        name: "agent edit",
-        description: "Natural-language note edits use the AI editor, show a diff, and require approval",
-    },
-    CommandSpec {
-        name: "note list",
-        description: "List local notes",
-    },
-    CommandSpec {
-        name: "note read",
-        description: "Read a note by id, index, or title",
-    },
-    CommandSpec {
-        name: "note create",
-        description: "Create a note and open the editor (usage: /note create <title> :: <body>)",
-    },
-    CommandSpec {
-        name: "note append",
-        description: "Append text (usage: /note append <text> | /note append <note> :: <text>)",
-    },
-    CommandSpec {
-        name: "note edit",
-        description: "Edit the selected note in the bottom pane",
-    },
-    CommandSpec {
-        name: "note move",
-        description: "Move a note to a folder",
-    },
-    CommandSpec {
-        name: "folder list",
-        description: "List all folders",
-    },
-    CommandSpec {
-        name: "folder create",
-        description: "Create a new folder",
-    },
-    CommandSpec {
-        name: "folder delete",
-        description: "Delete a folder",
-    },
-    CommandSpec {
-        name: "folder notes",
-        description: "List notes in a folder",
-    },
-    CommandSpec {
-        name: "folder tree",
-        description: "Show folder hierarchy",
-    },
-    CommandSpec {
-        name: "memory list",
-        description: "List local memories",
-    },
-    CommandSpec {
-        name: "memory save",
-        description: "Save a local memory",
-    },
-    CommandSpec {
-        name: "memory search",
-        description: "Search stored memories",
-    },
-    CommandSpec {
-        name: "serve mcp",
-        description: "Start the MCP server",
-    },
-];
-
-pub const THINKING_FRAMES: [&str; 10] = ["◡", "⊙", "◠", "⊙", "◡", "⊙", "◉", "●", "◉", "⊙"];
+pub use commands::{COMMANDS, THINKING_FRAMES};
+pub use model::*;
 
 const OPENROUTER_CHAT_MODEL: &str = "nvidia/nemotron-3-nano-30b-a3b:free";
 const OPENROUTER_SERVICE: &str = "Aleph";
@@ -286,6 +60,13 @@ enum AgentAction {
     Chat,
     CreateNote,
     EditNote,
+}
+
+struct AgentDecision {
+    action: AgentAction,
+    note_index: Option<usize>,
+    title: Option<String>,
+    rationale: String,
 }
 
 #[allow(dead_code)]
@@ -351,6 +132,8 @@ pub struct App {
     agent_mode_enabled: bool,
     login_picker_selected: usize,
     settings_selected: usize,
+    pending_agent_query: Option<String>,
+    pending_agent_decision: Option<AgentDecision>,
     ghost_stream_rx: Option<Receiver<ChatStreamUpdate>>,
     ghost_streaming: bool,
     ghost_result: Option<String>,
@@ -545,6 +328,8 @@ impl App {
             agent_mode_enabled: Self::load_agent_mode_enabled().unwrap_or(true),
             login_picker_selected: 0,
             settings_selected: 0,
+            pending_agent_query: None,
+            pending_agent_decision: None,
             ghost_stream_rx: None,
             ghost_streaming: false,
             ghost_result: None,
@@ -1198,8 +983,42 @@ impl App {
         &self.editor_buffer
     }
 
+    pub fn editor_display_buffer(&self) -> &str {
+        if let Some(proposal) = self.pending_ai_edit.as_ref() {
+            return &proposal.proposed;
+        }
+
+        if self.ghost_streaming {
+            if let Some(result) = self.ghost_result.as_deref() {
+                if !result.trim().is_empty() {
+                    return result;
+                }
+            }
+        }
+
+        &self.editor_buffer
+    }
+
     pub fn editor_cursor(&self) -> usize {
         self.editor_cursor
+    }
+
+    pub fn editor_display_cursor(&self) -> usize {
+        if self.has_live_ai_editor_preview() {
+            self.editor_display_buffer().len()
+        } else {
+            self.editor_cursor
+        }
+    }
+
+    pub fn has_live_ai_editor_preview(&self) -> bool {
+        self.pending_ai_edit.is_some()
+            || (self.ghost_streaming
+                && self
+                    .ghost_result
+                    .as_deref()
+                    .map(|result| !result.trim().is_empty())
+                    .unwrap_or(false))
     }
 
     pub fn editor_scroll_offset(&self) -> usize {
@@ -1714,6 +1533,10 @@ impl App {
     fn handle_chat_key(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Esc if key_event.kind == KeyEventKind::Press => {
+                if self.pending_agent_decision.is_some() {
+                    self.cancel_pending_agent_action();
+                    return;
+                }
                 // Exit chat mode and return to commands
                 self.panel_mode = PanelMode::Commands;
                 self.panel_title = String::from("Commands");
@@ -1735,6 +1558,25 @@ impl App {
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
                 // Send chat message
                 let msg = self.chat_input_buffer.trim().to_string();
+                if self.pending_agent_decision.is_some() {
+                    if msg.is_empty() || Self::is_affirmative_agent_permission(&msg) {
+                        if self.confirm_pending_agent_action() {
+                            self.chat_input_buffer.clear();
+                            self.chat_input_cursor = 0;
+                        }
+                        return;
+                    }
+
+                    if Self::is_negative_agent_permission(&msg) {
+                        self.cancel_pending_agent_action();
+                        self.chat_input_buffer.clear();
+                        self.chat_input_cursor = 0;
+                        return;
+                    }
+
+                    self.cancel_pending_agent_action();
+                }
+
                 if !msg.is_empty() {
                     if (self.agent_mode_enabled && self.try_start_agent_action(&msg))
                         || self.start_chat_turn(msg)
@@ -2098,26 +1940,280 @@ impl App {
     }
 
     fn try_start_agent_action(&mut self, query: &str) -> bool {
-        match self.classify_agent_action(query) {
-            AgentAction::CreateNote => self.start_note_create_agent(query),
-            AgentAction::EditNote => self.try_start_home_note_agent(query),
+        let decision = self.plan_agent_action(query);
+        match decision.action {
+            AgentAction::CreateNote | AgentAction::EditNote => {
+                self.stage_agent_action(query, decision);
+                true
+            }
             AgentAction::Chat => false,
         }
     }
 
-    fn classify_agent_action(&self, query: &str) -> AgentAction {
-        if Self::looks_like_note_create_request(query) {
-            return AgentAction::CreateNote;
+    fn stage_agent_action(&mut self, query: &str, decision: AgentDecision) {
+        self.panel_mode = PanelMode::AiChat;
+        self.chat_scroll_offset = 0;
+        self.push_chat_message("user", query.trim());
+
+        if decision.action == AgentAction::EditNote && decision.note_index.is_none() {
+            self.pending_agent_query = None;
+            self.pending_agent_decision = None;
+            self.push_chat_message(
+                "assistant",
+                "I think this is note work, but I need a target note. Name the note, select one with `/note list`, or ask me to create a new note.",
+            );
+            self.last_action = String::from("Agent needs a note target.");
+            return;
         }
-        if Self::looks_like_note_edit_request(query) {
-            return AgentAction::EditNote;
-        }
-        AgentAction::Chat
+
+        let message = self.agent_permission_message(&decision);
+        self.pending_agent_query = Some(query.trim().to_string());
+        self.pending_agent_decision = Some(decision);
+        self.push_chat_message("assistant", message);
+        self.last_action = String::from("Agent action waiting for permission.");
     }
 
-    fn start_note_create_agent(&mut self, query: &str) -> bool {
-        let title =
-            Self::infer_note_title_from_request(query).unwrap_or_else(|| String::from("AI draft"));
+    fn agent_permission_message(&self, decision: &AgentDecision) -> String {
+        match decision.action {
+            AgentAction::CreateNote => {
+                let title = decision.title.as_deref().unwrap_or("AI draft");
+                format!(
+                    "I can create a new note titled `{}` and draft it in the editor. Press Enter to allow, type `no` to cancel, or type a different instruction.",
+                    title
+                )
+            }
+            AgentAction::EditNote => {
+                let note_title = decision
+                    .note_index
+                    .and_then(|index| self.notes.get(index))
+                    .map(|note| note.title.as_str())
+                    .unwrap_or("the selected note");
+                format!(
+                    "I can edit `{}` using the note-writing agent. Press Enter to allow, type `no` to cancel, or type a different instruction.",
+                    note_title
+                )
+            }
+            AgentAction::Chat => String::new(),
+        }
+    }
+
+    fn confirm_pending_agent_action(&mut self) -> bool {
+        let Some(decision) = self.pending_agent_decision.take() else {
+            return false;
+        };
+        let query = self.pending_agent_query.take().unwrap_or_default();
+        match decision.action {
+            AgentAction::CreateNote => self.start_note_create_agent(&query, decision.title),
+            AgentAction::EditNote => self.start_note_edit_agent(&query, decision),
+            AgentAction::Chat => false,
+        }
+    }
+
+    fn cancel_pending_agent_action(&mut self) {
+        self.pending_agent_query = None;
+        self.pending_agent_decision = None;
+        self.push_chat_message("assistant", "Cancelled the pending note action.");
+        self.last_action = String::from("Cancelled pending agent action.");
+    }
+
+    fn is_affirmative_agent_permission(input: &str) -> bool {
+        matches!(
+            input.trim().to_lowercase().as_str(),
+            "y" | "yes" | "ok" | "okay" | "do it" | "allow" | "approve" | "confirm" | "go"
+        )
+    }
+
+    fn is_negative_agent_permission(input: &str) -> bool {
+        matches!(
+            input.trim().to_lowercase().as_str(),
+            "n" | "no" | "nope" | "cancel" | "stop" | "don't" | "dont" | "reject"
+        )
+    }
+
+    fn plan_agent_action(&self, query: &str) -> AgentDecision {
+        if let Some(decision) = self.plan_agent_action_with_provider(query) {
+            return decision;
+        }
+
+        self.plan_agent_action_locally(query)
+    }
+
+    fn plan_agent_action_locally(&self, query: &str) -> AgentDecision {
+        if Self::looks_like_how_to_question(&query.to_lowercase()) {
+            return AgentDecision {
+                action: AgentAction::Chat,
+                note_index: None,
+                title: None,
+                rationale: String::from("question"),
+            };
+        }
+
+        let target_note = self.resolve_agent_note_target(query);
+        if Self::looks_like_note_edit_request(query) || self.should_work_on_existing_note(query) {
+            let rationale = if target_note.is_some() {
+                "edit-target"
+            } else {
+                "edit-missing-target"
+            };
+            return AgentDecision {
+                action: AgentAction::EditNote,
+                note_index: target_note,
+                title: None,
+                rationale: String::from(rationale),
+            };
+        }
+        if Self::looks_like_note_create_request(query) {
+            return AgentDecision {
+                action: AgentAction::CreateNote,
+                note_index: None,
+                title: Self::infer_note_title_from_request(query),
+                rationale: String::from("create"),
+            };
+        }
+        AgentDecision {
+            action: AgentAction::Chat,
+            note_index: None,
+            title: None,
+            rationale: String::from("chat"),
+        }
+    }
+
+    fn plan_agent_action_with_provider(&self, query: &str) -> Option<AgentDecision> {
+        let messages = self.agent_planner_conversation(query);
+        let result = match self.ai_provider {
+            AiProvider::OpenRouter => {
+                let api_key = self.openrouter_api_key.as_deref()?;
+                Self::send_openrouter_chat_blocking(api_key, &messages)
+            }
+            AiProvider::Strix => {
+                let access_token = self.strix_access_token.as_deref()?;
+                Self::send_strix_planner_request(
+                    &Self::strix_api_base_url(),
+                    access_token,
+                    &messages,
+                    &self.notes,
+                )
+            }
+        };
+
+        result
+            .ok()
+            .and_then(|content| self.parse_agent_planner_response(&content, query))
+    }
+
+    fn agent_planner_conversation(&self, query: &str) -> Vec<(String, String)> {
+        let system = String::from(
+            "You are Aleph's agent planner. Decide what Aleph should do with the user's chat input. \
+             You may choose exactly one action: chat, create_note, edit_note. \
+             Use edit_note when the user asks to work on, continue, improve, rewrite, append to, organize, or otherwise change an existing/current note. \
+             Use create_note when the user wants new durable writing and no existing note is the right target. \
+             Use chat for questions, explanations, brainstorming without durable write intent, or when you need to ask a clarification. \
+             Return ONLY compact JSON with this schema: {\"action\":\"chat|create_note|edit_note\",\"note_id\":number|null,\"title\":string|null,\"rationale\":string}. \
+             Do not write prose outside JSON.",
+        );
+
+        let mut notes = Vec::new();
+        for (index, note) in self.notes.iter().enumerate().take(40) {
+            notes.push(format!(
+                "- id={}{} title=\"{}\" preview=\"{}\"",
+                note.id,
+                if index == self.selected_note {
+                    " selected=true"
+                } else {
+                    ""
+                },
+                note.title.replace('"', "'"),
+                Self::preview_text(&note.content, 120).replace('"', "'")
+            ));
+        }
+
+        let selected = self
+            .notes
+            .get(self.selected_note)
+            .map(|note| format!("id={} title=\"{}\"", note.id, note.title.replace('"', "'")))
+            .unwrap_or_else(|| String::from("none"));
+        let user = format!(
+            "Selected note: {}\n\nAvailable notes:\n{}\n\nUser input:\n{}",
+            selected,
+            notes.join("\n"),
+            query
+        );
+
+        vec![
+            (String::from("system"), system),
+            (String::from("user"), user),
+        ]
+    }
+
+    fn parse_agent_planner_response(&self, content: &str, query: &str) -> Option<AgentDecision> {
+        let json = Self::extract_json_object(content)?;
+        let value: serde_json::Value = serde_json::from_str(json).ok()?;
+        let action = match value.get("action")?.as_str()?.trim() {
+            "chat" => AgentAction::Chat,
+            "create_note" => AgentAction::CreateNote,
+            "edit_note" => AgentAction::EditNote,
+            _ => return None,
+        };
+        let note_index = value
+            .get("note_id")
+            .and_then(|id| {
+                id.as_u64()
+                    .and_then(|id| self.note_index_by_id(id as usize))
+                    .or_else(|| {
+                        id.as_str()
+                            .and_then(|target| self.resolve_note_index(target))
+                    })
+            })
+            .or_else(|| {
+                value
+                    .get("title")
+                    .and_then(|title| title.as_str())
+                    .and_then(|title| self.resolve_note_index(title))
+            })
+            .or_else(|| {
+                if action == AgentAction::EditNote {
+                    self.resolve_agent_note_target(query)
+                } else {
+                    None
+                }
+            });
+        let title = value
+            .get("title")
+            .and_then(|title| title.as_str())
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(|title| title.chars().take(80).collect::<String>());
+        let rationale = value
+            .get("rationale")
+            .and_then(|rationale| rationale.as_str())
+            .map(str::trim)
+            .filter(|rationale| !rationale.is_empty())
+            .unwrap_or("model-plan")
+            .chars()
+            .take(120)
+            .collect::<String>();
+
+        Some(AgentDecision {
+            action,
+            note_index,
+            title,
+            rationale,
+        })
+    }
+
+    fn extract_json_object(content: &str) -> Option<&str> {
+        let trimmed = content.trim();
+        if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            return Some(trimmed);
+        }
+
+        let start = trimmed.find('{')?;
+        let end = trimmed.rfind('}')?;
+        (start < end).then_some(&trimmed[start..=end])
+    }
+
+    fn start_note_create_agent(&mut self, query: &str, title: Option<String>) -> bool {
+        let title = title.unwrap_or_else(|| String::from("AI draft"));
         self.panel_mode = PanelMode::FullEditor;
         self.panel_title = format!("Drafting: {}", title);
         self.panel_lines.clear();
@@ -2136,12 +2232,16 @@ impl App {
 
     fn looks_like_note_create_request(query: &str) -> bool {
         let lower = query.to_lowercase();
+        if Self::looks_like_how_to_question(&lower) {
+            return false;
+        }
+
         let mentions_note = lower.contains("note")
             || lower.contains("notes")
             || lower.contains("draft")
             || lower.contains("write-up")
             || lower.contains("writeup");
-        let wants_create = [
+        let direct_note_create = [
             "write a note",
             "write me a note",
             "write notes",
@@ -2158,10 +2258,46 @@ impl App {
             "take a note",
             "write-up",
             "writeup",
+            "turn this into a note",
+            "save this as a note",
+            "write this down",
+            "capture this",
         ]
         .iter()
         .any(|needle| lower.contains(needle));
-        mentions_note && wants_create
+        if direct_note_create {
+            return true;
+        }
+
+        let starts_like_write_task = [
+            "write ",
+            "draft ",
+            "compose ",
+            "outline ",
+            "prepare ",
+            "make ",
+            "create ",
+            "generate ",
+            "can you write ",
+            "please write ",
+            "can you draft ",
+            "please draft ",
+        ]
+        .iter()
+        .any(|prefix| lower.trim_start().starts_with(prefix));
+
+        let content_shape = [
+            " about ",
+            " on ",
+            " for ",
+            " explaining ",
+            " covering ",
+            " that ",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+        starts_like_write_task && (mentions_note || content_shape)
     }
 
     fn infer_note_title_from_request(query: &str) -> Option<String> {
@@ -2222,17 +2358,15 @@ impl App {
         }
     }
 
-    fn try_start_home_note_agent(&mut self, query: &str) -> bool {
-        if !Self::looks_like_note_edit_request(query) {
-            return false;
-        }
-
-        let Some(index) = self.resolve_agent_note_target(query) else {
+    fn start_note_edit_agent(&mut self, query: &str, decision: AgentDecision) -> bool {
+        let Some(index) = decision.note_index else {
             self.set_result_panel(
                 "AI note edit",
                 vec![
-                    String::from("I can edit notes when a note is selected or named."),
-                    String::from("Try /note list, select a note, then ask again."),
+                    String::from("I decided this is note work, but I need a target note."),
+                    String::from(
+                        "Name a note, select one with /note list, or ask me to create a new note.",
+                    ),
                 ],
             );
             self.last_action = String::from("AI note edit needs a note target.");
@@ -2245,20 +2379,77 @@ impl App {
         self.ai_input_cursor = self.ai_input_buffer.len();
         self.ghost_submit_instruction();
         self.last_action = format!(
-            "AI is preparing edits for note: {}",
-            self.notes[index].title
+            "AI is preparing edits for note: {} ({})",
+            self.notes[index].title, decision.rationale
         );
         true
     }
 
+    fn should_work_on_existing_note(&self, query: &str) -> bool {
+        let lower = query.to_lowercase();
+        if Self::looks_like_how_to_question(&lower) {
+            return false;
+        }
+
+        let asks_for_work = [
+            "work on",
+            "keep working on",
+            "continue",
+            "finish",
+            "develop",
+            "refine",
+            "iterate on",
+            "take another pass",
+            "make progress",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+        let references_existing_context = [
+            "existing note",
+            "current note",
+            "selected note",
+            "this note",
+            "that note",
+            "the note",
+            "existing draft",
+            "current draft",
+            "this draft",
+            "it",
+            "this",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+        asks_for_work && references_existing_context
+    }
+
     fn looks_like_note_edit_request(query: &str) -> bool {
         let lower = query.to_lowercase();
+        if Self::looks_like_how_to_question(&lower) {
+            return false;
+        }
+
         let mentions_note = lower.contains("note")
             || lower.contains("notes")
             || lower.contains("this doc")
             || lower.contains("current doc")
+            || lower.contains("current note")
+            || lower.contains("selected note")
+            || lower.contains("this note")
             || lower.contains("draft");
-        let wants_write = [
+        let references_current_text = [
+            "this",
+            "current",
+            "selected",
+            "existing",
+            "the note",
+            "my note",
+            "the draft",
+            "my draft",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+        let wants_edit = [
             "edit",
             "rewrite",
             "update",
@@ -2273,15 +2464,43 @@ impl App {
             "clean up",
             "summarize",
             "turn this into",
+            "make this",
+            "make it",
+            "expand",
+            "shorten",
+            "polish",
+            "refactor",
+            "convert",
         ]
         .iter()
         .any(|needle| lower.contains(needle));
 
-        mentions_note && wants_write
+        (mentions_note || references_current_text) && wants_edit
+    }
+
+    fn looks_like_how_to_question(lower: &str) -> bool {
+        let trimmed = lower.trim_start();
+        [
+            "how do i ",
+            "how can i ",
+            "how should i ",
+            "what is ",
+            "what are ",
+            "why does ",
+            "why is ",
+            "can you explain ",
+            "explain how ",
+        ]
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
     }
 
     fn resolve_agent_note_target(&self, query: &str) -> Option<usize> {
         let lower = query.to_lowercase();
+        if let Some(index) = self.find_note_mentioned_in_text(query) {
+            return Some(index);
+        }
+
         for marker in ["note ", "notes ", "doc ", "draft "] {
             if let Some(pos) = lower.find(marker) {
                 let candidate = query[pos + marker.len()..]
@@ -2295,6 +2514,46 @@ impl App {
             }
         }
         self.current_note_index()
+    }
+
+    fn find_note_mentioned_in_text(&self, query: &str) -> Option<usize> {
+        let lower = query.to_lowercase();
+        for token in lower.split_whitespace() {
+            let normalized = token
+                .trim_matches(|character: char| !character.is_ascii_alphanumeric())
+                .trim_start_matches('#');
+            if let Ok(note_id) = normalized.parse::<usize>() {
+                if let Some(index) = self
+                    .notes
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, note)| (note.id == note_id).then_some(index))
+                {
+                    return Some(index);
+                }
+            }
+        }
+
+        self.notes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, note)| {
+                let title = note.title.to_lowercase();
+                let title_words = title.split_whitespace().count();
+                let remote_match = note
+                    .remote_id
+                    .as_deref()
+                    .map(|remote_id| lower.contains(&remote_id.to_lowercase()))
+                    .unwrap_or(false);
+
+                if remote_match || (!title.is_empty() && lower.contains(&title)) {
+                    Some((index, title_words))
+                } else {
+                    None
+                }
+            })
+            .max_by_key(|(_, title_words)| *title_words)
+            .map(|(index, _)| index)
     }
 
     fn parse_command<'a>(prompt: &'a str) -> Option<(&'static CommandSpec, &'a str)> {
@@ -4283,6 +4542,60 @@ impl App {
         Ok(false)
     }
 
+    fn send_openrouter_chat_blocking(
+        api_key: &str,
+        conversation: &[(String, String)],
+    ) -> Result<String, String> {
+        let messages: Vec<_> = conversation
+            .iter()
+            .map(|(role, content)| {
+                serde_json::json!({
+                    "role": role,
+                    "content": content,
+                })
+            })
+            .collect();
+
+        let payload = serde_json::json!({
+            "model": OPENROUTER_CHAT_MODEL,
+            "messages": messages,
+            "temperature": 0.1,
+            "stream": false,
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(45))
+            .build()
+            .map_err(|error| format!("failed to build HTTP client: {}", error))?;
+
+        let response = client
+            .post("https://openrouter.ai/api/v1/chat/completions")
+            .bearer_auth(api_key)
+            .json(&payload)
+            .send()
+            .map_err(|error| format!("request failed: {}", error))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|error| format!("failed to read response: {}", error))?;
+
+        if !status.is_success() {
+            return Err(format!("{}: {}", status, body));
+        }
+
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|error| format!("failed to parse OpenRouter response: {}", error))?;
+        value
+            .get("choices")
+            .and_then(|choices| choices.get(0))
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.as_str())
+            .map(|content| content.trim().to_string())
+            .filter(|content| !content.is_empty())
+            .ok_or_else(|| String::from("OpenRouter returned an empty planner response"))
+    }
+
     pub fn is_openrouter_connected(&self) -> bool {
         self.connected && self.openrouter_api_key.is_some()
     }
@@ -4434,6 +4747,48 @@ impl App {
         let _ = sender.send(ChatStreamUpdate::Delta(answer));
         let _ = sender.send(ChatStreamUpdate::Done);
         Ok(())
+    }
+
+    fn send_strix_planner_request(
+        base_url: &str,
+        token: &str,
+        conversation: &[(String, String)],
+        notes: &[Note],
+    ) -> Result<String, String> {
+        let query = conversation
+            .iter()
+            .map(|(role, content)| format!("{}:\n{}", role, content))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let notes_payload: Vec<_> = notes
+            .iter()
+            .take(STRIX_NOTES_LIMIT)
+            .map(|note| {
+                let id = note
+                    .remote_id
+                    .clone()
+                    .unwrap_or_else(|| note.id.to_string());
+                serde_json::json!({
+                    "id": id,
+                    "title": note.title.as_str(),
+                    "content": note.content.as_str(),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "question": query,
+            "notes": notes_payload,
+        });
+        let value =
+            Self::strix_json_request_with(base_url, token, "POST", "/nest/ask", Some(payload))?;
+        value
+            .get("answer")
+            .or_else(|| value.get("result").and_then(|result| result.get("answer")))
+            .or_else(|| value.get("content"))
+            .and_then(|answer| answer.as_str())
+            .map(|answer| answer.trim().to_string())
+            .filter(|answer| !answer.is_empty())
+            .ok_or_else(|| String::from("Strix returned an empty planner response"))
     }
 
     fn sync_strix_notes(&mut self) -> Result<usize, String> {
@@ -5913,6 +6268,13 @@ impl App {
         })
     }
 
+    fn note_index_by_id(&self, id: usize) -> Option<usize> {
+        self.notes
+            .iter()
+            .enumerate()
+            .find_map(|(index, note)| (note.id == id).then_some(index))
+    }
+
     fn search_notes(&self, query: &str) -> Vec<String> {
         let query = query.to_lowercase();
         self.notes
@@ -7177,11 +7539,14 @@ impl App {
 
         // Build a conversation for the ghost editor
         let system_prompt = String::from(
-            "You are a writing assistant embedded in a note editor. The user will give you the current note content and an instruction. \
-             Respond ONLY with the complete updated note content: no explanations, no markdown code fences, no preamble. \
-             If the user asks a question about the text, answer by updating the note with the requested answer only when they clearly ask you to write it into the note. \
-             If the current note is empty and the user asks to write, draft, compose, or create a note, write the full new note content. \
-             If the user asks to edit, rewrite, or add to the text, return the full updated text."
+            "You are Aleph's note-writing agent. You operate inside a Markdown note editor, not a chat window. \
+             The user gives current note content plus an instruction. Return ONLY the complete note content that should exist after the action. \
+             No explanations, no preamble, no code fences, no JSON, no commentary about what you changed. \
+             For a new empty note, write a useful complete draft with a concrete title heading only when it improves the note. \
+             For edits, preserve the user's meaning, useful details, markdown structure, links, lists, and factual claims unless the instruction asks to change them. \
+             For append/add/insert requests, integrate the requested material into the note instead of replacing unrelated content. \
+             For rewrite/improve/fix/clean-up requests, make the smallest coherent full-note rewrite that satisfies the instruction. \
+             If the instruction is ambiguous, choose the most likely writing/editing action and produce the resulting note content."
         );
 
         let title_context = draft_create_title
@@ -7772,6 +8137,8 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('x')));
         assert_eq!(app.editor_buffer, original);
+        assert_eq!(app.editor_display_buffer(), proposed);
+        assert!(app.has_live_ai_editor_preview());
         assert!(app.has_pending_ai_edit());
 
         app.handle_key(press(KeyCode::Enter));
@@ -7930,12 +8297,129 @@ mod tests {
 
         app.handle_chat_key(press(KeyCode::Enter));
 
+        assert!(app.is_ai_chat());
+        assert!(app.pending_agent_decision.is_some());
+        assert_eq!(app.chat_messages().len(), 2);
+
+        app.handle_chat_key(press(KeyCode::Enter));
+
         assert!(app.is_full_editor());
         assert_eq!(
             app.ai_draft_create_title.as_deref(),
             Some("Launch Planning")
         );
-        assert_eq!(app.chat_messages().len(), 0);
+        assert!(app.pending_agent_decision.is_none());
+    }
+
+    #[test]
+    fn agent_mode_routes_general_write_prompt_to_note_draft() {
+        let mut app = App::new();
+        app.openrouter_api_key = None;
+        app.strix_access_token = None;
+        app.refresh_connection_state();
+        app.panel_mode = PanelMode::AiChat;
+        app.chat_input_buffer = String::from("write an outline about moat strategy");
+        app.chat_input_cursor = app.chat_input_buffer.len();
+
+        app.handle_chat_key(press(KeyCode::Enter));
+
+        assert!(app.is_ai_chat());
+        assert!(app.pending_agent_decision.is_some());
+        assert_eq!(app.chat_messages().len(), 2);
+
+        app.handle_chat_key(press(KeyCode::Enter));
+
+        assert!(app.is_full_editor());
+        assert_eq!(app.ai_draft_create_title.as_deref(), Some("Moat Strategy"));
+        assert!(app.pending_agent_decision.is_none());
+    }
+
+    #[test]
+    fn agent_mode_routes_current_note_edit_without_note_keyword() {
+        let mut app = App::new();
+        app.openrouter_api_key = None;
+        app.strix_access_token = None;
+        app.refresh_connection_state();
+        app.selected_note = 1;
+        app.panel_mode = PanelMode::AiChat;
+        app.chat_input_buffer = String::from("make this more concise");
+        app.chat_input_cursor = app.chat_input_buffer.len();
+
+        app.handle_chat_key(press(KeyCode::Enter));
+
+        assert!(app.is_ai_chat());
+        assert!(app.pending_agent_decision.is_some());
+        assert_eq!(app.chat_messages().len(), 2);
+
+        app.handle_chat_key(press(KeyCode::Enter));
+
+        assert!(app.is_full_editor());
+        assert_eq!(app.editor_note_index, Some(1));
+        assert!(app.pending_agent_decision.is_none());
+    }
+
+    #[test]
+    fn agent_mode_can_decide_to_work_on_existing_selected_note() {
+        let mut app = App::new();
+        app.openrouter_api_key = None;
+        app.strix_access_token = None;
+        app.refresh_connection_state();
+        app.selected_note = 2;
+        app.panel_mode = PanelMode::AiChat;
+        app.chat_input_buffer = String::from("work on the existing note and make progress");
+        app.chat_input_cursor = app.chat_input_buffer.len();
+
+        app.handle_chat_key(press(KeyCode::Enter));
+
+        assert!(app.is_ai_chat());
+        assert!(app.pending_agent_decision.is_some());
+        assert_eq!(app.chat_messages().len(), 2);
+
+        app.handle_chat_key(press(KeyCode::Enter));
+
+        assert!(app.is_full_editor());
+        assert_eq!(app.editor_note_index, Some(2));
+        assert!(app.pending_agent_decision.is_none());
+    }
+
+    #[test]
+    fn agent_mode_can_choose_existing_note_by_title() {
+        let mut app = App::new();
+        app.openrouter_api_key = None;
+        app.strix_access_token = None;
+        app.refresh_connection_state();
+        app.panel_mode = PanelMode::AiChat;
+        app.chat_input_buffer = String::from("work on Feature ideas and make it sharper");
+        app.chat_input_cursor = app.chat_input_buffer.len();
+
+        app.handle_chat_key(press(KeyCode::Enter));
+
+        assert!(app.is_ai_chat());
+        assert!(app.pending_agent_decision.is_some());
+        assert_eq!(app.chat_messages().len(), 2);
+
+        app.handle_chat_key(press(KeyCode::Enter));
+
+        assert!(app.is_full_editor());
+        assert_eq!(app.editor_note_index, Some(3));
+        assert!(app.pending_agent_decision.is_none());
+    }
+
+    #[test]
+    fn agent_mode_keeps_how_to_writing_questions_as_chat() {
+        let mut app = App::new();
+        app.openrouter_api_key = None;
+        app.strix_access_token = None;
+        app.refresh_connection_state();
+        app.panel_mode = PanelMode::AiChat;
+        app.chat_input_buffer = String::from("how do I write a note about launch planning?");
+        app.chat_input_cursor = app.chat_input_buffer.len();
+
+        app.handle_chat_key(press(KeyCode::Enter));
+
+        assert!(app.is_ai_chat());
+        assert_eq!(app.chat_messages().len(), 2);
+        assert!(app.chat_messages()[0].content.contains("how do I write"));
     }
 
     #[test]

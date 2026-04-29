@@ -4,13 +4,18 @@ use ratatui::widgets::{
     Table, Wrap,
 };
 
-use crate::app::{App, CursorStyle, PanelMode};
+mod markdown;
+
+use crate::app::{App, PanelMode};
+use markdown::{render_markdown_line, render_markdown_line_with_cursor};
 
 const BG: Color = Color::Rgb(25, 26, 34);
 const ACCENT: Color = Color::Rgb(156, 146, 201);
 const ACCENT_SOFT: Color = Color::Rgb(115, 106, 155);
 const TEXT: Color = Color::Rgb(198, 198, 210);
 const MUTED: Color = Color::Rgb(120, 122, 138);
+const EDITOR_TEXT: Color = Color::Rgb(168, 169, 181);
+const EDITOR_MUTED: Color = Color::Rgb(98, 101, 116);
 const PANEL: Color = Color::Rgb(35, 36, 48);
 const BORDER: Color = Color::Rgb(34, 65, 64);
 const GHOST_FRAMES: [&str; 4] = ["◌", "◎", "◍", "◉"];
@@ -210,296 +215,6 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
-fn parse_markdown_spans(text: &str) -> Vec<Span<'_>> {
-    let mut spans = Vec::new();
-    let mut remaining = text;
-
-    while !remaining.is_empty() {
-        if let Some(pos) = remaining.find("**") {
-            if pos > 0 {
-                spans.push(Span::raw(&remaining[..pos]));
-            }
-            remaining = &remaining[pos + 2..];
-            if let Some(end_pos) = remaining.find("**") {
-                spans.push(Span::styled(
-                    &remaining[..end_pos],
-                    Style::default().add_modifier(Modifier::BOLD),
-                ));
-                remaining = &remaining[end_pos + 2..];
-            } else {
-                spans.push(Span::raw("**"));
-                spans.push(Span::raw(remaining));
-                break;
-            }
-        } else if let Some(pos) = remaining.find('*') {
-            if pos > 0 {
-                spans.push(Span::raw(&remaining[..pos]));
-            }
-            remaining = &remaining[pos + 1..];
-            if let Some(end_pos) = remaining.find('*') {
-                spans.push(Span::styled(
-                    &remaining[..end_pos],
-                    Style::default().add_modifier(Modifier::ITALIC),
-                ));
-                remaining = &remaining[end_pos + 1..];
-            } else {
-                spans.push(Span::raw("*"));
-                spans.push(Span::raw(remaining));
-                break;
-            }
-        } else if let Some(pos) = remaining.find('`') {
-            if pos > 0 {
-                spans.push(Span::raw(&remaining[..pos]));
-            }
-            remaining = &remaining[pos + 1..];
-            if let Some(end_pos) = remaining.find('`') {
-                spans.push(Span::styled(
-                    &remaining[..end_pos],
-                    Style::default().fg(ACCENT_SOFT),
-                ));
-                remaining = &remaining[end_pos + 1..];
-            } else {
-                spans.push(Span::raw("`"));
-                spans.push(Span::raw(remaining));
-                break;
-            }
-        } else {
-            spans.push(Span::raw(remaining));
-            break;
-        }
-    }
-
-    if spans.is_empty() {
-        spans.push(Span::raw(text));
-    }
-
-    spans
-}
-
-fn render_markdown_line(line: &str) -> Line<'_> {
-    let mut spans = Vec::new();
-    let mut remaining = line;
-    let trimmed = line.trim_start();
-    let indent_len = line.len() - trimmed.len();
-
-    if trimmed.starts_with("# ") {
-        spans.push(Span::styled(
-            &line[..indent_len + 2],
-            Style::default().fg(ACCENT_SOFT),
-        ));
-        spans.push(Span::styled(
-            &trimmed[2..],
-            Style::default()
-                .fg(TEXT)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ));
-        return Line::from(spans);
-    } else if trimmed.starts_with("## ") {
-        spans.push(Span::styled(
-            &line[..indent_len + 3],
-            Style::default().fg(MUTED),
-        ));
-        spans.push(Span::styled(
-            &trimmed[3..],
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        ));
-        return Line::from(spans);
-    } else if trimmed.starts_with("### ") {
-        spans.push(Span::styled(
-            &line[..indent_len + 4],
-            Style::default().fg(MUTED),
-        ));
-        spans.push(Span::styled(
-            &trimmed[4..],
-            Style::default()
-                .fg(TEXT)
-                .add_modifier(Modifier::BOLD | Modifier::ITALIC),
-        ));
-        return Line::from(spans);
-    } else if let Some(stripped) = trimmed.strip_prefix("- ") {
-        if indent_len > 0 {
-            spans.push(Span::raw(&line[..indent_len]));
-        }
-        spans.push(Span::styled("• ", Style::default().fg(ACCENT)));
-        remaining = stripped;
-    } else if let Some(stripped) = trimmed.strip_prefix("* ") {
-        if indent_len > 0 {
-            spans.push(Span::raw(&line[..indent_len]));
-        }
-        spans.push(Span::styled("• ", Style::default().fg(ACCENT)));
-        remaining = stripped;
-    } else if let Some(pos) = trimmed.find(". ") {
-        if pos > 0 && trimmed[..pos].chars().all(|c| c.is_ascii_digit()) {
-            if indent_len > 0 {
-                spans.push(Span::raw(&line[..indent_len]));
-            }
-            spans.push(Span::styled(
-                &trimmed[..=pos + 1],
-                Style::default().fg(ACCENT),
-            ));
-            remaining = &trimmed[pos + 2..];
-        }
-    }
-
-    while !remaining.is_empty() {
-        if let Some(pos) = remaining.find("**") {
-            if pos > 0 {
-                spans.push(Span::raw(&remaining[..pos]));
-            }
-            remaining = &remaining[pos + 2..];
-            if let Some(end_pos) = remaining.find("**") {
-                spans.push(Span::styled(
-                    &remaining[..end_pos],
-                    Style::default().add_modifier(Modifier::BOLD),
-                ));
-                remaining = &remaining[end_pos + 2..];
-            } else {
-                spans.push(Span::raw("**"));
-                spans.push(Span::raw(remaining));
-                break;
-            }
-        } else if let Some(pos) = remaining.find('*') {
-            if pos > 0 {
-                spans.push(Span::raw(&remaining[..pos]));
-            }
-            remaining = &remaining[pos + 1..];
-            if let Some(end_pos) = remaining.find('*') {
-                spans.push(Span::styled(
-                    &remaining[..end_pos],
-                    Style::default().add_modifier(Modifier::ITALIC),
-                ));
-                remaining = &remaining[end_pos + 1..];
-            } else {
-                spans.push(Span::raw("*"));
-                spans.push(Span::raw(remaining));
-                break;
-            }
-        } else if let Some(pos) = remaining.find('`') {
-            if pos > 0 {
-                spans.push(Span::raw(&remaining[..pos]));
-            }
-            remaining = &remaining[pos + 1..];
-            if let Some(end_pos) = remaining.find('`') {
-                spans.push(Span::styled(
-                    &remaining[..end_pos],
-                    Style::default().fg(ACCENT_SOFT),
-                ));
-                remaining = &remaining[end_pos + 1..];
-            } else {
-                spans.push(Span::raw("`"));
-                spans.push(Span::raw(remaining));
-                break;
-            }
-        } else {
-            spans.push(Span::raw(remaining));
-            break;
-        }
-    }
-
-    if spans.is_empty() {
-        spans.push(Span::raw(line));
-    }
-
-    Line::from(spans)
-}
-
-fn render_markdown_line_with_cursor(
-    line: &str,
-    cursor_in_line: usize,
-    cursor_style: CursorStyle,
-) -> Line<'_> {
-    let cursor_glyph = if cursor_style == CursorStyle::Block {
-        "█"
-    } else {
-        CURSOR
-    };
-
-    let mut spans = Vec::new();
-    let trimmed = line.trim_start();
-    let indent_len = line.len() - trimmed.len();
-
-    let mut text_start = 0;
-
-    if trimmed.starts_with("# ") {
-        text_start = indent_len + 2;
-    } else if trimmed.starts_with("## ") {
-        text_start = indent_len + 3;
-    } else if trimmed.starts_with("### ") {
-        text_start = indent_len + 4;
-    } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-        text_start = indent_len + 2;
-    } else if let Some(pos) = trimmed.find(". ") {
-        if pos > 0 && trimmed[..pos].chars().all(|c| c.is_ascii_digit()) {
-            text_start = indent_len + pos + 2;
-        }
-    }
-
-    if cursor_in_line < text_start {
-        // Cursor is within the prefix. Render it simply to avoid complex prefix splitting.
-        let mut before_cursor = parse_markdown_spans(&line[..cursor_in_line]);
-        before_cursor.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
-        before_cursor.extend(parse_markdown_spans(&line[cursor_in_line..]));
-        return Line::from(before_cursor);
-    }
-
-    // Apply prefix styling up to text_start
-    let mut remaining = line;
-    let mut prefix_spans = Vec::new();
-
-    if text_start > 0 {
-        if trimmed.starts_with("# ") {
-            prefix_spans.push(Span::styled(
-                &line[..text_start],
-                Style::default().fg(ACCENT_SOFT),
-            ));
-        } else if trimmed.starts_with("## ") || trimmed.starts_with("### ") {
-            prefix_spans.push(Span::styled(
-                &line[..text_start],
-                Style::default().fg(MUTED),
-            ));
-        } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-            if indent_len > 0 {
-                prefix_spans.push(Span::raw(&line[..indent_len]));
-            }
-            prefix_spans.push(Span::styled("• ", Style::default().fg(ACCENT)));
-        } else if let Some(pos) = trimmed.find(". ") {
-            if indent_len > 0 {
-                prefix_spans.push(Span::raw(&line[..indent_len]));
-            }
-            prefix_spans.push(Span::styled(
-                &trimmed[..=pos + 1],
-                Style::default().fg(ACCENT),
-            ));
-        }
-        remaining = &line[text_start..];
-    }
-
-    // Normal markdown parsing for the rest, injecting the cursor
-    let adjusted_cursor = cursor_in_line - text_start;
-    spans.extend(prefix_spans);
-
-    let before_cursor = &remaining[..adjusted_cursor];
-    let after_cursor = &remaining[adjusted_cursor..];
-
-    if trimmed.starts_with("# ") || trimmed.starts_with("## ") || trimmed.starts_with("### ") {
-        spans.push(Span::styled(
-            before_cursor,
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
-        spans.push(Span::styled(
-            after_cursor,
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        ));
-    } else {
-        spans.extend(parse_markdown_spans(before_cursor));
-        spans.push(Span::styled(cursor_glyph, Style::default().fg(TEXT)));
-        spans.extend(parse_markdown_spans(after_cursor));
-    }
-
-    Line::from(spans)
-}
-
 fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let max_width = 80;
     let center_width = area.width.saturating_sub(8).min(max_width);
@@ -529,12 +244,13 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let editor_content_area = h_chunks[1];
 
     let title = app.editor_note_title().unwrap_or("Untitled");
-    let word_count = editor_word_count(app.editor_buffer());
+    let editor_text = app.editor_display_buffer();
+    let word_count = editor_word_count(editor_text);
 
     let meta_style = if app.save_shimmer_ticks() > 0 {
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(MUTED)
+        Style::default().fg(EDITOR_MUTED)
     };
 
     let mut meta_spans = vec![];
@@ -545,21 +261,25 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
         meta_spans.push(Span::styled("Title: ", Style::default().fg(ACCENT)));
         meta_spans.push(Span::styled(
             &app.title_buffer()[..cursor],
-            Style::default().fg(TEXT),
+            Style::default().fg(EDITOR_TEXT),
         ));
         meta_spans.push(Span::styled(CURSOR, Style::default().fg(ACCENT)));
         meta_spans.push(Span::styled(
             &app.title_buffer()[cursor..],
-            Style::default().fg(TEXT),
+            Style::default().fg(EDITOR_TEXT),
         ));
         meta_spans.push(Span::raw("  "));
         meta_spans.push(Span::styled(
             "(Enter to save, Esc to cancel)",
-            Style::default().fg(MUTED),
+            Style::default().fg(EDITOR_MUTED),
         ));
     } else {
         meta_spans.push(Span::styled(
-            format!("{} / Draft / {} words", title, word_count),
+            if app.has_live_ai_editor_preview() {
+                format!("{} / AI preview / {} words", title, word_count)
+            } else {
+                format!("{} / Draft / {} words", title, word_count)
+            },
             meta_style,
         ));
     }
@@ -576,7 +296,7 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
             let total = app.search_state().matches.len();
             meta_spans.push(Span::styled(
                 format!(" ({}/{})", current + 1, total),
-                Style::default().fg(MUTED),
+                Style::default().fg(EDITOR_MUTED),
             ));
         }
     }
@@ -584,7 +304,7 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let top_meta = Paragraph::new(Line::from(meta_spans)).alignment(Alignment::Left);
     frame.render_widget(top_meta, v_chunks[0]);
 
-    let cursor = app.editor_cursor().min(app.editor_buffer().len());
+    let cursor = app.editor_display_cursor().min(editor_text.len());
 
     let wrap_setting = if app.editor_word_wrap() {
         Wrap { trim: false }
@@ -598,7 +318,7 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let mut cursor_visual_col: u16 = 0;
     let mut visual_row: u16 = 0;
 
-    for line_text in app.editor_buffer().lines() {
+    for line_text in editor_text.lines() {
         let line_len = line_text.len();
         let line_start = char_pos;
         let line_end = char_pos + line_len;
@@ -631,12 +351,20 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
         char_pos += line_len + 1;
     }
 
-    let cursor_line = app.editor_buffer()[..cursor.min(app.editor_buffer().len())]
+    if editor_text.is_empty() {
+        lines.push(render_markdown_line_with_cursor(
+            "",
+            0,
+            app.editor_cursor_style(),
+        ));
+    }
+
+    let cursor_line = editor_text[..cursor.min(editor_text.len())]
         .chars()
         .filter(|&c| c == '\n')
         .count();
 
-    let total_lines = app.editor_buffer().lines().count().max(1);
+    let total_lines = editor_text.lines().count().max(1);
     let visible_lines = editor_content_area.height as usize;
 
     let mut effective_scroll_offset = app.editor_scroll_offset();
@@ -675,8 +403,16 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let hints = Span::styled(
-        "Tab edit title · Ctrl+S save · Ctrl+F find · Ctrl+Space ghost",
-        Style::default().fg(MUTED),
+        if app.has_live_ai_editor_preview() {
+            "Enter accept AI preview · Ctrl+R reject · Esc reject"
+        } else {
+            "Tab edit title · Ctrl+S save · Ctrl+F find · Ctrl+Space ghost"
+        },
+        Style::default().fg(if app.has_live_ai_editor_preview() {
+            ACCENT_SOFT
+        } else {
+            MUTED
+        }),
     );
     let bottom_hints = Paragraph::new(Line::from(hints)).alignment(Alignment::Right);
     frame.render_widget(bottom_hints, v_chunks[4]);
@@ -789,16 +525,10 @@ fn render_ai_overlay(frame: &mut Frame, app: &App, area: Rect, cursor_row: u16, 
             )]));
         }
         lines.push(Line::from(""));
-        for line in app.pending_ai_diff_lines().into_iter().take(10) {
-            let style = if line.starts_with("+ ") {
-                Style::default().fg(Color::Rgb(124, 184, 145))
-            } else if line.starts_with("- ") {
-                Style::default().fg(Color::Rgb(209, 118, 128))
-            } else {
-                Style::default().fg(MUTED)
-            };
-            lines.push(Line::from(vec![Span::styled(format!("  {}", line), style)]));
-        }
+        lines.push(Line::from(vec![Span::styled(
+            "  Preview is shown directly in the editor.",
+            Style::default().fg(MUTED),
+        )]));
     } else if messages.is_empty() && !app.is_ghost_streaming() && app.ghost_result().is_none() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
@@ -830,14 +560,10 @@ fn render_ai_overlay(frame: &mut Frame, app: &App, area: Rect, cursor_row: u16, 
             format!("  {} Ghost is thinking...", frame_char),
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )]));
-        if let Some(partial) = app.ghost_result() {
-            let preview: String = partial.chars().take(120).collect();
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![Span::styled(
-                format!("  {}…", preview),
-                Style::default().fg(MUTED),
-            )]));
-        }
+        lines.push(Line::from(vec![Span::styled(
+            "  Drafting live in the editor...",
+            Style::default().fg(MUTED),
+        )]));
     } else if let Some(result) = app.ghost_result() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
