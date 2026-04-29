@@ -20,7 +20,6 @@ exclude = [
     "ascii-eye2.md",
     "strix-agents.md",
     "TODOS.md",
-    "SECURITY.MD",
 ]
 
 [dependencies]
