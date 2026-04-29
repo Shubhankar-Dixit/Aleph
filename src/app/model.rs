@@ -103,14 +103,6 @@ pub struct Selection {
 }
 
 impl Selection {
-    pub fn new(start: usize, end: usize) -> Self {
-        Self {
-            start: start.min(end),
-            end: start.max(end),
-            active: true,
-        }
-    }
-
     pub fn clear(&mut self) {
         self.active = false;
         self.start = 0;
@@ -121,9 +113,5 @@ impl Selection {
         self.start = 0;
         self.end = len;
         self.active = len > 0;
-    }
-
-    pub fn is_selected(&self, pos: usize) -> bool {
-        self.active && pos >= self.start && pos < self.end
     }
 }
