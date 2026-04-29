@@ -13,7 +13,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use keyring::Entry;
 use rand::{rngs::OsRng, RngCore};
 use ratatui::prelude::{Color, Line, Modifier, Span, Style};
@@ -209,66 +211,11 @@ impl App {
                     parent_id: Some(1),
                 },
             ],
-            notes: vec![
-                Note {
-                    id: 1,
-                    remote_id: None,
-                    obsidian_path: None,
-                    title: String::from("Strix gateway"),
-                    content: String::from(
-                        "Build a stable gateway that normalizes auth, streaming, and note operations.",
-                    ),
-                    raw_content: String::from(
-                        "Build a stable gateway that normalizes auth, streaming, and note operations.",
-                    ),
-                    updated_at: String::from("seed"),
-                    folder_id: Some(3),
-                },
-                Note {
-                    id: 2,
-                    remote_id: None,
-                    obsidian_path: None,
-                    title: String::from("Note editor"),
-                    content: String::from(
-                        "Use a terminal editor for quick edits, then move larger writes into the Strix product.",
-                    ),
-                    raw_content: String::from(
-                        "Use a terminal editor for quick edits, then move larger writes into the Strix product.",
-                    ),
-                    updated_at: String::from("seed"),
-                    folder_id: Some(3),
-                },
-                Note {
-                    id: 3,
-                    remote_id: None,
-                    obsidian_path: None,
-                    title: String::from("MCP server"),
-                    content: String::from(
-                        "Expose Aleph as an MCP bridge so external agents can use Strix knowledge.",
-                    ),
-                    raw_content: String::from(
-                        "Expose Aleph as an MCP bridge so external agents can use Strix knowledge.",
-                    ),
-                    updated_at: String::from("seed"),
-                    folder_id: None,
-                },
-                Note {
-                    id: 4,
-                    remote_id: None,
-                    obsidian_path: None,
-                    title: String::from("Feature ideas"),
-                    content: String::from(
-                        "Folder navigation, search within folders, nested folders like Strix.",
-                    ),
-                    raw_content: String::from(
-                        "Folder navigation, search within folders, nested folders like Strix.",
-                    ),
-                    updated_at: String::from("seed"),
-                    folder_id: Some(2),
-                },
-            ],
+            notes: Self::default_local_notes(),
             memories: vec![
-                String::from("Strix is service-backed; Aleph should not assume a local desktop app."),
+                String::from(
+                    "Strix is service-backed; Aleph should not assume a local desktop app.",
+                ),
                 String::from("Note edit should stay lightweight and open a real text editor."),
                 String::from("Keep the command surface aligned with the product plan."),
             ],
@@ -359,6 +306,25 @@ impl App {
 
         app.rebuild_chat_render_cache();
         app
+    }
+
+    fn default_local_notes() -> Vec<Note> {
+        let content = String::from(
+            "# Welcome to Aleph\n\n\
+Aleph is a terminal workspace for notes, search, AI assistance, and sync. Start with `/settings` to choose how notes are saved, pair Obsidian, or connect Strix. Use `/note list` to browse notes, `/note create <title> :: <body>` to start writing, `/note edit` to edit the selected note, and `/ask <question>` when you want help from the selected AI provider.\n\n\
+To use Obsidian, open `/obsidian pair`, choose your vault, then confirm the sync prompt to import Markdown notes. You can run `/obsidian sync` again later whenever you want to refresh Aleph from the paired vault.",
+        );
+
+        vec![Note {
+            id: 1,
+            remote_id: None,
+            obsidian_path: None,
+            title: String::from("Welcome to Aleph"),
+            raw_content: content.clone(),
+            content,
+            updated_at: String::from("seed"),
+            folder_id: Some(3),
+        }]
     }
 
     pub fn run_cli_command(&mut self, args: &[String]) -> Result<Vec<String>, String> {
@@ -1108,6 +1074,10 @@ impl App {
         self.panel_mode == PanelMode::VaultPicker
     }
 
+    pub fn is_obsidian_sync_confirm(&self) -> bool {
+        self.panel_mode == PanelMode::ObsidianSyncConfirm
+    }
+
     pub fn note_list_selected(&self) -> usize {
         self.note_list_selected
     }
@@ -1350,6 +1320,10 @@ impl App {
             self.handle_vault_picker_key(key_event);
             return;
         }
+        if self.is_obsidian_sync_confirm() {
+            self.handle_obsidian_sync_confirm_key(key_event);
+            return;
+        }
         if self.is_settings() {
             self.handle_settings_key(key_event);
             return;
@@ -1403,6 +1377,11 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, mouse_event: MouseEvent) {
+        if self.is_settings() {
+            self.handle_settings_mouse(mouse_event);
+            return;
+        }
+
         if self.is_ai_chat() {
             match mouse_event.kind {
                 MouseEventKind::ScrollUp => self.scroll_chat_up(3),
@@ -1418,6 +1397,26 @@ impl App {
         {
             self.close_ai_overlay();
         }
+    }
+
+    fn handle_settings_mouse(&mut self, mouse_event: MouseEvent) {
+        if !matches!(mouse_event.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        const SETTINGS_LIST_START_ROW: u16 = 20;
+        const SETTINGS_ITEM_COUNT: usize = 7;
+
+        let Some(row) = mouse_event.row.checked_sub(SETTINGS_LIST_START_ROW) else {
+            return;
+        };
+        let index = row as usize;
+        if index >= SETTINGS_ITEM_COUNT {
+            return;
+        }
+
+        self.settings_selected = index;
+        self.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     }
 
     fn handle_editor_key(&mut self, key_event: KeyEvent) {
@@ -4884,13 +4883,12 @@ impl App {
                 let path = self.obsidian_vaults[0].path.clone();
                 match self.pair_obsidian_vault(path) {
                     Ok(message) => {
-                        self.set_result_panel(
-                            "Obsidian paired",
-                            vec![
-                                message,
-                                String::from("Run /obsidian sync to import Markdown notes."),
-                            ],
-                        );
+                        self.panel_mode = PanelMode::ObsidianSyncConfirm;
+                        self.panel_title = String::from("Sync Obsidian?");
+                        self.panel_lines = vec![
+                            message,
+                            String::from("Would you like to import notes from this vault now?"),
+                        ];
                         self.last_action = String::from("Paired Obsidian vault.");
                     }
                     Err(error) => {
@@ -4910,13 +4908,12 @@ impl App {
 
         match self.pair_obsidian_vault(target_path) {
             Ok(message) => {
-                self.set_result_panel(
-                    "Obsidian paired",
-                    vec![
-                        message,
-                        String::from("Run /obsidian sync to import Markdown notes."),
-                    ],
-                );
+                self.panel_mode = PanelMode::ObsidianSyncConfirm;
+                self.panel_title = String::from("Sync Obsidian?");
+                self.panel_lines = vec![
+                    message,
+                    String::from("Would you like to import notes from this vault now?"),
+                ];
                 self.last_action = String::from("Paired Obsidian vault.");
             }
             Err(error) => {
@@ -4927,6 +4924,7 @@ impl App {
     }
 
     fn open_vault_picker(&mut self) {
+        self.refresh_obsidian_vaults();
         self.panel_mode = PanelMode::VaultPicker;
         self.panel_title = String::from("Obsidian pairing");
         self.panel_lines.clear();
@@ -5419,6 +5417,13 @@ impl App {
                 error
             )
         })
+    }
+
+    fn clear_obsidian_vault_path(&self) {
+        if let Ok(entry) = Self::obsidian_vault_entry() {
+            let _ = entry.delete_credential();
+        }
+        let _ = fs::remove_file(Self::obsidian_pairing_path());
     }
 
     fn obsidian_vault_entry() -> Result<Entry, String> {
@@ -6127,13 +6132,13 @@ impl App {
         // Clear API keys from keyring
         self.clear_openrouter_api_key();
         self.clear_strix_access_token();
+        self.clear_obsidian_vault_path();
 
         // Clear all cached data files
         let _ = std::fs::remove_file(Self::strix_cache_path());
         let _ = std::fs::remove_file(Self::ai_provider_path());
         let _ = std::fs::remove_file(Self::note_save_target_path());
         let _ = std::fs::remove_file(Self::agent_mode_path());
-        let _ = std::fs::remove_file(Self::obsidian_pairing_path());
 
         // Reset all settings to defaults
         self.ai_provider = AiProvider::OpenRouter;
@@ -6155,7 +6160,7 @@ impl App {
         self.chat_render_cache.clear();
         self.chat_render_dirty = true;
         self.chat_cache_stable_len = 0;
-        self.notes.clear();
+        self.notes = Self::default_local_notes();
         self.selected_note = 0;
         self.memories.clear();
         self.canvases.clear();
@@ -7675,14 +7680,12 @@ impl App {
                 {
                     match self.pair_obsidian_vault(vault.path) {
                         Ok(message) => {
-                            self.panel_mode = PanelMode::Commands;
-                            self.set_result_panel(
-                                "Obsidian paired",
-                                vec![
-                                    message,
-                                    String::from("Run /obsidian sync to import Markdown notes."),
-                                ],
-                            );
+                            self.panel_mode = PanelMode::ObsidianSyncConfirm;
+                            self.panel_title = String::from("Sync Obsidian?");
+                            self.panel_lines = vec![
+                                message,
+                                String::from("Would you like to import notes from this vault now?"),
+                            ];
                             self.last_action = String::from("Paired Obsidian vault.");
                         }
                         Err(error) => {
@@ -7694,6 +7697,48 @@ impl App {
             }
             KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.request_quit();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_obsidian_sync_confirm_key(&mut self, key_event: KeyEvent) {
+        if key_event.kind != KeyEventKind::Press {
+            return;
+        }
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.panel_mode = PanelMode::Commands;
+                self.panel_title = String::from("Commands");
+                self.panel_lines.clear();
+                self.last_action = String::from("Skipped Obsidian sync.");
+            }
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                match self.sync_obsidian_notes() {
+                    Ok(count) => {
+                        let vault = self
+                            .obsidian_vault_path
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| String::from("unknown vault"));
+                        self.set_result_panel(
+                            "Obsidian sync",
+                            vec![
+                                format!("Imported {} Markdown notes.", count),
+                                format!("Vault: {}", vault),
+                                String::from(
+                                    "Use /note list, /search, /note edit, and /obsidian open.",
+                                ),
+                            ],
+                        );
+                        self.last_action = format!("Synced {} Obsidian notes.", count);
+                    }
+                    Err(error) => {
+                        self.set_result_panel("Obsidian sync failed", vec![error]);
+                        self.last_action = String::from("Obsidian sync failed.");
+                    }
+                }
+                self.panel_mode = PanelMode::Commands;
             }
             _ => {}
         }
@@ -8034,6 +8079,16 @@ mod tests {
         }
     }
 
+    fn seed_test_notes(app: &mut App) {
+        app.notes = vec![
+            test_note(1, None, "Strix gateway", "gateway notes"),
+            test_note(2, None, "Note editor", "editor notes"),
+            test_note(3, None, "MCP server", "server notes"),
+            test_note(4, None, "Feature ideas", "feature notes"),
+        ];
+        app.selected_note = 0;
+    }
+
     #[test]
     fn repeated_character_events_do_not_duplicate_input() {
         let mut app = App::new();
@@ -8042,6 +8097,16 @@ mod tests {
         app.handle_key(repeat(KeyCode::Char('a')));
 
         assert_eq!(app.prompt(), "a");
+    }
+
+    #[test]
+    fn unpaired_app_starts_with_single_onboarding_note() {
+        let app = App::new();
+
+        assert_eq!(app.notes.len(), 1);
+        assert_eq!(app.notes[0].title, "Welcome to Aleph");
+        assert!(app.notes[0].content.contains("/settings"));
+        assert!(app.notes[0].content.contains("/obsidian pair"));
     }
 
     #[test]
@@ -8187,6 +8252,58 @@ mod tests {
 
         assert!(app.is_vault_picker());
         assert_eq!(app.obsidian_vault_selected(), 0);
+    }
+
+    #[test]
+    fn settings_obsidian_row_opens_pairing_when_unpaired() {
+        let mut app = App::new();
+        app.obsidian_vault_path = None;
+
+        app.open_settings_panel();
+        for _ in 0..3 {
+            app.handle_settings_key(press(KeyCode::Down));
+        }
+        app.handle_settings_key(press(KeyCode::Enter));
+
+        assert!(app.is_vault_picker());
+    }
+
+    #[test]
+    fn clicking_settings_obsidian_row_opens_pairing_when_unpaired() {
+        let mut app = App::new();
+        app.obsidian_vault_path = None;
+
+        app.open_settings_panel();
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: 23,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(app.is_vault_picker());
+    }
+
+    #[test]
+    fn reset_clears_obsidian_pairing_fallback_file() {
+        let config_dir =
+            std::env::temp_dir().join(format!("aleph-obsidian-reset-test-{}", App::now_millis()));
+        std::env::set_var("ALEPH_CONFIG_DIR", &config_dir);
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(App::obsidian_pairing_path(), "/tmp/aleph-test-vault").unwrap();
+
+        let mut app = App::new();
+        app.obsidian_vault_path = Some(PathBuf::from("/tmp/aleph-test-vault"));
+        app.note_save_target = NoteSaveTarget::Obsidian;
+
+        app.reset_and_clear_all();
+
+        assert!(app.obsidian_vault_path().is_none());
+        assert_eq!(app.note_save_target, NoteSaveTarget::Local);
+        assert!(!App::obsidian_pairing_path().exists());
+
+        std::env::remove_var("ALEPH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(config_dir);
     }
 
     #[test]
@@ -8366,6 +8483,7 @@ mod tests {
     #[test]
     fn note_append_can_target_a_note() {
         let mut app = App::new();
+        seed_test_notes(&mut app);
         app.note_save_target = NoteSaveTarget::Local;
 
         for character in "/note append Feature ideas :: added target text".chars() {
@@ -8401,6 +8519,7 @@ mod tests {
     #[test]
     fn note_list_delete_can_be_confirmed_with_enter_or_d() {
         let mut app = App::new();
+        seed_test_notes(&mut app);
         let original_count = app.notes.len();
 
         app.open_note_list_panel();
@@ -8433,6 +8552,7 @@ mod tests {
     #[test]
     fn note_list_delete_pending_is_cancelled_by_moving_selection() {
         let mut app = App::new();
+        seed_test_notes(&mut app);
         let original_count = app.notes.len();
 
         app.open_note_list_panel();
@@ -8517,6 +8637,7 @@ mod tests {
     #[test]
     fn agent_mode_routes_current_note_edit_without_note_keyword() {
         let mut app = App::new();
+        seed_test_notes(&mut app);
         app.openrouter_api_key = None;
         app.strix_access_token = None;
         app.refresh_connection_state();
@@ -8541,6 +8662,7 @@ mod tests {
     #[test]
     fn agent_mode_can_decide_to_work_on_existing_selected_note() {
         let mut app = App::new();
+        seed_test_notes(&mut app);
         app.openrouter_api_key = None;
         app.strix_access_token = None;
         app.refresh_connection_state();
@@ -8565,6 +8687,7 @@ mod tests {
     #[test]
     fn agent_mode_can_choose_existing_note_by_title() {
         let mut app = App::new();
+        seed_test_notes(&mut app);
         app.openrouter_api_key = None;
         app.strix_access_token = None;
         app.refresh_connection_state();

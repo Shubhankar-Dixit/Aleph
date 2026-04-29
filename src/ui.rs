@@ -219,6 +219,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         PanelMode::NoteList => render_note_list_panel(frame, app, root[4]),
         PanelMode::NoteEditor => render_note_editor_panel(frame, app, root[4]),
         PanelMode::Settings => render_settings_panel(frame, app, root[4]),
+        PanelMode::ObsidianSyncConfirm => render_obsidian_sync_confirm_panel(frame, app, root[4]),
         PanelMode::FullEditor | PanelMode::AiChat => {}
     }
 }
@@ -1804,11 +1805,10 @@ fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let settings_items: Vec<(String, String, bool)> = vec![
+    let settings_items: Vec<(String, String)> = vec![
         (
             "Model Provider".to_string(),
             format!("{} (Enter to cycle)", model_provider_label),
-            true,
         ),
         (
             "Mode".to_string(),
@@ -1817,12 +1817,10 @@ fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 "Chat (answers only)".to_string()
             },
-            true,
         ),
         (
             "Save Notes".to_string(),
             format!("{} (Enter to cycle)", app.note_save_target_label()),
-            true,
         ),
         (
             "Obsidian Vault".to_string(),
@@ -1831,25 +1829,22 @@ fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 "Not paired".to_string()
             },
-            app.obsidian_vault_path().is_some(),
         ),
         (
             "Sign out".to_string(),
             "Clear all saved credentials".to_string(),
-            app.is_openrouter_connected() || app.is_strix_connected(),
         ),
         (
             "Reset & Clear".to_string(),
             "Clear cache and reset all settings".to_string(),
-            true,
         ),
-        ("Close".to_string(), "Exit settings".to_string(), true),
+        ("Close".to_string(), "Exit settings".to_string()),
     ];
 
     let lines: Vec<Line> = settings_items
         .iter()
         .enumerate()
-        .map(|(index, (name, value, _))| {
+        .map(|(index, (name, value))| {
             let marker = if index == selected { "▶ " } else { "  " };
             let name_style = if index == selected {
                 Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
@@ -1885,6 +1880,51 @@ fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
     .alignment(Alignment::Right)
     .style(Style::default().fg(MUTED));
     frame.render_widget(footer, sections[2]);
+}
+
+fn render_obsidian_sync_confirm_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            app.panel_title(),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER))
+        .style(Style::default().bg(PANEL));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    let lines: Vec<Line> = app
+        .panel_lines()
+        .iter()
+        .map(|line| {
+            Line::from(vec![Span::styled(
+                format!("  {}", line),
+                Style::default().fg(TEXT),
+            )])
+        })
+        .collect();
+
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        sections[0],
+    );
+
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("Enter/Y", Style::default().fg(ACCENT)),
+        Span::raw(" sync now · "),
+        Span::styled("Esc/N", Style::default().fg(MUTED)),
+        Span::raw(" skip"),
+    ]))
+    .alignment(Alignment::Right)
+    .style(Style::default().fg(MUTED));
+    frame.render_widget(footer, sections[1]);
 }
 
 /// Represents a line in a diff view

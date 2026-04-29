@@ -49,6 +49,7 @@ pub enum PanelMode {
     NoteList,
     VaultPicker,
     Settings,
+    ObsidianSyncConfirm,
 }
 
 #[derive(Clone)]
