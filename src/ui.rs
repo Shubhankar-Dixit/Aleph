@@ -6,16 +6,24 @@ use ratatui::widgets::{
 
 mod markdown;
 
-use crate::app::{App, PanelMode};
-use markdown::{render_markdown_line, render_markdown_line_with_cursor};
+use crate::app::{AiProvider, App, PanelMode};
+use markdown::{
+    render_markdown_line, render_markdown_line_with_cursor, render_markdown_line_with_selection,
+    render_panel_markdown_line,
+};
 
 const BG: Color = Color::Rgb(25, 26, 34);
 const ACCENT: Color = Color::Rgb(156, 146, 201);
 const ACCENT_SOFT: Color = Color::Rgb(115, 106, 155);
 const TEXT: Color = Color::Rgb(198, 198, 210);
 const MUTED: Color = Color::Rgb(120, 122, 138);
-const EDITOR_TEXT: Color = Color::Rgb(168, 169, 181);
+const EDITOR_TEXT: Color = Color::Rgb(130, 132, 145);
 const EDITOR_MUTED: Color = Color::Rgb(98, 101, 116);
+const EDITOR_SELECTION_BG: Color = Color::Rgb(60, 62, 78);
+const DIFF_ADDED_FG: Color = Color::Rgb(120, 220, 140); // Green for additions
+const DIFF_REMOVED_FG: Color = Color::Rgb(220, 100, 100); // Red for removals
+const DIFF_ADDED_BG: Color = Color::Rgb(30, 60, 40); // Dark green background
+const DIFF_REMOVED_BG: Color = Color::Rgb(60, 30, 35); // Dark red background
 const PANEL: Color = Color::Rgb(35, 36, 48);
 const BORDER: Color = Color::Rgb(34, 65, 64);
 const GHOST_FRAMES: [&str; 4] = ["◌", "◎", "◍", "◉"];
@@ -244,7 +252,11 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let editor_content_area = h_chunks[1];
 
     let title = app.editor_note_title().unwrap_or("Untitled");
+
+    // Get original and proposed text for diff rendering
+    let original_text = app.editor_buffer();
     let editor_text = app.editor_display_buffer();
+    let is_ai_preview = app.has_live_ai_editor_preview();
     let word_count = editor_word_count(editor_text);
 
     let meta_style = if app.save_shimmer_ticks() > 0 {
@@ -317,46 +329,87 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let mut cursor_visual_row: Option<u16> = None;
     let mut cursor_visual_col: u16 = 0;
     let mut visual_row: u16 = 0;
+    let selection = app.editor_selection();
+    let has_selection = selection.active && !is_ai_preview;
 
-    for line_text in editor_text.lines() {
-        let line_len = line_text.len();
-        let line_start = char_pos;
-        let line_end = char_pos + line_len;
+    // Use diff rendering for AI preview, otherwise normal rendering
+    if is_ai_preview {
+        // Render diff view
+        let diff_lines = compute_line_diff(original_text, editor_text);
+        for (line_text, line_type) in diff_lines {
+            lines.push(render_diff_line(line_text, line_type));
+        }
+    } else {
+        // Normal rendering with selection support
+        for line_text in editor_text.lines() {
+            let line_len = line_text.len();
+            let line_start = char_pos;
+            let line_end = char_pos + line_len;
 
-        if line_text.starts_with("# ") && line_start > 0 {
-            lines.push(Line::from(""));
+            if line_text.starts_with("# ") && line_start > 0 {
+                lines.push(Line::from(""));
+                visual_row = visual_row.saturating_add(1);
+            }
+
+            if cursor >= line_start && cursor <= line_end {
+                let cursor_in_line = cursor - line_start;
+                cursor_visual_row = Some(visual_row);
+                cursor_visual_col = line_text[..cursor_in_line].chars().count() as u16;
+
+                if has_selection {
+                    lines.push(render_markdown_line_with_selection(
+                        line_text,
+                        cursor_in_line,
+                        app.editor_cursor_style(),
+                        selection,
+                        line_start,
+                    ));
+                } else {
+                    lines.push(render_markdown_line_with_cursor(
+                        line_text,
+                        cursor_in_line,
+                        app.editor_cursor_style(),
+                    ));
+                }
+            } else if has_selection && selection.end > line_start && selection.start < line_end {
+                // Selection covers this line but cursor is elsewhere
+                lines.push(render_markdown_line_with_selection(
+                    line_text,
+                    0, // cursor not in this line
+                    app.editor_cursor_style(),
+                    selection,
+                    line_start,
+                ));
+            } else {
+                lines.push(render_markdown_line(line_text));
+            }
             visual_row = visual_row.saturating_add(1);
+
+            if line_text.starts_with("# ") {
+                lines.push(Line::from(""));
+                visual_row = visual_row.saturating_add(1);
+            }
+
+            char_pos += line_len + 1;
         }
 
-        if cursor >= line_start && cursor <= line_end {
-            let cursor_in_line = cursor - line_start;
-            cursor_visual_row = Some(visual_row);
-            cursor_visual_col = line_text[..cursor_in_line].chars().count() as u16;
-
-            lines.push(render_markdown_line_with_cursor(
-                line_text,
-                cursor_in_line,
-                app.editor_cursor_style(),
-            ));
-        } else {
-            lines.push(render_markdown_line(line_text));
+        if editor_text.is_empty() {
+            if has_selection {
+                lines.push(render_markdown_line_with_selection(
+                    "",
+                    0,
+                    app.editor_cursor_style(),
+                    selection,
+                    0,
+                ));
+            } else {
+                lines.push(render_markdown_line_with_cursor(
+                    "",
+                    0,
+                    app.editor_cursor_style(),
+                ));
+            }
         }
-        visual_row = visual_row.saturating_add(1);
-
-        if line_text.starts_with("# ") {
-            lines.push(Line::from(""));
-            visual_row = visual_row.saturating_add(1);
-        }
-
-        char_pos += line_len + 1;
-    }
-
-    if editor_text.is_empty() {
-        lines.push(render_markdown_line_with_cursor(
-            "",
-            0,
-            app.editor_cursor_style(),
-        ));
     }
 
     let cursor_line = editor_text[..cursor.min(editor_text.len())]
@@ -364,7 +417,11 @@ fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
         .filter(|&c| c == '\n')
         .count();
 
-    let total_lines = editor_text.lines().count().max(1);
+    let total_lines = if is_ai_preview {
+        lines.len().max(1)
+    } else {
+        editor_text.lines().count().max(1)
+    };
     let visible_lines = editor_content_area.height as usize;
 
     let mut effective_scroll_offset = app.editor_scroll_offset();
@@ -810,7 +867,7 @@ fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
         let content: Vec<Line> = app
             .panel_lines()
             .iter()
-            .map(|line| render_markdown_line(line))
+            .map(|line| render_panel_markdown_line(line))
             .collect();
         let paragraph = Paragraph::new(content).wrap(Wrap { trim: false });
         frame.render_widget(paragraph, inner);
@@ -1619,14 +1676,27 @@ fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "Chat"
     };
+    let provider_connected = match app.ai_provider() {
+        AiProvider::OpenRouter => app.is_openrouter_connected(),
+        AiProvider::Strix => app.is_strix_connected(),
+    };
+    let provider_status = if provider_connected {
+        "connected"
+    } else {
+        "offline"
+    };
+
     let title = if app.is_streaming() {
         format!("Aleph {} {} streaming...", mode_label, app.thinking_frame())
     } else if app.is_thinking() {
         format!("Aleph {} {} focusing...", mode_label, app.thinking_frame())
-    } else if app.is_openrouter_connected() {
-        format!("Aleph {} · OpenRouter connected", mode_label)
     } else {
-        format!("Aleph {} · OpenRouter offline", mode_label)
+        format!(
+            "Aleph {} · {} {}",
+            mode_label,
+            app.ai_provider_label(),
+            provider_status
+        )
     };
 
     let top_meta = Paragraph::new(Line::from(vec![Span::styled(title, meta_style)]))
@@ -1768,6 +1838,11 @@ fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
             "Clear all saved credentials".to_string(),
             app.is_openrouter_connected() || app.is_strix_connected(),
         ),
+        (
+            "Reset & Clear".to_string(),
+            "Clear cache and reset all settings".to_string(),
+            true,
+        ),
         ("Close".to_string(), "Exit settings".to_string(), true),
     ];
 
@@ -1810,6 +1885,92 @@ fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
     .alignment(Alignment::Right)
     .style(Style::default().fg(MUTED));
     frame.render_widget(footer, sections[2]);
+}
+
+/// Represents a line in a diff view
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffLineType {
+    Unchanged,
+    Added,
+    Removed,
+}
+
+/// Compute a simple line-based diff between original and proposed text
+/// Returns a Vec of (line_text, line_type) tuples
+fn compute_line_diff<'a>(original: &'a str, proposed: &'a str) -> Vec<(&'a str, DiffLineType)> {
+    let original_lines: Vec<&str> = original.lines().collect();
+    let proposed_lines: Vec<&str> = proposed.lines().collect();
+
+    let mut result = Vec::new();
+    let mut orig_idx = 0;
+    let mut prop_idx = 0;
+
+    while orig_idx < original_lines.len() || prop_idx < proposed_lines.len() {
+        match (original_lines.get(orig_idx), proposed_lines.get(prop_idx)) {
+            (Some(orig), Some(prop)) => {
+                if orig == prop {
+                    result.push((*orig, DiffLineType::Unchanged));
+                    orig_idx += 1;
+                    prop_idx += 1;
+                } else {
+                    // Check if this line was replaced or just added/removed
+                    // Simple heuristic: if next proposed line matches current original, this is a removal
+                    if orig_idx + 1 < original_lines.len()
+                        && original_lines.get(orig_idx + 1) == Some(prop)
+                    {
+                        result.push((*orig, DiffLineType::Removed));
+                        orig_idx += 1;
+                    } else if prop_idx + 1 < proposed_lines.len()
+                        && proposed_lines.get(prop_idx + 1) == Some(orig)
+                    {
+                        result.push((*prop, DiffLineType::Added));
+                        prop_idx += 1;
+                    } else {
+                        // Treat as replacement: show removed then added
+                        result.push((*orig, DiffLineType::Removed));
+                        result.push((*prop, DiffLineType::Added));
+                        orig_idx += 1;
+                        prop_idx += 1;
+                    }
+                }
+            }
+            (Some(orig), None) => {
+                result.push((*orig, DiffLineType::Removed));
+                orig_idx += 1;
+            }
+            (None, Some(prop)) => {
+                result.push((*prop, DiffLineType::Added));
+                prop_idx += 1;
+            }
+            (None, None) => break,
+        }
+    }
+
+    result
+}
+
+/// Render a diff line with appropriate styling
+fn render_diff_line(line_text: &str, line_type: DiffLineType) -> Line<'_> {
+    match line_type {
+        DiffLineType::Unchanged => render_markdown_line(line_text),
+        DiffLineType::Added => {
+            let style = Style::default().fg(DIFF_ADDED_FG).bg(DIFF_ADDED_BG);
+            Line::from(vec![
+                Span::styled("+ ", style.add_modifier(Modifier::BOLD)),
+                Span::styled(line_text, style),
+            ])
+        }
+        DiffLineType::Removed => {
+            let style = Style::default()
+                .fg(DIFF_REMOVED_FG)
+                .bg(DIFF_REMOVED_BG)
+                .add_modifier(Modifier::CROSSED_OUT);
+            Line::from(vec![
+                Span::styled("- ", style.add_modifier(Modifier::BOLD)),
+                Span::styled(line_text, style),
+            ])
+        }
+    }
 }
 
 #[cfg(test)]

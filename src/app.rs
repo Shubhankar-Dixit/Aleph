@@ -21,7 +21,7 @@ use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 
 mod commands;
-mod model;
+pub mod model;
 
 pub use commands::{COMMANDS, THINKING_FRAMES};
 pub use model::*;
@@ -104,6 +104,7 @@ pub struct App {
     editor_scroll_offset: usize,
     editor_word_wrap: bool,
     editor_cursor_style: CursorStyle,
+    editor_selection: Selection,
     undo_stack: VecDeque<EditorState>,
     redo_stack: VecDeque<EditorState>,
     search_state: SearchState,
@@ -295,6 +296,7 @@ impl App {
             editor_scroll_offset: 0,
             editor_word_wrap: true,
             editor_cursor_style: CursorStyle::Line,
+            editor_selection: Selection::default(),
             undo_stack: VecDeque::with_capacity(100),
             redo_stack: VecDeque::with_capacity(100),
             search_state: SearchState {
@@ -1033,6 +1035,10 @@ impl App {
         self.editor_cursor_style
     }
 
+    pub fn editor_selection(&self) -> &Selection {
+        &self.editor_selection
+    }
+
     pub fn search_state(&self) -> &SearchState {
         &self.search_state
     }
@@ -1432,36 +1438,54 @@ impl App {
             {
                 self.save_editor();
             }
+            KeyCode::Char('a')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.select_all_editor();
+            }
             KeyCode::Esc if key_event.kind == KeyEventKind::Press => self.exit_editor(),
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
                 self.save_undo_state();
+                self.clear_editor_selection();
                 self.insert_editor_character('\n');
             }
             KeyCode::Tab if key_event.kind == KeyEventKind::Press => {
+                self.clear_editor_selection();
                 self.insert_editor_text("    ");
             }
-            KeyCode::Backspace if key_event.kind == KeyEventKind::Press => self.editor_backspace(),
-            KeyCode::Delete if key_event.kind == KeyEventKind::Press => self.editor_delete(),
+            KeyCode::Backspace if key_event.kind == KeyEventKind::Press => {
+                self.clear_editor_selection();
+                self.editor_backspace()
+            }
+            KeyCode::Delete if key_event.kind == KeyEventKind::Press => {
+                self.clear_editor_selection();
+                self.editor_delete()
+            }
             KeyCode::Left
                 if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
             {
+                self.clear_editor_selection();
                 self.editor_move_left()
             }
             KeyCode::Right
                 if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
             {
+                self.clear_editor_selection();
                 self.editor_move_right()
             }
             KeyCode::Up
                 if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
                     && !key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
+                self.clear_editor_selection();
                 self.editor_move_up()
             }
             KeyCode::Down
                 if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
                     && !key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
+                self.clear_editor_selection();
                 self.editor_move_down()
             }
             KeyCode::Up
@@ -1478,20 +1502,26 @@ impl App {
             }
             KeyCode::PageUp if key_event.kind == KeyEventKind::Press => self.scroll_up(10),
             KeyCode::PageDown if key_event.kind == KeyEventKind::Press => self.scroll_down(10),
-            KeyCode::Home if key_event.kind == KeyEventKind::Press => self.editor_cursor = 0,
+            KeyCode::Home if key_event.kind == KeyEventKind::Press => {
+                self.clear_editor_selection();
+                self.editor_cursor = 0
+            }
             KeyCode::End if key_event.kind == KeyEventKind::Press => {
+                self.clear_editor_selection();
                 self.editor_cursor = self.editor_buffer.len()
             }
             KeyCode::Char('z')
                 if key_event.kind == KeyEventKind::Press
                     && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
+                self.clear_editor_selection();
                 self.undo();
             }
             KeyCode::Char('y')
                 if key_event.kind == KeyEventKind::Press
                     && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
+                self.clear_editor_selection();
                 self.redo();
             }
             KeyCode::Char('f')
@@ -6093,6 +6123,98 @@ impl App {
         }
     }
 
+    fn reset_and_clear_all(&mut self) {
+        // Clear API keys from keyring
+        self.clear_openrouter_api_key();
+        self.clear_strix_access_token();
+
+        // Clear all cached data files
+        let _ = std::fs::remove_file(Self::strix_cache_path());
+        let _ = std::fs::remove_file(Self::ai_provider_path());
+        let _ = std::fs::remove_file(Self::note_save_target_path());
+        let _ = std::fs::remove_file(Self::agent_mode_path());
+        let _ = std::fs::remove_file(Self::obsidian_pairing_path());
+
+        // Reset all settings to defaults
+        self.ai_provider = AiProvider::OpenRouter;
+        self.note_save_target = NoteSaveTarget::Local;
+        self.agent_mode_enabled = false;
+
+        // Clear connection state
+        self.openrouter_api_key = None;
+        self.strix_access_token = None;
+        self.obsidian_vault_path = None;
+        self.obsidian_vaults.clear();
+        self.obsidian_vault_selected = 0;
+
+        // Clear chat and notes data
+        self.chat_messages.clear();
+        self.chat_input_buffer.clear();
+        self.chat_input_cursor = 0;
+        self.chat_scroll_offset = 0;
+        self.chat_render_cache.clear();
+        self.chat_render_dirty = true;
+        self.chat_cache_stable_len = 0;
+        self.notes.clear();
+        self.selected_note = 0;
+        self.memories.clear();
+        self.canvases.clear();
+
+        // Clear editor state
+        self.editor_buffer.clear();
+        self.editor_cursor = 0;
+        self.editor_selection.clear();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.search_state = SearchState::default();
+        self.editor_note_index = None;
+        self.editing_title = false;
+        self.title_buffer.clear();
+        self.title_cursor = 0;
+
+        // Clear AI state
+        self.ai_input_buffer.clear();
+        self.ai_input_cursor = 0;
+        self.pending_ai_edit = None;
+        self.ai_draft_create_title = None;
+        self.ghost_result = None;
+        self.ghost_streaming = false;
+        self.strix_logs.clear();
+        self.streaming_buffer.clear();
+        self.streaming_active = false;
+
+        // Cancel any ongoing operations
+        self.chat_stream_rx = None;
+        self.openrouter_login_rx = None;
+        self.strix_login_rx = None;
+        self.ghost_stream_rx = None;
+        if let Some(cancel_flag) = &self.openrouter_login_cancel {
+            cancel_flag.store(true, Ordering::Relaxed);
+        }
+        self.openrouter_login_cancel = None;
+        if let Some(cancel_flag) = &self.strix_login_cancel {
+            cancel_flag.store(true, Ordering::Relaxed);
+        }
+        self.strix_login_cancel = None;
+
+        // Reset UI state
+        self.thinking = false;
+        self.thinking_ticks_remaining = 0;
+        self.ai_overlay_visible = false;
+        self.ai_overlay_pulse_ticks = 0;
+        self.save_shimmer_ticks = 0;
+        self.panel_mode = PanelMode::Commands;
+        self.panel_title = String::from("Commands");
+        self.panel_lines.clear();
+        self.suggestion_filter = None;
+        self.history.clear();
+        self.history_index = None;
+        self.last_action = String::from("All data cleared and settings reset.");
+
+        // Refresh connection state
+        self.refresh_connection_state();
+    }
+
     fn openrouter_key_entry() -> Result<Entry, String> {
         Entry::new(OPENROUTER_SERVICE, OPENROUTER_ACCOUNT)
             .map_err(|error| format!("failed to open OpenRouter API key store: {}", error))
@@ -6510,6 +6632,7 @@ impl App {
     }
 
     fn insert_editor_character(&mut self, character: char) {
+        self.clear_editor_selection();
         self.editor_buffer.insert(self.editor_cursor, character);
         self.editor_cursor += character.len_utf8();
     }
@@ -6552,6 +6675,19 @@ impl App {
             CursorStyle::Block => CursorStyle::Line,
             CursorStyle::Line => CursorStyle::Block,
         };
+    }
+
+    fn select_all_editor(&mut self) {
+        let buffer_len = if self.has_live_ai_editor_preview() {
+            self.editor_display_buffer().len()
+        } else {
+            self.editor_buffer.len()
+        };
+        self.editor_selection.select_all(buffer_len);
+    }
+
+    fn clear_editor_selection(&mut self) {
+        self.editor_selection.clear();
     }
 
     fn scroll_up(&mut self, lines: usize) {
@@ -6946,6 +7082,13 @@ impl App {
                     self.toggle_cursor_style();
                     return;
                 }
+                KeyCode::Char('a')
+                    if key_event.kind == KeyEventKind::Press
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.select_all_editor();
+                    return;
+                }
                 _ => {
                     if self.has_pending_ai_edit() {
                         self.last_action =
@@ -6970,6 +7113,12 @@ impl App {
                     && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.save_editor();
+            }
+            KeyCode::Char('a')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.select_all_editor();
             }
             KeyCode::Esc if key_event.kind == KeyEventKind::Press => self.exit_editor(),
             KeyCode::Tab if key_event.kind == KeyEventKind::Press => {
@@ -7000,32 +7149,49 @@ impl App {
 
     fn handle_editor_content_key(&mut self, key_event: KeyEvent) {
         match key_event.code {
+            KeyCode::Char('a')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.select_all_editor();
+            }
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
                 self.save_undo_state();
+                self.clear_editor_selection();
                 self.insert_editor_character('\n');
             }
-            KeyCode::Backspace if key_event.kind == KeyEventKind::Press => self.editor_backspace(),
-            KeyCode::Delete if key_event.kind == KeyEventKind::Press => self.editor_delete(),
+            KeyCode::Backspace if key_event.kind == KeyEventKind::Press => {
+                self.clear_editor_selection();
+                self.editor_backspace()
+            }
+            KeyCode::Delete if key_event.kind == KeyEventKind::Press => {
+                self.clear_editor_selection();
+                self.editor_delete()
+            }
             KeyCode::Left
                 if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
             {
+                self.clear_editor_selection();
                 self.editor_move_left()
             }
             KeyCode::Right
                 if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
             {
+                self.clear_editor_selection();
                 self.editor_move_right()
             }
             KeyCode::Up
                 if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
                     && !key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
+                self.clear_editor_selection();
                 self.editor_move_up()
             }
             KeyCode::Down
                 if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
                     && !key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
+                self.clear_editor_selection();
                 self.editor_move_down()
             }
             KeyCode::Up
@@ -7042,20 +7208,26 @@ impl App {
             }
             KeyCode::PageUp if key_event.kind == KeyEventKind::Press => self.scroll_up(10),
             KeyCode::PageDown if key_event.kind == KeyEventKind::Press => self.scroll_down(10),
-            KeyCode::Home if key_event.kind == KeyEventKind::Press => self.editor_cursor = 0,
+            KeyCode::Home if key_event.kind == KeyEventKind::Press => {
+                self.clear_editor_selection();
+                self.editor_cursor = 0
+            }
             KeyCode::End if key_event.kind == KeyEventKind::Press => {
+                self.clear_editor_selection();
                 self.editor_cursor = self.editor_buffer.len()
             }
             KeyCode::Char('z')
                 if key_event.kind == KeyEventKind::Press
                     && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
+                self.clear_editor_selection();
                 self.undo();
             }
             KeyCode::Char('y')
                 if key_event.kind == KeyEventKind::Press
                     && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
+                self.clear_editor_selection();
                 self.redo();
             }
             KeyCode::Char('w')
@@ -7217,7 +7389,7 @@ impl App {
                 }
             }
             KeyCode::Down => {
-                if self.settings_selected < 5 {
+                if self.settings_selected < 6 {
                     self.settings_selected += 1;
                 }
             }
@@ -7310,6 +7482,14 @@ impl App {
                         self.last_action = String::from("Signed out.");
                     }
                     5 => {
+                        // Reset & Clear Cache
+                        self.reset_and_clear_all();
+                        self.panel_mode = PanelMode::Commands;
+                        self.panel_title = String::from("Commands");
+                        self.panel_lines.clear();
+                        self.last_action = String::from("Reset complete. All data cleared.");
+                    }
+                    6 => {
                         // Close settings
                         self.panel_mode = PanelMode::Commands;
                         self.panel_title = String::from("Commands");

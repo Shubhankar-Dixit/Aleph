@@ -87,10 +87,43 @@ pub struct AiEditProposal {
     pub diff_lines: Vec<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SearchState {
     pub query: String,
     pub matches: Vec<usize>,
     pub current_match: Option<usize>,
     pub active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Selection {
+    pub start: usize,
+    pub end: usize,
+    pub active: bool,
+}
+
+impl Selection {
+    pub fn new(start: usize, end: usize) -> Self {
+        Self {
+            start: start.min(end),
+            end: start.max(end),
+            active: true,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.active = false;
+        self.start = 0;
+        self.end = 0;
+    }
+
+    pub fn select_all(&mut self, len: usize) {
+        self.start = 0;
+        self.end = len;
+        self.active = len > 0;
+    }
+
+    pub fn is_selected(&self, pos: usize) -> bool {
+        self.active && pos >= self.start && pos < self.end
+    }
 }
