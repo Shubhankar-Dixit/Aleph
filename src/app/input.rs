@@ -112,7 +112,7 @@ impl App {
         }
 
         const SETTINGS_LIST_START_ROW: u16 = 20;
-        const SETTINGS_ITEM_COUNT: usize = 7;
+        const SETTINGS_ITEM_COUNT: usize = 8;
 
         let Some(row) = mouse_event.row.checked_sub(SETTINGS_LIST_START_ROW) else {
             return;
@@ -637,6 +637,20 @@ impl App {
             "Chat mode enabled. Aleph will answer without taking note actions."
         };
         self.last_action = if let Err(error) = self.store_agent_mode_enabled() {
+            format!("{} (save failed: {})", mode_message, error)
+        } else {
+            String::from(mode_message)
+        };
+    }
+
+    pub(super) fn toggle_editor_images(&mut self) {
+        self.editor_images_enabled = !self.editor_images_enabled;
+        let mode_message = if self.editor_images_enabled {
+            "Editor image previews enabled."
+        } else {
+            "Editor image previews disabled."
+        };
+        self.last_action = if let Err(error) = self.store_editor_images_enabled() {
             format!("{} (save failed: {})", mode_message, error)
         } else {
             String::from(mode_message)

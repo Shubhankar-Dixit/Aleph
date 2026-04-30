@@ -7,19 +7,20 @@ use ratatui::widgets::{
 mod chat_settings;
 mod diff;
 mod editor;
+mod image_preview;
 mod markdown;
 mod panels;
 
+use self::panels::{
+    render_commands_panel, render_note_editor_panel, render_note_list_panel,
+    render_obsidian_vault_picker_panel,
+};
 use crate::app::{AiProvider, App, PanelMode};
 use chat_settings::{render_full_chat, render_obsidian_sync_confirm_panel, render_settings_panel};
 use editor::render_full_editor;
 use markdown::{
     render_markdown_line, render_markdown_line_with_cursor, render_markdown_line_with_selection,
     render_panel_markdown_line,
-};
-use self::panels::{
-    render_commands_panel, render_note_editor_panel, render_note_list_panel,
-    render_obsidian_vault_picker_panel,
 };
 
 const BG: Color = Color::Rgb(25, 26, 34);

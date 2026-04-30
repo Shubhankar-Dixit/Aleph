@@ -843,20 +843,43 @@ pub(super) fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect)
     // Build lines with cursor inserted at correct position
     let mut lines: Vec<Line> = Vec::new();
     let mut char_pos = 0;
+    let mut visual_row: usize = 0;
+    let mut cursor_visual_row: Option<usize> = None;
+    let image_base_dir = app.editor_image_base_dir();
 
     for line_text in app.editor_buffer().lines() {
         let line_len = line_text.len();
         let line_start = char_pos;
         let line_end = char_pos + line_len;
+        let cursor_on_line = cursor >= line_start && cursor <= line_end;
 
         // Add visual spacing before H1 headers (except at start of document)
         if line_text.starts_with("# ") && line_start > 0 {
             lines.push(Line::from(""));
+            visual_row = visual_row.saturating_add(1);
         }
 
-        if cursor >= line_start && cursor <= line_end {
+        if app.editor_images_enabled() && !cursor_on_line {
+            let image_lines = super::image_preview::render_image_reference(
+                line_text,
+                image_base_dir.as_deref(),
+                editor_content_area.width.min(80),
+            )
+            .or_else(|| {
+                super::image_preview::image_fallback_line(line_text).map(|line| vec![line])
+            });
+            if let Some(image_lines) = image_lines {
+                visual_row = visual_row.saturating_add(image_lines.len());
+                lines.extend(image_lines);
+                char_pos += line_len + 1;
+                continue;
+            }
+        }
+
+        if cursor_on_line {
             // Cursor is on this line
             let cursor_in_line = cursor - line_start;
+            cursor_visual_row = Some(visual_row);
             lines.push(render_markdown_line_with_cursor(
                 line_text,
                 cursor_in_line,
@@ -869,8 +892,10 @@ pub(super) fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect)
         // Add visual spacing after H1 headers
         if line_text.starts_with("# ") {
             lines.push(Line::from(""));
+            visual_row = visual_row.saturating_add(1);
         }
 
+        visual_row = visual_row.saturating_add(1);
         char_pos += line_len + 1;
     }
 
@@ -879,18 +904,19 @@ pub(super) fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect)
         .chars()
         .filter(|&c| c == '\n')
         .count();
+    let cursor_scroll_line = cursor_visual_row.unwrap_or(cursor_line);
 
-    let total_lines = app.editor_buffer().lines().count().max(1);
+    let total_lines = lines.len().max(1);
     let visible_lines = editor_content_area.height as usize;
 
     // Auto-scroll: ensure cursor is within visible viewport
     let mut effective_scroll_offset = app.editor_scroll_offset();
-    if cursor_line < effective_scroll_offset {
+    if cursor_scroll_line < effective_scroll_offset {
         // Cursor above viewport - scroll up to show it
-        effective_scroll_offset = cursor_line;
-    } else if cursor_line >= effective_scroll_offset + visible_lines {
+        effective_scroll_offset = cursor_scroll_line;
+    } else if cursor_scroll_line >= effective_scroll_offset + visible_lines {
         // Cursor below viewport - scroll down to show it
-        effective_scroll_offset = cursor_line.saturating_sub(visible_lines - 1);
+        effective_scroll_offset = cursor_scroll_line.saturating_sub(visible_lines - 1);
     }
     // Clamp to valid range
     effective_scroll_offset =

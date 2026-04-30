@@ -406,7 +406,7 @@ impl App {
                 }
             }
             KeyCode::Down => {
-                if self.settings_selected < 6 {
+                if self.settings_selected < 7 {
                     self.settings_selected += 1;
                 }
             }
@@ -460,10 +460,13 @@ impl App {
                         self.cycle_note_save_target();
                     }
                     3 => {
+                        self.toggle_editor_images();
+                    }
+                    4 => {
                         // Pair Obsidian vault
                         self.open_vault_picker();
                     }
-                    4 => {
+                    5 => {
                         // Sign out / Logout
                         self.openrouter_api_key = None;
                         self.strix_access_token = None;
@@ -498,7 +501,7 @@ impl App {
                         self.panel_lines.clear();
                         self.last_action = String::from("Signed out.");
                     }
-                    5 => {
+                    6 => {
                         // Reset & Clear Cache
                         self.reset_and_clear_all();
                         self.panel_mode = PanelMode::Commands;
@@ -506,7 +509,7 @@ impl App {
                         self.panel_lines.clear();
                         self.last_action = String::from("Reset complete. All data cleared.");
                     }
-                    6 => {
+                    7 => {
                         // Close settings
                         self.panel_mode = PanelMode::Commands;
                         self.panel_title = String::from("Commands");

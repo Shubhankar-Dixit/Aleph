@@ -66,6 +66,7 @@ impl App {
             suggestion_filter: None,
             editor_scroll_offset: 0,
             editor_word_wrap: true,
+            editor_images_enabled: Self::load_editor_images_enabled().unwrap_or(false),
             editor_cursor_style: CursorStyle::Line,
             editor_selection: Selection::default(),
             undo_stack: VecDeque::with_capacity(100),
@@ -825,6 +826,18 @@ impl App {
 
     pub fn editor_word_wrap(&self) -> bool {
         self.editor_word_wrap
+    }
+
+    pub fn editor_images_enabled(&self) -> bool {
+        self.editor_images_enabled
+    }
+
+    pub fn editor_image_base_dir(&self) -> Option<PathBuf> {
+        self.editor_note_index
+            .and_then(|index| self.notes.get(index))
+            .and_then(|note| note.obsidian_path.as_ref())
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
     }
 
     pub fn editor_cursor_style(&self) -> CursorStyle {

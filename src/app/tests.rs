@@ -249,10 +249,13 @@ fn settings_round_trip_to_config() {
     app.store_ai_provider().unwrap();
     app.agent_mode_enabled = false;
     app.store_agent_mode_enabled().unwrap();
+    app.editor_images_enabled = true;
+    app.store_editor_images_enabled().unwrap();
 
     assert_eq!(App::load_note_save_target(), Some(NoteSaveTarget::Obsidian));
     assert_eq!(App::load_ai_provider(), Some(AiProvider::Strix));
     assert_eq!(App::load_agent_mode_enabled(), Some(false));
+    assert_eq!(App::load_editor_images_enabled(), Some(true));
 
     std::env::remove_var("ALEPH_CONFIG_DIR");
     let _ = fs::remove_dir_all(config_dir);
@@ -288,7 +291,7 @@ fn settings_obsidian_row_opens_pairing_when_unpaired() {
     app.obsidian_vault_path = None;
 
     app.open_settings_panel();
-    for _ in 0..3 {
+    for _ in 0..4 {
         app.handle_settings_key(press(KeyCode::Down));
     }
     app.handle_settings_key(press(KeyCode::Enter));
@@ -305,7 +308,7 @@ fn clicking_settings_obsidian_row_opens_pairing_when_unpaired() {
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 4,
-        row: 23,
+        row: 24,
         modifiers: KeyModifiers::NONE,
     });
 

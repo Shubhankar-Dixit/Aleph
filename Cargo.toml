@@ -26,6 +26,7 @@ exclude = [
 anyhow = "1"
 base64 = "0.22"
 crossterm = "0.28"
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 keyring = { version = "3", features = ["windows-native"] }
 rand = "0.8"
 ratatui = "0.29"

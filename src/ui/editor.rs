@@ -1,4 +1,5 @@
 use super::diff::{compute_line_diff, render_diff_line};
+use super::image_preview::{image_fallback_line, render_image_reference};
 use super::panels::editor_word_count;
 use super::*;
 
@@ -120,17 +121,36 @@ pub(super) fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
         }
     } else {
         // Normal rendering with selection support
+        let image_base_dir = app.editor_image_base_dir();
         for line_text in editor_text.lines() {
             let line_len = line_text.len();
             let line_start = char_pos;
             let line_end = char_pos + line_len;
+            let cursor_on_line = cursor >= line_start && cursor <= line_end;
+            let selection_on_line =
+                has_selection && selection.end > line_start && selection.start < line_end;
 
             if line_text.starts_with("# ") && line_start > 0 {
                 lines.push(Line::from(""));
                 visual_row = visual_row.saturating_add(1);
             }
 
-            if cursor >= line_start && cursor <= line_end {
+            if app.editor_images_enabled() && !cursor_on_line && !selection_on_line {
+                let image_lines = render_image_reference(
+                    line_text,
+                    image_base_dir.as_deref(),
+                    editor_content_area.width.min(max_width),
+                )
+                .or_else(|| image_fallback_line(line_text).map(|line| vec![line]));
+                if let Some(image_lines) = image_lines {
+                    visual_row = visual_row.saturating_add(image_lines.len() as u16);
+                    lines.extend(image_lines);
+                    char_pos += line_len + 1;
+                    continue;
+                }
+            }
+
+            if cursor_on_line {
                 let cursor_in_line = cursor - line_start;
                 cursor_visual_row = Some(visual_row);
                 cursor_visual_col = line_text[..cursor_in_line].chars().count() as u16;
@@ -150,7 +170,7 @@ pub(super) fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
                         app.editor_cursor_style(),
                     ));
                 }
-            } else if has_selection && selection.end > line_start && selection.start < line_end {
+            } else if selection_on_line {
                 // Selection covers this line but cursor is elsewhere
                 lines.push(render_markdown_line_with_selection(
                     line_text,
@@ -195,19 +215,16 @@ pub(super) fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
         .chars()
         .filter(|&c| c == '\n')
         .count();
+    let cursor_scroll_line = cursor_visual_row.map(usize::from).unwrap_or(cursor_line);
 
-    let total_lines = if is_ai_preview {
-        lines.len().max(1)
-    } else {
-        editor_text.lines().count().max(1)
-    };
+    let total_lines = lines.len().max(1);
     let visible_lines = editor_content_area.height as usize;
 
     let mut effective_scroll_offset = app.editor_scroll_offset();
-    if cursor_line < effective_scroll_offset {
-        effective_scroll_offset = cursor_line;
-    } else if cursor_line >= effective_scroll_offset + visible_lines {
-        effective_scroll_offset = cursor_line.saturating_sub(visible_lines - 1);
+    if cursor_scroll_line < effective_scroll_offset {
+        effective_scroll_offset = cursor_scroll_line;
+    } else if cursor_scroll_line >= effective_scroll_offset + visible_lines {
+        effective_scroll_offset = cursor_scroll_line.saturating_sub(visible_lines - 1);
     }
     effective_scroll_offset =
         effective_scroll_offset.min(total_lines.saturating_sub(visible_lines));

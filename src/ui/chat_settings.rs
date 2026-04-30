@@ -188,6 +188,14 @@ pub(super) fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
             format!("{} (Enter to cycle)", app.note_save_target_label()),
         ),
         (
+            "Editor Images".to_string(),
+            if app.editor_images_enabled() {
+                "Enabled (Enter to disable)".to_string()
+            } else {
+                "Disabled (Enter to enable)".to_string()
+            },
+        ),
+        (
             "Obsidian Vault".to_string(),
             if app.obsidian_vault_path().is_some() {
                 "Paired".to_string()

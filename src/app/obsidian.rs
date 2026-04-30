@@ -682,6 +682,31 @@ impl App {
         )
     }
 
+    pub(super) fn load_editor_images_enabled() -> Option<bool> {
+        match fs::read_to_string(Self::editor_images_path())
+            .ok()?
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "true" | "enabled" | "on" | "1" => Some(true),
+            "false" | "disabled" | "off" | "0" => Some(false),
+            _ => None,
+        }
+    }
+
+    pub(super) fn store_editor_images_enabled(&self) -> Result<(), String> {
+        Self::write_config_value(
+            Self::editor_images_path(),
+            if self.editor_images_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            "editor image setting",
+        )
+    }
+
     pub(super) fn load_note_save_target() -> Option<NoteSaveTarget> {
         fs::read_to_string(Self::note_save_target_path())
             .ok()
@@ -730,6 +755,10 @@ impl App {
 
     pub(super) fn agent_mode_path() -> PathBuf {
         Self::aleph_config_dir().join(AGENT_MODE_CONFIG)
+    }
+
+    pub(super) fn editor_images_path() -> PathBuf {
+        Self::aleph_config_dir().join(EDITOR_IMAGES_CONFIG)
     }
 
     pub(super) fn aleph_config_dir() -> PathBuf {

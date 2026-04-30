@@ -675,11 +675,13 @@ impl App {
         let _ = std::fs::remove_file(Self::ai_provider_path());
         let _ = std::fs::remove_file(Self::note_save_target_path());
         let _ = std::fs::remove_file(Self::agent_mode_path());
+        let _ = std::fs::remove_file(Self::editor_images_path());
 
         // Reset all settings to defaults
         self.ai_provider = AiProvider::OpenRouter;
         self.note_save_target = NoteSaveTarget::Local;
         self.agent_mode_enabled = false;
+        self.editor_images_enabled = false;
 
         // Clear connection state
         self.openrouter_api_key = None;

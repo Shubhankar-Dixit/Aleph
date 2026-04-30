@@ -55,6 +55,7 @@ const OBSIDIAN_ACCOUNT: &str = "obsidian_vault_path";
 const NOTE_SAVE_TARGET_CONFIG: &str = "note-save-target";
 const AI_PROVIDER_CONFIG: &str = "ai-provider";
 const AGENT_MODE_CONFIG: &str = "agent-mode";
+const EDITOR_IMAGES_CONFIG: &str = "editor-images";
 const LOCAL_NOTES_CONFIG: &str = "notes.json";
 const OBSIDIAN_PAIRING_DISABLED_CONFIG: &str = "obsidian-vault-disabled";
 const STRIX_TOKEN_CONFIG: &str = "strix-access-token";
@@ -118,6 +119,7 @@ pub struct App {
     suggestion_filter: Option<String>,
     editor_scroll_offset: usize,
     editor_word_wrap: bool,
+    editor_images_enabled: bool,
     editor_cursor_style: CursorStyle,
     editor_selection: Selection,
     undo_stack: VecDeque<EditorState>,
