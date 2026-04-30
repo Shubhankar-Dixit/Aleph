@@ -66,9 +66,75 @@ fn unpaired_app_starts_with_single_onboarding_note() {
     let app = App::new();
 
     assert_eq!(app.notes.len(), 1);
+    assert!(app.folders.is_empty());
     assert_eq!(app.notes[0].title, "Welcome to Aleph");
+    assert_eq!(app.notes[0].folder_id, None);
     assert!(app.notes[0].content.contains("/settings"));
     assert!(app.notes[0].content.contains("/obsidian pair"));
+}
+
+#[test]
+fn unpaired_note_list_shows_onboarding_note_directly() {
+    let mut app = App::new();
+
+    app.open_note_list_panel();
+
+    assert_eq!(app.panel_lines.len(), 1);
+    assert!(app.panel_lines[0].contains("Welcome"));
+    assert!(!app.panel_lines[0].contains("Projects"));
+    assert!(!app.panel_lines[0].contains("Ideas"));
+}
+
+#[test]
+fn clear_notes_is_hidden_from_command_list() {
+    assert!(COMMANDS.iter().all(|command| command.name != "clear-notes"));
+}
+
+#[test]
+fn hidden_clear_notes_resets_note_state_and_caches() {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = ENV_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap();
+    let root = std::env::temp_dir().join(format!("aleph-clear-notes-test-{}", App::now_millis()));
+    let config_dir = root.join("config");
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&cache_dir).unwrap();
+    std::env::set_var("ALEPH_CONFIG_DIR", &config_dir);
+    std::env::set_var("ALEPH_CACHE_DIR", &cache_dir);
+
+    App::save_local_notes(&[test_note(1, None, "Draft", "body")]).unwrap();
+    fs::write(App::strix_cache_path(), "{\"version\":1,\"notes\":[]}").unwrap();
+    fs::write(App::obsidian_pairing_path(), "/tmp").unwrap();
+
+    let mut app = App::new();
+    app.notes = vec![test_note(1, None, "Draft", "body")];
+    app.folders.push(Folder {
+        id: 1,
+        name: String::from("Imported"),
+        parent_id: None,
+    });
+    app.obsidian_vault_path = Some(PathBuf::from("/tmp"));
+    app.note_save_target = NoteSaveTarget::Obsidian;
+    app.prompt = String::from("/clear-notes");
+    app.cursor = app.prompt.len();
+
+    app.submit_prompt();
+
+    assert_eq!(app.notes.len(), 1);
+    assert_eq!(app.notes[0].title, "Welcome to Aleph");
+    assert!(app.folders.is_empty());
+    assert!(app.obsidian_vault_path().is_none());
+    assert_eq!(app.note_save_target, NoteSaveTarget::Local);
+    assert!(!App::local_notes_path().exists());
+    assert!(!App::strix_cache_path().exists());
+    assert!(App::obsidian_pairing_disabled_path().exists());
+
+    std::env::remove_var("ALEPH_CONFIG_DIR");
+    std::env::remove_var("ALEPH_CACHE_DIR");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -317,6 +383,58 @@ fn upsert_existing_synced_note_updates_cache() {
 
     std::env::remove_var("ALEPH_STRIX_CACHE");
     let _ = fs::remove_file(cache_path);
+}
+
+#[test]
+fn local_notes_round_trip_through_cache() {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = ENV_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap();
+    let notes_path =
+        std::env::temp_dir().join(format!("aleph-local-notes-test-{}.json", App::now_millis()));
+    std::env::set_var("ALEPH_NOTES_PATH", &notes_path);
+
+    let mut note = test_note(7, None, "Local draft", "saved body");
+    note.folder_id = Some(3);
+    App::save_local_notes(&[note]).unwrap();
+
+    let loaded = App::load_local_notes().unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].title, "Local draft");
+    assert_eq!(loaded[0].content, "saved body");
+    assert_eq!(loaded[0].folder_id, Some(3));
+
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    let _ = fs::remove_file(notes_path);
+}
+
+#[test]
+fn legacy_sample_notes_are_not_loaded_from_local_cache() {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = ENV_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap();
+    let notes_path = std::env::temp_dir().join(format!(
+        "aleph-legacy-sample-notes-test-{}.json",
+        App::now_millis()
+    ));
+    std::env::set_var("ALEPH_NOTES_PATH", &notes_path);
+
+    let notes = vec![
+        test_note(1, None, "Strix gateway", "sample"),
+        test_note(2, None, "Real note", "keep"),
+    ];
+    App::save_local_notes(&notes).unwrap();
+
+    let loaded = App::load_local_notes().unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].title, "Real note");
+
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    let _ = fs::remove_file(notes_path);
 }
 
 #[test]

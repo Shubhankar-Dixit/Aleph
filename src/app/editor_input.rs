@@ -1,4 +1,5 @@
 use super::*;
+use super::commands_notes::TreeItem;
 
 #[allow(dead_code)]
 impl App {
@@ -596,14 +597,14 @@ impl App {
                 if self.note_list_selected > 0 {
                     self.note_list_pending_delete = None;
                     self.note_list_selected -= 1;
-                    self.last_action = format!("Selected note {}", self.note_list_selected + 1);
+                    self.last_action = format!("Selected item {}", self.note_list_selected + 1);
                 }
             }
             KeyCode::Down => {
-                if self.note_list_selected + 1 < self.note_list_indices.len() {
+                if self.note_list_selected + 1 < self.panel_lines.len() {
                     self.note_list_pending_delete = None;
                     self.note_list_selected += 1;
-                    self.last_action = format!("Selected note {}", self.note_list_selected + 1);
+                    self.last_action = format!("Selected item {}", self.note_list_selected + 1);
                 }
             }
             KeyCode::Enter => {
@@ -611,8 +612,21 @@ impl App {
                     self.confirm_or_stage_note_delete();
                     return;
                 }
+                // Check if selected item is a note (not a folder marker)
                 if let Some(&note_index) = self.note_list_indices.get(self.note_list_selected) {
-                    self.open_note_editor(note_index);
+                    if note_index != usize::MAX {
+                        self.open_note_editor(note_index);
+                    }
+                }
+            }
+            KeyCode::Char(' ') if key_event.kind == KeyEventKind::Press => {
+                // Toggle folder expansion
+                if let Some(&note_index) = self.note_list_indices.get(self.note_list_selected) {
+                    if note_index == usize::MAX {
+                        // This is a folder - need to extract folder ID from the line
+                        // For now, we'll rebuild the tree and toggle based on line content
+                        self.toggle_folder_at_selection();
+                    }
                 }
             }
             KeyCode::Delete | KeyCode::Backspace if key_event.kind == KeyEventKind::Press => {
@@ -627,6 +641,57 @@ impl App {
                 self.request_quit();
             }
             _ => {}
+        }
+    }
+    
+    fn toggle_folder_at_selection(&mut self) {
+        // Extract folder ID from the current selection
+        // Since we use usize::MAX as a marker, we need to track which folder is at which position
+        // For simplicity, we'll rebuild the tree to find the folder
+        let mut tree_items: Vec<TreeItem> = Vec::new();
+        let root_folders: Vec<&Folder> = self.folders.iter().filter(|f| f.parent_id.is_none()).collect();
+        
+        let uncategorized_notes: Vec<usize> = self.notes
+            .iter()
+            .enumerate()
+            .filter(|(_, note)| note.folder_id.is_none())
+            .map(|(index, _)| index)
+            .collect();
+        
+        if !uncategorized_notes.is_empty() {
+            tree_items.push(TreeItem::Folder {
+                id: 0,
+                name: String::from("Uncategorized"),
+                depth: 0,
+                expanded: self.expanded_folders.contains(&0),
+                note_count: uncategorized_notes.len(),
+            });
+            
+            if self.expanded_folders.contains(&0) {
+                for &note_index in &uncategorized_notes {
+                    tree_items.push(TreeItem::Note {
+                        index: note_index,
+                        depth: 1,
+                    });
+                }
+            }
+        }
+        
+        for folder in &root_folders {
+            self.build_folder_tree_items(&mut tree_items, folder.id, 0);
+        }
+        
+        // Find the folder at the current selection
+        if let Some(item) = tree_items.get(self.note_list_selected) {
+            if let TreeItem::Folder { id, .. } = item {
+                if self.expanded_folders.contains(id) {
+                    self.expanded_folders.retain(|&x| x != *id);
+                } else {
+                    self.expanded_folders.push(*id);
+                }
+                self.open_note_list_panel();
+                self.last_action = format!("Toggled folder expansion");
+            }
         }
     }
 

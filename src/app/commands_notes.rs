@@ -1,5 +1,19 @@
 use super::*;
 
+pub(super) enum TreeItem {
+    Folder {
+        id: usize,
+        name: String,
+        depth: usize,
+        expanded: bool,
+        note_count: usize,
+    },
+    Note {
+        index: usize,
+        depth: usize,
+    },
+}
+
 #[allow(dead_code)]
 impl App {
     pub(super) fn parse_command<'a>(prompt: &'a str) -> Option<(&'static CommandSpec, &'a str)> {
@@ -25,6 +39,9 @@ impl App {
 
     pub(super) fn execute_command(&mut self, command: &str, args: &str) {
         match command {
+            "clear-notes" => {
+                self.clear_notes_state();
+            }
             "login" => {
                 let args_trimmed = args.trim();
 
@@ -629,6 +646,7 @@ impl App {
                             refreshed.obsidian_path = self.notes[index].obsidian_path.clone();
                             self.notes[index] = refreshed;
                             let _ = Self::save_cached_strix_notes(&self.notes);
+                            let _ = Self::save_local_notes(&self.notes);
                         }
                     }
                 }
@@ -799,7 +817,7 @@ impl App {
                 self.last_action = format!("Listed notes in folder: {}", folder_name);
             }
             "folder tree" => {
-                let lines = self.build_folder_tree();
+                let lines = self.build_folder_tree_display();
                 self.set_result_panel("Folder tree", lines);
                 self.last_action = String::from("Displayed folder tree.");
             }
@@ -872,6 +890,48 @@ impl App {
         }
     }
 
+    pub(super) fn clear_notes_state(&mut self) {
+        let _ = fs::remove_file(Self::local_notes_path());
+        let _ = fs::remove_file(Self::strix_cache_path());
+        self.clear_obsidian_vault_path();
+
+        self.notes = Self::default_local_notes();
+        self.folders.clear();
+        self.current_folder_id = None;
+        self.expanded_folders.clear();
+        self.selected_note = 0;
+        self.note_list_selected = 0;
+        self.note_list_indices.clear();
+        self.note_list_pending_delete = None;
+
+        self.editor_note_index = None;
+        self.editor_buffer.clear();
+        self.editor_cursor = 0;
+        self.editor_selection.clear();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.search_state = SearchState::default();
+        self.editing_title = false;
+        self.title_buffer.clear();
+        self.title_cursor = 0;
+
+        self.obsidian_vault_path = None;
+        self.obsidian_vaults = Self::discover_obsidian_vaults();
+        self.obsidian_vault_selected = 0;
+        self.note_save_target = NoteSaveTarget::Local;
+        let _ = self.store_note_save_target();
+
+        self.set_result_panel(
+            "Notes cleared",
+            vec![
+                String::from("Cleared Aleph note caches and imported note state."),
+                String::from("Obsidian is unpaired and note saving is set to Local."),
+                String::from("Your Obsidian Markdown files were not deleted."),
+            ],
+        );
+        self.last_action = String::from("Cleared notes and disabled Obsidian pairing.");
+    }
+
     pub(super) fn split_note_body_args(args: &str) -> (&str, &str) {
         args.split_once("::").unwrap_or((args, ""))
     }
@@ -881,41 +941,147 @@ impl App {
             self.ensure_cached_strix_notes_loaded();
         }
 
-        let previous_selected_note = self
-            .note_list_indices
-            .get(self.note_list_selected)
-            .copied()
-            .and_then(|index| self.notes.get(index).map(|note| note.id));
-        let folder_id = self.current_folder_id;
-        let folder_name = folder_id
-            .and_then(|id| self.get_folder_name(id))
-            .unwrap_or_else(|| String::from("All notes"));
+        if self.folders.is_empty() {
+            self.note_list_indices = (0..self.notes.len()).collect();
+            self.panel_lines = self
+                .note_list_indices
+                .iter()
+                .enumerate()
+                .map(|(list_index, &note_index)| self.note_list_line(list_index, note_index))
+                .collect();
+            self.note_list_selected = self
+                .note_list_selected
+                .min(self.note_list_indices.len().saturating_sub(1));
+            self.panel_mode = PanelMode::NoteList;
+            self.panel_title = String::from("Notes (Enter open, Delete delete)");
+            return;
+        }
 
-        self.note_list_indices = self
+        // Build hierarchical tree structure
+        let mut tree_items: Vec<TreeItem> = Vec::new();
+
+        // Get root folders (no parent)
+        let root_folders: Vec<&Folder> = self
+            .folders
+            .iter()
+            .filter(|f| f.parent_id.is_none())
+            .collect();
+
+        // Add uncategorized notes first
+        let uncategorized_notes: Vec<usize> = self
             .notes
             .iter()
             .enumerate()
-            .filter(|(_, note)| folder_id.is_none() || note.folder_id == folder_id)
+            .filter(|(_, note)| note.folder_id.is_none())
             .map(|(index, _)| index)
             .collect();
 
-        self.panel_lines = self
-            .note_list_indices
-            .iter()
-            .enumerate()
-            .map(|(list_index, &note_index)| self.note_list_line(list_index, note_index))
-            .collect::<Vec<_>>();
+        if !uncategorized_notes.is_empty() {
+            tree_items.push(TreeItem::Folder {
+                id: 0,
+                name: String::from("Uncategorized"),
+                depth: 0,
+                expanded: self.expanded_folders.contains(&0),
+                note_count: uncategorized_notes.len(),
+            });
 
-        self.note_list_selected = previous_selected_note
-            .and_then(|note_id| {
-                self.note_list_indices
-                    .iter()
-                    .position(|&index| self.notes.get(index).map(|note| note.id) == Some(note_id))
-            })
-            .unwrap_or(0)
-            .min(self.note_list_indices.len().saturating_sub(1));
+            if self.expanded_folders.contains(&0) {
+                for &note_index in &uncategorized_notes {
+                    tree_items.push(TreeItem::Note {
+                        index: note_index,
+                        depth: 1,
+                    });
+                }
+            }
+        }
+
+        // Recursively add folders and their notes
+        for folder in &root_folders {
+            self.build_folder_tree_items(&mut tree_items, folder.id, 0);
+        }
+
+        // Convert tree items to display lines and indices
+        self.note_list_indices.clear();
+        self.panel_lines.clear();
+
+        for (_list_index, item) in tree_items.iter().enumerate() {
+            match item {
+                TreeItem::Folder {
+                    id: _,
+                    name,
+                    depth,
+                    expanded,
+                    note_count,
+                } => {
+                    let indent = "  ".repeat(*depth);
+                    let icon = if *expanded { "▼" } else { "▶" };
+                    self.panel_lines
+                        .push(format!("{}{} {} ({})", indent, icon, name, note_count));
+                    self.note_list_indices.push(usize::MAX); // Marker for folder
+                }
+                TreeItem::Note { index, depth } => {
+                    let indent = "  ".repeat(*depth);
+                    let note = &self.notes[*index];
+                    let line = format!("{}  • {}", indent, Self::truncate_chars(&note.title, 30));
+                    self.panel_lines.push(line);
+                    self.note_list_indices.push(*index);
+                }
+            }
+        }
+
+        self.note_list_selected = self
+            .note_list_selected
+            .min(self.panel_lines.len().saturating_sub(1));
         self.panel_mode = PanelMode::NoteList;
-        self.panel_title = format!("Notes - {} (Enter open, Delete delete)", folder_name);
+        self.panel_title = String::from("Notes (Enter open, Space expand/collapse, Delete delete)");
+    }
+
+    pub(super) fn build_folder_tree_items(
+        &self,
+        tree_items: &mut Vec<TreeItem>,
+        folder_id: usize,
+        depth: usize,
+    ) {
+        let folder_name = self
+            .get_folder_name(folder_id)
+            .unwrap_or_else(|| String::from("Unknown"));
+        let note_count = self
+            .notes
+            .iter()
+            .filter(|n| n.folder_id == Some(folder_id))
+            .count();
+        let expanded = self.expanded_folders.contains(&folder_id);
+
+        tree_items.push(TreeItem::Folder {
+            id: folder_id,
+            name: folder_name,
+            depth,
+            expanded,
+            note_count,
+        });
+
+        if expanded {
+            // Add notes in this folder
+            for (note_index, note) in self.notes.iter().enumerate() {
+                if note.folder_id == Some(folder_id) {
+                    tree_items.push(TreeItem::Note {
+                        index: note_index,
+                        depth: depth + 1,
+                    });
+                }
+            }
+
+            // Add subfolders
+            let subfolders: Vec<&Folder> = self
+                .folders
+                .iter()
+                .filter(|f| f.parent_id == Some(folder_id))
+                .collect();
+
+            for subfolder in subfolders {
+                self.build_folder_tree_items(tree_items, subfolder.id, depth + 1);
+            }
+        }
     }
 
     pub(super) fn note_list_line(&self, list_index: usize, note_index: usize) -> String {
@@ -1031,6 +1197,7 @@ impl App {
         if self.is_strix_connected() {
             let _ = Self::save_cached_strix_notes(&self.notes);
         }
+        let _ = Self::save_local_notes(&self.notes);
 
         Ok(note.title)
     }

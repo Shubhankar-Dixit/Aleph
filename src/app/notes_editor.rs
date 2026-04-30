@@ -38,12 +38,16 @@ impl App {
 
     pub(super) fn persist_note(&mut self, index: usize) -> Result<(), String> {
         match self.note_save_target {
-            NoteSaveTarget::Local => Ok(()),
+            NoteSaveTarget::Local => Self::save_local_notes(&self.notes),
             NoteSaveTarget::Obsidian => {
                 self.ensure_note_obsidian_path(index)?;
-                self.write_note_to_obsidian(index)
+                self.write_note_to_obsidian(index)?;
+                Self::save_local_notes(&self.notes)
             }
-            NoteSaveTarget::Strix => self.push_note_to_strix(index),
+            NoteSaveTarget::Strix => {
+                self.push_note_to_strix(index)?;
+                Self::save_local_notes(&self.notes)
+            }
         }
     }
 
@@ -307,7 +311,7 @@ impl App {
             .collect()
     }
 
-    pub(super) fn build_folder_tree(&self) -> Vec<String> {
+    pub(super) fn build_folder_tree_display(&self) -> Vec<String> {
         if self.folders.is_empty() {
             return vec![String::from("No folders created yet.")];
         }

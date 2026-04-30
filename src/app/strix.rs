@@ -138,6 +138,7 @@ impl App {
                 *existing = note;
                 self.selected_note = index;
                 let _ = Self::save_cached_strix_notes(&self.notes);
+                let _ = Self::save_local_notes(&self.notes);
                 return;
             }
         }
@@ -146,6 +147,7 @@ impl App {
         self.notes.push(note);
         self.selected_note = self.notes.len() - 1;
         let _ = Self::save_cached_strix_notes(&self.notes);
+        let _ = Self::save_local_notes(&self.notes);
     }
 
     pub(super) fn note_from_strix_value(local_id: usize, value: &serde_json::Value) -> Note {
@@ -203,7 +205,7 @@ impl App {
 
         if let Ok(notes) = Self::load_cached_strix_notes() {
             if !notes.is_empty() {
-                self.notes = notes;
+                self.merge_strix_notes(notes);
                 self.selected_note = 0;
                 self.add_strix_log("Loaded cached Strix notes");
             }
@@ -211,6 +213,10 @@ impl App {
     }
 
     pub(super) fn strix_cache_path() -> PathBuf {
+        if let Ok(path) = std::env::var("ALEPH_STRIX_CACHE") {
+            return PathBuf::from(path);
+        }
+
         if let Ok(dir) = std::env::var("ALEPH_CACHE_DIR") {
             return PathBuf::from(dir).join("strix-notes.json");
         }
@@ -233,6 +239,155 @@ impl App {
         std::env::temp_dir().join("aleph-strix-notes.json")
     }
 
+    pub(super) fn local_notes_path() -> PathBuf {
+        if let Ok(path) = std::env::var("ALEPH_NOTES_PATH") {
+            return PathBuf::from(path);
+        }
+
+        #[cfg(test)]
+        return std::env::temp_dir().join("aleph-test-notes-disabled.json");
+
+        #[cfg(not(test))]
+        Self::aleph_config_dir().join(LOCAL_NOTES_CONFIG)
+    }
+
+    pub(super) fn load_local_notes() -> Result<Vec<Note>, String> {
+        let path = Self::local_notes_path();
+        if !path.exists() {
+            return Err(String::from("local note cache does not exist"));
+        }
+
+        let body = fs::read_to_string(&path).map_err(|error| {
+            format!("failed to read local notes '{}': {}", path.display(), error)
+        })?;
+        let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+            format!(
+                "failed to parse local notes '{}': {}",
+                path.display(),
+                error
+            )
+        })?;
+        let notes = value
+            .get("notes")
+            .and_then(|notes| notes.as_array())
+            .ok_or_else(|| String::from("local note cache did not include notes"))?;
+
+        let loaded = notes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| Self::note_from_local_value(index + 1, value))
+            .filter(|note| !Self::is_legacy_sample_note(note))
+            .collect::<Vec<_>>();
+        if loaded.is_empty() {
+            Err(String::from("local note cache was empty"))
+        } else {
+            Ok(loaded)
+        }
+    }
+
+    pub(super) fn save_local_notes(notes: &[Note]) -> Result<(), String> {
+        let path = Self::local_notes_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create local notes directory '{}': {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+
+        let cached_notes = notes
+            .iter()
+            .map(|note| {
+                serde_json::json!({
+                    "id": note.id,
+                    "remoteId": note.remote_id.as_deref(),
+                    "obsidianPath": note.obsidian_path.as_ref().map(|path| path.display().to_string()),
+                    "title": note.title.as_str(),
+                    "content": note.content.as_str(),
+                    "rawContent": note.raw_content.as_str(),
+                    "updatedAt": note.updated_at.as_str(),
+                    "folderId": note.folder_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        let payload = serde_json::json!({
+            "version": 1,
+            "savedAt": Self::now_millis(),
+            "notes": cached_notes,
+        });
+
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&payload)
+                .map_err(|error| format!("failed to encode local notes: {}", error))?,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to write local notes '{}': {}",
+                path.display(),
+                error
+            )
+        })
+    }
+
+    pub(super) fn note_from_local_value(
+        local_id: usize,
+        value: &serde_json::Value,
+    ) -> Option<Note> {
+        let title = value.get("title").and_then(|title| title.as_str())?.trim();
+        let content = value
+            .get("content")
+            .and_then(|content| content.as_str())
+            .unwrap_or("")
+            .to_string();
+        let raw_content = value
+            .get("rawContent")
+            .and_then(|content| content.as_str())
+            .unwrap_or(&content)
+            .to_string();
+        let obsidian_path = value
+            .get("obsidianPath")
+            .and_then(|path| path.as_str())
+            .map(PathBuf::from);
+
+        Some(Note {
+            id: value
+                .get("id")
+                .and_then(|id| id.as_u64())
+                .map(|id| id as usize)
+                .unwrap_or(local_id),
+            remote_id: value
+                .get("remoteId")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+                .filter(|id| !id.trim().is_empty()),
+            obsidian_path,
+            title: title.to_string(),
+            content,
+            raw_content,
+            updated_at: value
+                .get("updatedAt")
+                .and_then(|updated| updated.as_str())
+                .unwrap_or("local")
+                .to_string(),
+            folder_id: value
+                .get("folderId")
+                .and_then(|id| id.as_u64())
+                .map(|id| id as usize),
+        })
+    }
+
+    pub(super) fn is_legacy_sample_note(note: &Note) -> bool {
+        note.remote_id.is_none()
+            && note.obsidian_path.is_none()
+            && matches!(
+                note.title.as_str(),
+                "Strix gateway" | "Note editor" | "MCP server" | "Feature ideas"
+            )
+    }
+
     pub(super) fn load_cached_strix_notes() -> Result<Vec<Note>, String> {
         let path = Self::strix_cache_path();
         if !path.exists() {
@@ -251,7 +406,14 @@ impl App {
         Ok(notes
             .iter()
             .enumerate()
-            .map(|(index, value)| Self::note_from_strix_value(index + 1, value))
+            .filter_map(|(index, value)| {
+                let note = Self::note_from_strix_value(index + 1, value);
+                if note.remote_id.is_some() {
+                    Some(note)
+                } else {
+                    None
+                }
+            })
             .collect())
     }
 
@@ -509,6 +671,7 @@ impl App {
 
         // Clear all cached data files
         let _ = std::fs::remove_file(Self::strix_cache_path());
+        let _ = std::fs::remove_file(Self::local_notes_path());
         let _ = std::fs::remove_file(Self::ai_provider_path());
         let _ = std::fs::remove_file(Self::note_save_target_path());
         let _ = std::fs::remove_file(Self::agent_mode_path());
@@ -534,6 +697,9 @@ impl App {
         self.chat_render_dirty = true;
         self.chat_cache_stable_len = 0;
         self.notes = Self::default_local_notes();
+        self.folders.clear();
+        self.current_folder_id = None;
+        self.expanded_folders.clear();
         self.selected_note = 0;
         self.memories.clear();
         self.canvases.clear();

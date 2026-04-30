@@ -99,6 +99,14 @@ impl App {
         let folder_root_id = self.ensure_folder_path(&[String::from("Obsidian")], None);
         let vault_name = Self::vault_display_name(&vault_path);
         let vault_folder_id = self.ensure_folder_path(&[vault_name], Some(folder_root_id));
+        // Ensure the Obsidian root folder is expanded
+        if !self.expanded_folders.contains(&folder_root_id) {
+            self.expanded_folders.push(folder_root_id);
+        }
+        // Ensure the vault folder is expanded
+        if !self.expanded_folders.contains(&vault_folder_id) {
+            self.expanded_folders.push(vault_folder_id);
+        }
         let mut imported = 0;
 
         for file in files {
@@ -120,6 +128,7 @@ impl App {
         if imported > 0 {
             self.selected_note = self.selected_note.min(self.notes.len().saturating_sub(1));
         }
+        Self::save_local_notes(&self.notes)?;
         Ok(imported)
     }
 
@@ -199,6 +208,10 @@ impl App {
             {
                 last_id = existing;
                 parent = Some(existing);
+                // Expand existing folders in the path
+                if !self.expanded_folders.contains(&existing) {
+                    self.expanded_folders.push(existing);
+                }
                 continue;
             }
             let id = self
@@ -213,6 +226,8 @@ impl App {
                 name: part.clone(),
                 parent_id: parent,
             });
+            // Auto-expand newly created folders
+            self.expanded_folders.push(id);
             last_id = id;
             parent = Some(id);
         }
@@ -510,6 +525,10 @@ impl App {
     }
 
     pub(super) fn load_obsidian_vault_path() -> Option<PathBuf> {
+        if Self::obsidian_pairing_disabled_path().exists() {
+            return None;
+        }
+
         if let Ok(entry) = Self::obsidian_vault_entry() {
             if let Ok(path) = entry.get_password() {
                 let path = PathBuf::from(Self::expand_home(path.trim()));
@@ -524,13 +543,12 @@ impl App {
                 return Some(path);
             }
         }
-        std::env::var("ALEPH_OBSIDIAN_VAULT")
-            .ok()
-            .map(|path| PathBuf::from(Self::expand_home(path.trim())))
-            .filter(|path| path.is_dir())
+        None
     }
 
     pub(super) fn store_obsidian_vault_path(&self, path: &Path) -> Result<(), String> {
+        let _ = fs::remove_file(Self::obsidian_pairing_disabled_path());
+
         if let Ok(entry) = Self::obsidian_vault_entry() {
             if entry.set_password(&path.display().to_string()).is_ok() {
                 return Ok(());
@@ -561,6 +579,11 @@ impl App {
             let _ = entry.delete_credential();
         }
         let _ = fs::remove_file(Self::obsidian_pairing_path());
+        let disabled_path = Self::obsidian_pairing_disabled_path();
+        if let Some(parent) = disabled_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(disabled_path, "unpaired");
     }
 
     pub(super) fn obsidian_vault_entry() -> Result<Entry, String> {
@@ -742,6 +765,10 @@ impl App {
                 .join("obsidian-vault");
         }
         std::env::temp_dir().join("aleph-obsidian-vault")
+    }
+
+    pub(super) fn obsidian_pairing_disabled_path() -> PathBuf {
+        Self::aleph_config_dir().join(OBSIDIAN_PAIRING_DISABLED_CONFIG)
     }
 
     pub(super) fn vault_display_name(path: &Path) -> String {

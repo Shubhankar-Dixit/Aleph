@@ -17,7 +17,10 @@ use markdown::{
     render_markdown_line, render_markdown_line_with_cursor, render_markdown_line_with_selection,
     render_panel_markdown_line,
 };
-use panels::{render_commands_panel, render_obsidian_vault_picker_panel};
+use self::panels::{
+    render_commands_panel, render_note_editor_panel, render_note_list_panel,
+    render_obsidian_vault_picker_panel,
+};
 
 const BG: Color = Color::Rgb(25, 26, 34);
 const ACCENT: Color = Color::Rgb(156, 146, 201);

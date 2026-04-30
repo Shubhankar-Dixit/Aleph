@@ -55,6 +55,9 @@ const OBSIDIAN_ACCOUNT: &str = "obsidian_vault_path";
 const NOTE_SAVE_TARGET_CONFIG: &str = "note-save-target";
 const AI_PROVIDER_CONFIG: &str = "ai-provider";
 const AGENT_MODE_CONFIG: &str = "agent-mode";
+const LOCAL_NOTES_CONFIG: &str = "notes.json";
+const OBSIDIAN_PAIRING_DISABLED_CONFIG: &str = "obsidian-vault-disabled";
+const STRIX_TOKEN_CONFIG: &str = "strix-access-token";
 const MAX_CHAT_MESSAGES: usize = 24;
 const CHAT_TEXT: Color = Color::Rgb(198, 198, 210);
 const CHAT_MUTED: Color = Color::Rgb(120, 122, 138);
@@ -158,6 +161,7 @@ pub struct App {
     editing_title: bool,
     title_buffer: String,
     title_cursor: usize,
+    expanded_folders: Vec<usize>,
 }
 
 #[cfg(test)]

@@ -44,36 +44,10 @@ impl App {
             selected_suggestion: 0,
             last_action: String::from("Ready to accept input."),
             connected,
-            folders: vec![
-                Folder {
-                    id: 1,
-                    name: String::from("Projects"),
-                    parent_id: None,
-                },
-                Folder {
-                    id: 2,
-                    name: String::from("Ideas"),
-                    parent_id: None,
-                },
-                Folder {
-                    id: 3,
-                    name: String::from("Aleph"),
-                    parent_id: Some(1),
-                },
-            ],
-            notes: Self::default_local_notes(),
-            memories: vec![
-                String::from(
-                    "Strix is service-backed; Aleph should not assume a local desktop app.",
-                ),
-                String::from("Note edit should stay lightweight and open a real text editor."),
-                String::from("Keep the command surface aligned with the product plan."),
-            ],
-            canvases: vec![
-                String::from("Architecture canvas"),
-                String::from("Prompt flows"),
-                String::from("Agent lifecycle"),
-            ],
+            folders: Vec::new(),
+            notes: Self::load_local_notes().unwrap_or_else(|_| Self::default_local_notes()),
+            memories: Vec::new(),
+            canvases: Vec::new(),
             selected_note: 0,
             current_folder_id: None,
             panel_mode: PanelMode::Commands,
@@ -140,12 +114,13 @@ impl App {
             editing_title: false,
             title_buffer: String::new(),
             title_cursor: 0,
+            expanded_folders: Vec::new(),
         };
 
         if app.strix_access_token.is_some() {
             if let Ok(notes) = Self::load_cached_strix_notes() {
                 if !notes.is_empty() {
-                    app.notes = notes;
+                    app.merge_strix_notes(notes);
                     app.selected_note = 0;
                     app.add_strix_log("Loaded cached Strix notes");
                     app.last_action =
@@ -161,8 +136,8 @@ impl App {
     pub(super) fn default_local_notes() -> Vec<Note> {
         let content = String::from(
             "# Welcome to Aleph\n\n\
-    h is a terminal workspace for notes, search, AI assistance, and sync. Start with `/settings` to choose how notes are saved, pair Obsidian, or connect Strix. Use `/note list` to browse notes, `/note create <title> :: <body>` to start writing, `/note edit` to edit the selected note, and `/ask <question>` when you want help from the selected AI provider.\n\n\
-    se Obsidian, open `/obsidian pair`, choose your vault, then confirm the sync prompt to import Markdown notes. You can run `/obsidian sync` again later whenever you want to refresh Aleph from the paired vault.",
+    Aleph is a terminal workspace for notes, search, AI assistance, and sync. Start with `/settings` to choose how notes are saved, pair Obsidian, or connect Strix. Use `/note list` to browse notes, `/note create <title> :: <body>` to start writing, `/note edit` to edit the selected note, and `/ask <question>` when you want help from the selected AI provider.\n\n\
+    To use Obsidian, open `/obsidian pair`, choose your vault, then confirm the sync prompt to import Markdown notes. You can run `/obsidian sync` again later whenever you want to refresh Aleph from the paired vault.",
         );
 
         vec![Note {
@@ -173,7 +148,7 @@ impl App {
             raw_content: content.clone(),
             content,
             updated_at: String::from("seed"),
-            folder_id: Some(3),
+            folder_id: None,
         }]
     }
 
@@ -278,6 +253,7 @@ impl App {
                         *slot = note.clone();
                     }
                     self.write_note_to_obsidian(index)?;
+                    Self::save_local_notes(&self.notes)?;
                 }
                 let updated = if note.remote_id.is_some() {
                     self.update_strix_note(&note)?
@@ -319,6 +295,7 @@ impl App {
                         *slot = note.clone();
                     }
                     self.write_note_to_obsidian(index)?;
+                    Self::save_local_notes(&self.notes)?;
                 }
                 let updated = if note.remote_id.is_some() {
                     self.update_strix_note(&note)?

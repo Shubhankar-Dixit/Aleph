@@ -988,6 +988,13 @@ impl App {
             }
         }
 
+        if let Ok(token) = fs::read_to_string(Self::strix_token_path()) {
+            let trimmed = token.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+
         std::env::var("STRIX_ACCESS_TOKEN")
             .ok()
             .map(|token| token.trim().to_string())
@@ -995,21 +1002,46 @@ impl App {
     }
 
     pub(super) fn store_strix_access_token(&self, access_token: &str) -> Result<(), String> {
-        let entry = Self::strix_token_entry()?;
-        entry
-            .set_password(access_token.trim())
-            .map_err(|error| format!("failed to save Strix login: {}", error))
+        if let Ok(entry) = Self::strix_token_entry() {
+            if entry.set_password(access_token.trim()).is_ok() {
+                let _ = fs::remove_file(Self::strix_token_path());
+                return Ok(());
+            }
+        }
+
+        let token_path = Self::strix_token_path();
+        if let Some(parent) = token_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create Strix token directory '{}': {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+        fs::write(&token_path, access_token.trim()).map_err(|error| {
+            format!(
+                "failed to save Strix login fallback '{}': {}",
+                token_path.display(),
+                error
+            )
+        })
     }
 
     pub(super) fn clear_strix_access_token(&self) {
         if let Ok(entry) = Self::strix_token_entry() {
             let _ = entry.delete_credential();
         }
+        let _ = fs::remove_file(Self::strix_token_path());
     }
 
     pub(super) fn strix_token_entry() -> Result<Entry, String> {
         Entry::new(STRIX_SERVICE, STRIX_ACCOUNT)
             .map_err(|error| format!("failed to open Strix credential store: {}", error))
+    }
+
+    pub(super) fn strix_token_path() -> PathBuf {
+        Self::aleph_config_dir().join(STRIX_TOKEN_CONFIG)
     }
 
     pub(super) fn strix_auth_base_url() -> String {
@@ -1171,6 +1203,7 @@ impl App {
         self.merge_strix_notes(remote_notes);
         self.selected_note = 0;
         Self::save_cached_strix_notes(&self.notes)?;
+        Self::save_local_notes(&self.notes)?;
         self.add_strix_log(format!("Synced {} notes", count));
         Ok(count)
     }

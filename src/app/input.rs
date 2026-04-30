@@ -542,6 +542,14 @@ impl App {
         }
 
         let prompt = Self::expand_command_alias(&self.normalized_prompt());
+        if prompt == "clear-notes" {
+            self.history.push(format!("/{}", prompt));
+            self.history_index = None;
+            self.clear_notes_state();
+            self.reset_prompt();
+            return;
+        }
+
         let Some((command, args)) = Self::parse_command(prompt.as_str()) else {
             self.set_result_panel(
                 "Unknown command",
