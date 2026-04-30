@@ -32,6 +32,6 @@ Use `/settings` to inspect the current Strix status, selected model provider, Ob
 
 Useful overrides:
 
-- `ALEPH_OBSIDIAN_VAULT=/path/to/vault` preselects a vault without saved pairing.
+- Pair Obsidian explicitly with `/obsidian pair`; Aleph no longer auto-pairs from environment variables after reset.
 - `ALEPH_CONFIG_DIR=/path/to/config` changes the file fallback used when keychain storage is unavailable.
 - `OBSIDIAN_CONFIG_PATH=/path/to/obsidian.json` points discovery at a custom desktop config.
