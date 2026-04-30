@@ -1,0 +1,784 @@
+use super::*;
+use crossterm::event::KeyEventState;
+
+fn press(code: KeyCode) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
+}
+
+fn repeat(code: KeyCode) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Repeat,
+        state: KeyEventState::NONE,
+    }
+}
+
+fn ctrl(code: KeyCode) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers: KeyModifiers::CONTROL,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
+}
+
+fn test_note(id: usize, remote_id: Option<&str>, title: &str, content: &str) -> Note {
+    Note {
+        id,
+        remote_id: remote_id.map(String::from),
+        obsidian_path: None,
+        title: title.to_string(),
+        content: content.to_string(),
+        raw_content: String::new(),
+        updated_at: String::new(),
+        folder_id: None,
+    }
+}
+
+fn seed_test_notes(app: &mut App) {
+    app.notes = vec![
+        test_note(1, None, "Strix gateway", "gateway notes"),
+        test_note(2, None, "Note editor", "editor notes"),
+        test_note(3, None, "MCP server", "server notes"),
+        test_note(4, None, "Feature ideas", "feature notes"),
+    ];
+    app.selected_note = 0;
+}
+
+#[test]
+fn repeated_character_events_do_not_duplicate_input() {
+    let mut app = App::new();
+
+    app.handle_key(press(KeyCode::Char('a')));
+    app.handle_key(repeat(KeyCode::Char('a')));
+
+    assert_eq!(app.prompt(), "a");
+}
+
+#[test]
+fn unpaired_app_starts_with_single_onboarding_note() {
+    let app = App::new();
+
+    assert_eq!(app.notes.len(), 1);
+    assert_eq!(app.notes[0].title, "Welcome to Aleph");
+    assert!(app.notes[0].content.contains("/settings"));
+    assert!(app.notes[0].content.contains("/obsidian pair"));
+}
+
+#[test]
+fn repeated_arrow_keys_move_the_cursor() {
+    let mut app = App::new();
+
+    app.handle_key(press(KeyCode::Char('a')));
+    app.handle_key(press(KeyCode::Char('b')));
+    app.handle_key(repeat(KeyCode::Left));
+
+    assert_eq!(app.prompt_before_cursor(), "a");
+    assert_eq!(app.prompt_after_cursor(), "b");
+}
+
+#[test]
+fn up_and_down_cycle_suggestions() {
+    let mut app = App::new();
+
+    app.handle_key(press(KeyCode::Char('/')));
+
+    let first = app.visible_commands(16)[0].name;
+    let second = app.visible_commands(16)[1].name;
+
+    assert_eq!(first, "login");
+    assert_eq!(second, "status");
+    assert_eq!(app.prompt(), "/");
+
+    app.handle_key(repeat(KeyCode::Down));
+    assert_eq!(app.selected_suggestion(), 1);
+    assert_eq!(app.prompt(), "/status");
+
+    app.handle_key(repeat(KeyCode::Up));
+    assert_eq!(app.selected_suggestion(), 0);
+    assert_eq!(app.prompt(), "/login");
+}
+
+#[test]
+fn enter_executes_typed_command() {
+    let mut app = App::new();
+
+    for character in "/status".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(app.last_action(), "Refreshed provider status.");
+    assert_eq!(app.panel_title(), "Status");
+}
+
+#[test]
+fn autocomplete_prepends_a_slash_command_prefix() {
+    let mut app = App::new();
+
+    app.handle_key(press(KeyCode::Char('/')));
+    app.handle_key(press(KeyCode::Tab));
+
+    assert!(app.prompt().starts_with('/'));
+}
+
+#[test]
+fn obsidian_sync_imports_markdown_tree() {
+    let root = std::env::temp_dir().join(format!("aleph-obsidian-test-{}", App::now_millis()));
+    let project_dir = root.join("Projects");
+    fs::create_dir_all(&project_dir).unwrap();
+    fs::write(root.join("Inbox.md"), "# Inbox\n\nTop-level note").unwrap();
+    fs::write(project_dir.join("Plan.md"), "# Project Plan\n\nNested note").unwrap();
+    fs::write(root.join("ignore.txt"), "not markdown").unwrap();
+
+    let mut app = App::new();
+    app.obsidian_vault_path = Some(root.clone());
+    app.folders.clear();
+    app.notes.clear();
+
+    let count = app.sync_obsidian_notes().unwrap();
+
+    assert_eq!(count, 2);
+    assert!(app.notes.iter().any(|note| note.title == "Inbox"));
+    assert!(app.notes.iter().any(|note| note.title == "Project Plan"));
+    assert!(app.notes.iter().all(|note| note.title != "ignore"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn note_list_handles_unicode_obsidian_folder_and_title() {
+    let mut app = App::new();
+    app.folders.push(Folder {
+        id: 99,
+        name: String::from("研究ノート集"),
+        parent_id: None,
+    });
+    app.notes = vec![test_note(1, None, "計画とアイデアの長いノート", "body")];
+    app.notes[0].folder_id = Some(99);
+    app.notes[0].obsidian_path = Some(PathBuf::from("/tmp/unicode.md"));
+
+    app.open_note_list_panel();
+
+    assert_eq!(app.panel_lines.len(), 1);
+    assert!(app.panel_lines[0].contains("[研究ノート集]"));
+}
+
+#[test]
+fn settings_round_trip_to_config() {
+    let config_dir =
+        std::env::temp_dir().join(format!("aleph-settings-test-{}", App::now_millis()));
+    std::env::set_var("ALEPH_CONFIG_DIR", &config_dir);
+
+    let mut app = App::new();
+    app.note_save_target = NoteSaveTarget::Obsidian;
+    app.store_note_save_target().unwrap();
+    app.ai_provider = AiProvider::Strix;
+    app.store_ai_provider().unwrap();
+    app.agent_mode_enabled = false;
+    app.store_agent_mode_enabled().unwrap();
+
+    assert_eq!(App::load_note_save_target(), Some(NoteSaveTarget::Obsidian));
+    assert_eq!(App::load_ai_provider(), Some(AiProvider::Strix));
+    assert_eq!(App::load_agent_mode_enabled(), Some(false));
+
+    std::env::remove_var("ALEPH_CONFIG_DIR");
+    let _ = fs::remove_dir_all(config_dir);
+}
+
+#[test]
+fn obsidian_pair_without_target_opens_picker_for_multiple_vaults() {
+    let mut app = App::new();
+    app.obsidian_vaults = vec![
+        ObsidianVault {
+            id: String::from("one"),
+            name: String::from("One"),
+            path: PathBuf::from("/tmp/one"),
+            source: String::from("test"),
+        },
+        ObsidianVault {
+            id: String::from("two"),
+            name: String::from("Two"),
+            path: PathBuf::from("/tmp/two"),
+            source: String::from("test"),
+        },
+    ];
+
+    app.open_vault_picker();
+
+    assert!(app.is_vault_picker());
+    assert_eq!(app.obsidian_vault_selected(), 0);
+}
+
+#[test]
+fn settings_obsidian_row_opens_pairing_when_unpaired() {
+    let mut app = App::new();
+    app.obsidian_vault_path = None;
+
+    app.open_settings_panel();
+    for _ in 0..3 {
+        app.handle_settings_key(press(KeyCode::Down));
+    }
+    app.handle_settings_key(press(KeyCode::Enter));
+
+    assert!(app.is_vault_picker());
+}
+
+#[test]
+fn clicking_settings_obsidian_row_opens_pairing_when_unpaired() {
+    let mut app = App::new();
+    app.obsidian_vault_path = None;
+
+    app.open_settings_panel();
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 4,
+        row: 23,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert!(app.is_vault_picker());
+}
+
+#[test]
+fn reset_clears_obsidian_pairing_fallback_file() {
+    let config_dir =
+        std::env::temp_dir().join(format!("aleph-obsidian-reset-test-{}", App::now_millis()));
+    std::env::set_var("ALEPH_CONFIG_DIR", &config_dir);
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(App::obsidian_pairing_path(), "/tmp/aleph-test-vault").unwrap();
+
+    let mut app = App::new();
+    app.obsidian_vault_path = Some(PathBuf::from("/tmp/aleph-test-vault"));
+    app.note_save_target = NoteSaveTarget::Obsidian;
+
+    app.reset_and_clear_all();
+
+    assert!(app.obsidian_vault_path().is_none());
+    assert_eq!(app.note_save_target, NoteSaveTarget::Local);
+    assert!(!App::obsidian_pairing_path().exists());
+
+    std::env::remove_var("ALEPH_CONFIG_DIR");
+    let _ = fs::remove_dir_all(config_dir);
+}
+
+#[test]
+fn obsidian_filenames_are_sanitized() {
+    assert_eq!(
+        App::safe_obsidian_filename("Daily/Plan: Q2?"),
+        "Daily-Plan- Q2-"
+    );
+    assert_eq!(App::safe_obsidian_filename("   ...   "), "Untitled note");
+}
+
+#[test]
+fn strix_sync_merge_preserves_local_only_notes() {
+    let mut app = App::new();
+    app.notes = vec![
+        test_note(1, None, "Offline draft", "local"),
+        test_note(2, Some("remote-1"), "Cached remote", "old"),
+    ];
+
+    app.merge_strix_notes(vec![
+        test_note(9, Some("remote-1"), "Remote updated", "new"),
+        test_note(10, Some("remote-2"), "Remote new", "fresh"),
+    ]);
+
+    assert!(app.notes.iter().any(|note| note.title == "Offline draft"));
+    assert!(app.notes.iter().any(|note| note.title == "Remote updated"));
+    assert!(app.notes.iter().any(|note| note.title == "Remote new"));
+    assert_eq!(app.notes.len(), 3);
+}
+
+#[test]
+fn upsert_existing_synced_note_updates_cache() {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = ENV_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap();
+    let cache_path =
+        std::env::temp_dir().join(format!("aleph-strix-cache-test-{}.json", App::now_millis()));
+    std::env::set_var("ALEPH_STRIX_CACHE", &cache_path);
+
+    let mut app = App::new();
+    app.notes = vec![test_note(1, Some("remote-1"), "Old", "old")];
+    app.upsert_synced_note(test_note(99, Some("remote-1"), "Updated", "new"));
+
+    let saved = fs::read_to_string(&cache_path).unwrap();
+    assert!(saved.contains("Updated"));
+    assert!(saved.contains("new"));
+
+    std::env::remove_var("ALEPH_STRIX_CACHE");
+    let _ = fs::remove_file(cache_path);
+}
+
+#[test]
+fn title_edit_cursor_stays_on_utf8_boundaries() {
+    let mut app = App::new();
+    app.editing_title = true;
+
+    app.handle_title_edit_key(press(KeyCode::Char('é')));
+    assert_eq!(app.title_buffer, "é");
+    assert_eq!(app.title_cursor, "é".len());
+
+    app.handle_title_edit_key(press(KeyCode::Left));
+    assert_eq!(app.title_cursor, 0);
+
+    app.handle_title_edit_key(press(KeyCode::Right));
+    assert_eq!(app.title_cursor, "é".len());
+
+    app.handle_title_edit_key(press(KeyCode::Backspace));
+    assert!(app.title_buffer.is_empty());
+    assert_eq!(app.title_cursor, 0);
+}
+
+#[test]
+fn note_edit_opens_the_editor_and_saves_changes() {
+    let mut app = App::new();
+    app.note_save_target = NoteSaveTarget::Local;
+
+    for character in "/note edit".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+
+    assert!(app.is_full_editor());
+
+    for character in "\nAdded from the editor".chars() {
+        match character {
+            '\n' => app.handle_key(press(KeyCode::Enter)),
+            other => app.handle_key(press(KeyCode::Char(other))),
+        }
+    }
+
+    app.handle_key(KeyEvent {
+        code: KeyCode::Char('s'),
+        modifiers: KeyModifiers::CONTROL,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    });
+
+    assert!(app.is_full_editor());
+    assert!(app.notes[0].content.contains("Added from the editor"));
+
+    app.handle_key(KeyEvent {
+        code: KeyCode::Esc,
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    });
+
+    assert!(!app.is_full_editor());
+}
+
+#[test]
+fn ai_edit_proposal_requires_explicit_apply() {
+    let mut app = App::new();
+    app.note_save_target = NoteSaveTarget::Local;
+    app.open_note_editor(0);
+    let original = app.editor_buffer.clone();
+    let proposed = format!("{}\n\nAdded by AI", original);
+    app.pending_ai_edit = Some(AiEditProposal {
+        note_index: Some(0),
+        title: None,
+        instruction: String::from("append a line"),
+        proposed: proposed.clone(),
+        diff_lines: App::build_line_diff(&original, &proposed),
+    });
+    app.ai_overlay_visible = true;
+
+    app.handle_key(press(KeyCode::Char('x')));
+    assert_eq!(app.editor_buffer, original);
+    assert_eq!(app.editor_display_buffer(), proposed);
+    assert!(app.has_live_ai_editor_preview());
+    assert!(app.has_pending_ai_edit());
+
+    app.handle_key(press(KeyCode::Enter));
+    assert_eq!(app.editor_buffer, proposed);
+    assert_eq!(app.notes[0].content, proposed);
+    assert!(!app.has_pending_ai_edit());
+}
+
+#[test]
+fn ai_edit_proposal_can_be_rejected() {
+    let mut app = App::new();
+    app.open_note_editor(0);
+    let original = app.editor_buffer.clone();
+    let proposed = format!("{}\n\nAdded by AI", original);
+    app.pending_ai_edit = Some(AiEditProposal {
+        note_index: Some(0),
+        title: None,
+        instruction: String::from("append a line"),
+        proposed,
+        diff_lines: App::build_line_diff(&original, "changed"),
+    });
+    app.ai_overlay_visible = true;
+
+    app.handle_key(ctrl(KeyCode::Char('r')));
+
+    assert_eq!(app.editor_buffer, original);
+    assert!(!app.has_pending_ai_edit());
+}
+
+#[test]
+fn note_create_accepts_initial_body() {
+    let mut app = App::new();
+    app.note_save_target = NoteSaveTarget::Local;
+
+    for character in "/note create Test note :: first line".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+
+    assert!(app.is_full_editor());
+    assert_eq!(app.editor_note_title(), Some("Test note"));
+    assert_eq!(app.editor_buffer(), "first line");
+}
+
+#[test]
+fn note_append_can_target_a_note() {
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    app.note_save_target = NoteSaveTarget::Local;
+
+    for character in "/note append Feature ideas :: added target text".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+
+    let target = app
+        .notes
+        .iter()
+        .find(|note| note.title == "Feature ideas")
+        .unwrap();
+    assert!(target.content.contains("added target text"));
+}
+
+#[test]
+fn note_list_delete_requires_second_press() {
+    let mut app = App::new();
+    let original_count = app.notes.len();
+
+    app.open_note_list_panel();
+    app.handle_note_list_key(press(KeyCode::Delete));
+
+    assert_eq!(app.notes.len(), original_count);
+    assert!(app.note_list_delete_is_pending());
+
+    app.handle_note_list_key(press(KeyCode::Delete));
+
+    assert_eq!(app.notes.len(), original_count - 1);
+    assert!(!app.note_list_delete_is_pending());
+}
+
+#[test]
+fn note_list_delete_can_be_confirmed_with_enter_or_d() {
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    let original_count = app.notes.len();
+
+    app.open_note_list_panel();
+    app.handle_note_list_key(press(KeyCode::Delete));
+    app.handle_note_list_key(press(KeyCode::Enter));
+
+    assert_eq!(app.notes.len(), original_count - 1);
+    assert!(!app.note_list_delete_is_pending());
+
+    app.handle_note_list_key(press(KeyCode::Delete));
+    app.handle_note_list_key(press(KeyCode::Char('d')));
+
+    assert_eq!(app.notes.len(), original_count - 2);
+    assert!(!app.note_list_delete_is_pending());
+}
+
+#[test]
+fn note_list_delete_repeat_does_not_confirm() {
+    let mut app = App::new();
+    let original_count = app.notes.len();
+
+    app.open_note_list_panel();
+    app.handle_note_list_key(press(KeyCode::Delete));
+    app.handle_note_list_key(repeat(KeyCode::Delete));
+
+    assert_eq!(app.notes.len(), original_count);
+    assert!(app.note_list_delete_is_pending());
+}
+
+#[test]
+fn note_list_delete_pending_is_cancelled_by_moving_selection() {
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    let original_count = app.notes.len();
+
+    app.open_note_list_panel();
+    app.handle_note_list_key(press(KeyCode::Delete));
+    app.handle_note_list_key(press(KeyCode::Down));
+
+    assert_eq!(app.notes.len(), original_count);
+    assert!(!app.note_list_delete_is_pending());
+}
+
+#[test]
+fn note_list_delete_removes_obsidian_file() {
+    let root = std::env::temp_dir().join(format!("aleph-note-delete-test-{}", App::now_millis()));
+    fs::create_dir_all(&root).unwrap();
+    let note_path = root.join("Delete Me.md");
+    fs::write(&note_path, "temporary note").unwrap();
+
+    let mut app = App::new();
+    app.notes = vec![test_note(1, None, "Delete Me", "temporary note")];
+    app.notes[0].obsidian_path = Some(note_path.clone());
+
+    app.open_note_list_panel();
+    app.handle_note_list_key(press(KeyCode::Delete));
+    app.handle_note_list_key(press(KeyCode::Delete));
+
+    assert!(app.notes.is_empty());
+    assert!(!note_path.exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn chat_note_create_request_opens_ai_draft_instead_of_chatting() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("write a note about launch planning");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_ai_chat());
+    assert!(app.pending_agent_decision.is_some());
+    assert_eq!(app.chat_messages().len(), 2);
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_full_editor());
+    assert_eq!(
+        app.ai_draft_create_title.as_deref(),
+        Some("Launch Planning")
+    );
+    assert!(app.pending_agent_decision.is_none());
+}
+
+#[test]
+fn agent_mode_routes_general_write_prompt_to_note_draft() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("write an outline about moat strategy");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_ai_chat());
+    assert!(app.pending_agent_decision.is_some());
+    assert_eq!(app.chat_messages().len(), 2);
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_full_editor());
+    assert_eq!(app.ai_draft_create_title.as_deref(), Some("Moat Strategy"));
+    assert!(app.pending_agent_decision.is_none());
+}
+
+#[test]
+fn agent_mode_routes_current_note_edit_without_note_keyword() {
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.selected_note = 1;
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("make this more concise");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_ai_chat());
+    assert!(app.pending_agent_decision.is_some());
+    assert_eq!(app.chat_messages().len(), 2);
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_full_editor());
+    assert_eq!(app.editor_note_index, Some(1));
+    assert!(app.pending_agent_decision.is_none());
+}
+
+#[test]
+fn agent_mode_can_decide_to_work_on_existing_selected_note() {
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.selected_note = 2;
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("work on the existing note and make progress");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_ai_chat());
+    assert!(app.pending_agent_decision.is_some());
+    assert_eq!(app.chat_messages().len(), 2);
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_full_editor());
+    assert_eq!(app.editor_note_index, Some(2));
+    assert!(app.pending_agent_decision.is_none());
+}
+
+#[test]
+fn agent_mode_can_choose_existing_note_by_title() {
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("work on Feature ideas and make it sharper");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_ai_chat());
+    assert!(app.pending_agent_decision.is_some());
+    assert_eq!(app.chat_messages().len(), 2);
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_full_editor());
+    assert_eq!(app.editor_note_index, Some(3));
+    assert!(app.pending_agent_decision.is_none());
+}
+
+#[test]
+fn agent_mode_keeps_how_to_writing_questions_as_chat() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("how do I write a note about launch planning?");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_ai_chat());
+    assert_eq!(app.chat_messages().len(), 2);
+    assert!(app.chat_messages()[0].content.contains("how do I write"));
+}
+
+#[test]
+fn chat_mode_keeps_note_requests_as_chat() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.agent_mode_enabled = false;
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("write a note about launch planning");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_ai_chat());
+    assert_eq!(app.chat_messages().len(), 2);
+    assert!(app.chat_messages()[0].content.contains("write a note"));
+}
+
+#[test]
+fn mode_commands_switch_agent_routing() {
+    let mut app = App::new();
+
+    for character in "/mode chat".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+    assert!(!app.is_agent_mode_enabled());
+
+    for character in "/mode agent".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+    assert!(app.is_agent_mode_enabled());
+}
+
+#[test]
+fn ai_create_proposal_creates_note_when_applied() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.obsidian_vault_path = None;
+    app.note_save_target = NoteSaveTarget::Local;
+    app.refresh_connection_state();
+    let original_count = app.notes.len();
+    app.panel_mode = PanelMode::FullEditor;
+    app.ai_overlay_visible = true;
+    app.pending_ai_edit = Some(AiEditProposal {
+        note_index: None,
+        title: Some(String::from("Launch Planning")),
+        instruction: String::from("write a note"),
+        proposed: String::from("# Launch Planning\n\nShip the smallest useful path."),
+        diff_lines: App::build_line_diff("", "# Launch Planning\n\nShip the smallest useful path."),
+    });
+
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(app.notes.len(), original_count + 1);
+    assert_eq!(app.editor_note_title(), Some("Launch Planning"));
+    assert!(app
+        .editor_buffer()
+        .contains("Ship the smallest useful path."));
+}
+
+#[test]
+fn settings_cycles_note_save_target_through_available_targets() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = Some(String::from("token"));
+    app.obsidian_vault_path = Some(PathBuf::from("/tmp"));
+    app.note_save_target = NoteSaveTarget::Local;
+    app.refresh_connection_state();
+
+    app.cycle_note_save_target();
+    assert_eq!(app.note_save_target, NoteSaveTarget::Obsidian);
+
+    app.cycle_note_save_target();
+    assert_eq!(app.note_save_target, NoteSaveTarget::Strix);
+
+    app.cycle_note_save_target();
+    assert_eq!(app.note_save_target, NoteSaveTarget::Local);
+}
+
+#[test]
+fn local_save_target_does_not_assign_obsidian_or_strix_source() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = Some(String::from("token"));
+    app.obsidian_vault_path = Some(PathBuf::from("/tmp"));
+    app.note_save_target = NoteSaveTarget::Local;
+    app.refresh_connection_state();
+
+    let index = app.create_note_from_content("Local only", "body").unwrap();
+
+    assert!(app.notes[index].remote_id.is_none());
+    assert!(app.notes[index].obsidian_path.is_none());
+}
