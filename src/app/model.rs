@@ -59,6 +59,12 @@ pub struct ChatMessage {
     pub timestamp: String,
 }
 
+#[derive(Clone)]
+pub struct ActivityEntry {
+    pub timestamp: String,
+    pub label: String,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CursorStyle {
     Block,

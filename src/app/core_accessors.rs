@@ -78,6 +78,7 @@ impl App {
                 active: false,
             },
             chat_messages: Vec::new(),
+            activity_log: VecDeque::with_capacity(80),
             chat_input_buffer: String::new(),
             chat_input_cursor: 0,
             chat_scroll_offset: 0,
@@ -133,6 +134,7 @@ impl App {
             }
         }
 
+        app.add_activity("Ready for input.");
         app.rebuild_chat_render_cache();
         app
     }
@@ -566,6 +568,7 @@ impl App {
 
             match result {
                 Ok(ChatStreamUpdate::Delta(chunk)) => {
+                    let first_chunk = self.streaming_buffer.is_empty();
                     self.streaming_active = true;
                     self.streaming_buffer.push_str(&chunk);
                     if let Some(message) = self
@@ -579,6 +582,9 @@ impl App {
                     self.chat_render_dirty = true;
                     self.thinking = true;
                     self.thinking_status = String::from("Streaming response...");
+                    if first_chunk {
+                        self.add_activity("Receiving model response.");
+                    }
                 }
                 Ok(ChatStreamUpdate::Done) => {
                     if self.streaming_buffer.trim().is_empty() {
@@ -601,6 +607,7 @@ impl App {
                     self.thinking_ticks_remaining = 0;
                     self.chat_stream_rx = None;
                     self.last_action = String::from("AI response received.");
+                    self.add_activity("Finished response.");
                     stream_finished = true;
                 }
                 Ok(ChatStreamUpdate::Error(error)) => {
@@ -629,11 +636,18 @@ impl App {
                     self.thinking_ticks_remaining = 0;
                     self.chat_stream_rx = None;
                     self.last_action = String::from("AI request failed.");
+                    self.add_activity(format!(
+                        "Request failed: {}",
+                        Self::preview_text(&error, 72)
+                    ));
                     stream_finished = true;
                 }
                 Err(TryRecvError::Empty) => {
                     self.thinking = true;
                     if self.streaming_buffer.is_empty() {
+                        if self.thinking_status != "Waiting for response..." {
+                            self.add_activity("Waiting for model response.");
+                        }
                         self.thinking_status = String::from("Waiting for response...");
                     } else {
                         self.thinking_status = String::from("Streaming response...");
@@ -660,6 +674,7 @@ impl App {
                     self.thinking_ticks_remaining = 0;
                     self.chat_stream_rx = None;
                     self.last_action = String::from("AI request disconnected.");
+                    self.add_activity("Request disconnected.");
                     stream_finished = true;
                 }
             }
@@ -1094,6 +1109,22 @@ impl App {
 
     pub fn last_action(&self) -> &str {
         &self.last_action
+    }
+
+    pub fn recent_activity(&self, limit: usize) -> Vec<ActivityEntry> {
+        self.activity_log
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    pub fn activity_headline(&self) -> String {
+        self.activity_log
+            .back()
+            .map(|entry| entry.label.clone())
+            .unwrap_or_else(|| self.last_action.clone())
     }
 
     pub fn visible_commands(&self, limit: usize) -> Vec<&'static CommandSpec> {

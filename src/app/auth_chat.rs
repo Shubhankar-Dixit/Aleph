@@ -612,12 +612,15 @@ impl App {
 
         self.panel_mode = PanelMode::AiChat;
         self.thinking = true;
-        self.thinking_status = String::from("Aleph is thinking...");
+        self.thinking_status = String::from("Reading workspace context...");
         self.thinking_ticks_remaining = 20;
         self.chat_scroll_offset = 0;
         self.streaming_buffer.clear();
         self.streaming_active = true;
         self.last_action = format!("AI Chat: {}", query);
+        self.add_activity(format!("User asked: {}", Self::preview_text(&query, 72)));
+        self.add_activity("Reading selected note and recent messages.");
+        self.add_activity(format!("Sending request to {}.", self.ai_provider_label()));
 
         let (sender, receiver) = mpsc::channel();
         self.chat_stream_rx = Some(receiver);

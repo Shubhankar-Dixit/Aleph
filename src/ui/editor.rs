@@ -218,12 +218,12 @@ pub(super) fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let cursor_scroll_line = cursor_visual_row.map(usize::from).unwrap_or(cursor_line);
 
     let total_lines = lines.len().max(1);
-    let visible_lines = editor_content_area.height as usize;
+    let visible_lines = (editor_content_area.height as usize).max(1);
 
     let mut effective_scroll_offset = app.editor_scroll_offset();
     if cursor_scroll_line < effective_scroll_offset {
         effective_scroll_offset = cursor_scroll_line;
-    } else if cursor_scroll_line >= effective_scroll_offset + visible_lines {
+    } else if cursor_scroll_line >= effective_scroll_offset.saturating_add(visible_lines) {
         effective_scroll_offset = cursor_scroll_line.saturating_sub(visible_lines - 1);
     }
     effective_scroll_offset =

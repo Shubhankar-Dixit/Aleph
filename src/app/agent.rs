@@ -24,6 +24,7 @@ impl App {
         self.panel_mode = PanelMode::AiChat;
         self.chat_scroll_offset = 0;
         self.push_chat_message("user", query.trim());
+        self.add_activity(format!("Planned agent action: {}.", decision.rationale));
 
         if decision.action == AgentAction::EditNote && decision.note_index.is_none() {
             self.pending_agent_query = None;
@@ -41,6 +42,7 @@ impl App {
         self.pending_agent_decision = Some(decision);
         self.push_chat_message("assistant", message);
         self.last_action = String::from("Agent action waiting for permission.");
+        self.add_activity("Waiting for permission before writing.");
     }
 
     pub(super) fn agent_permission_message(&self, decision: &AgentDecision) -> String {
@@ -356,6 +358,7 @@ impl App {
         self.panel_mode = PanelMode::AiChat;
         self.chat_scroll_offset = 0;
         self.push_chat_message("user", query.trim());
+        self.add_activity(format!("Reading context for {}.", decision.rationale));
 
         let response = match decision.action {
             AgentAction::ReadNote => self.agent_read_note_response(&decision),
@@ -367,6 +370,7 @@ impl App {
 
         self.push_chat_message("assistant", response);
         self.last_action = format!("Agent: {}", decision.rationale);
+        self.add_activity("Returned local context.");
     }
 
     pub(super) fn agent_workspace_context(&self) -> String {
@@ -450,16 +454,39 @@ impl App {
             .unwrap_or(original_query)
             .trim()
             .to_lowercase();
+        let query_terms = Self::agent_search_terms(&query);
         let mut matches = self
             .notes
             .iter()
-            .filter(|note| {
-                query.is_empty()
-                    || note.title.to_lowercase().contains(&query)
-                    || note.content.to_lowercase().contains(&query)
+            .filter_map(|note| {
+                let haystack = format!(
+                    "{} {}",
+                    note.title.to_lowercase(),
+                    note.content.to_lowercase()
+                );
+                let phrase_match = !query.is_empty() && haystack.contains(&query);
+                let term_score = query_terms
+                    .iter()
+                    .filter(|term| haystack.contains(term.as_str()))
+                    .count();
+                let term_match = query_terms.is_empty()
+                    || term_score == query_terms.len()
+                    || (query_terms.len() >= 3 && term_score >= 2);
+
+                (query.is_empty() || phrase_match || term_match).then_some((term_score, note))
             })
+            .collect::<Vec<_>>();
+
+        matches.sort_by(|(left_score, left_note), (right_score, right_note)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left_note.title.cmp(&right_note.title))
+        });
+
+        let mut matches = matches
+            .into_iter()
             .take(8)
-            .map(|note| {
+            .map(|(_, note)| {
                 format!(
                     "- `#{}` `{}`: {}",
                     note.id,
@@ -535,6 +562,7 @@ impl App {
         self.ai_input_cursor = self.ai_input_buffer.len();
         self.ghost_submit_instruction();
         self.last_action = format!("AI is drafting a new note: {}", title);
+        self.add_activity(format!("Drafting new note: {}.", title));
         true
     }
 
@@ -642,8 +670,13 @@ impl App {
             "scan",
             "which notes",
             "notes about",
+            "note about",
             "anything about",
             "where did i write",
+            "talks about",
+            "talk about",
+            "similar to",
+            "like this",
         ]
         .iter()
         .any(|needle| lower.contains(needle));
@@ -691,12 +724,17 @@ impl App {
         let lower = trimmed.to_lowercase();
         for marker in [
             " about ",
+            " on ",
             " for ",
             " matching ",
             " containing ",
             " called ",
             " named ",
             " titled ",
+            " talks about ",
+            " talk about ",
+            " similar to ",
+            " like ",
         ] {
             if let Some((_, rest)) = lower.split_once(marker) {
                 let start = trimmed.len().saturating_sub(rest.len());
@@ -711,7 +749,100 @@ impl App {
             }
         }
 
-        None
+        let cleaned = Self::clean_agent_search_query(trimmed);
+        (!cleaned.is_empty()).then_some(cleaned)
+    }
+
+    pub(super) fn clean_agent_search_query(query: &str) -> String {
+        let mut words = query
+            .split_whitespace()
+            .map(|word| {
+                word.trim_matches(|c: char| {
+                    c == '"'
+                        || c == '\''
+                        || c == '`'
+                        || c == '.'
+                        || c == ','
+                        || c == '?'
+                        || c == '!'
+                        || c == ';'
+                        || c == ':'
+                })
+            })
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>();
+
+        while let Some(first) = words.first().map(|word| word.to_lowercase()) {
+            let drop_count = match first.as_str() {
+                "find" | "search" | "scan" | "show" | "open" | "read" => 1,
+                "look"
+                    if words
+                        .get(1)
+                        .is_some_and(|word| word.eq_ignore_ascii_case("through")) =>
+                {
+                    2
+                }
+                "go" if words
+                    .get(1)
+                    .is_some_and(|word| word.eq_ignore_ascii_case("through")) =>
+                {
+                    2
+                }
+                _ => 0,
+            };
+            if drop_count == 0 {
+                break;
+            }
+            words.drain(0..drop_count.min(words.len()));
+        }
+
+        let cleaned = words.join(" ");
+        let lower = cleaned.to_lowercase();
+        for prefix in [
+            "a note that i have ",
+            "the note that i have ",
+            "notes that i have ",
+            "a note ",
+            "the note ",
+            "notes ",
+            "that i have ",
+            "i have ",
+        ] {
+            if lower.starts_with(prefix) {
+                return cleaned[prefix.len()..].trim().to_string();
+            }
+        }
+
+        cleaned.trim().to_string()
+    }
+
+    pub(super) fn agent_search_terms(query: &str) -> Vec<String> {
+        query
+            .split(|c: char| !c.is_alphanumeric())
+            .map(str::to_lowercase)
+            .filter(|word| {
+                word.len() > 2
+                    && !matches!(
+                        word.as_str(),
+                        "the"
+                            | "and"
+                            | "from"
+                            | "that"
+                            | "this"
+                            | "have"
+                            | "note"
+                            | "notes"
+                            | "about"
+                            | "with"
+                            | "for"
+                            | "one"
+                            | "not"
+                            | "exact"
+                            | "stuff"
+                            | "like"
+                    )
+            })
+            .collect()
     }
 
     pub(super) fn infer_note_title_from_request(query: &str) -> Option<String> {
@@ -796,6 +927,8 @@ impl App {
             "AI is preparing edits for note: {} ({})",
             self.notes[index].title, decision.rationale
         );
+        self.add_activity(format!("Reading note: {}.", self.notes[index].title));
+        self.add_activity("Preparing AI edit proposal.");
         true
     }
 

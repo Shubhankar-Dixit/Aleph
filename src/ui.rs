@@ -24,10 +24,10 @@ use markdown::{
 };
 
 const BG: Color = Color::Rgb(25, 26, 34);
-const ACCENT: Color = Color::Rgb(156, 146, 201);
-const ACCENT_SOFT: Color = Color::Rgb(115, 106, 155);
-const TEXT: Color = Color::Rgb(198, 198, 210);
-const MUTED: Color = Color::Rgb(120, 122, 138);
+const ACCENT: Color = Color::Rgb(136, 129, 176);
+const ACCENT_SOFT: Color = Color::Rgb(112, 108, 148);
+const TEXT: Color = Color::Rgb(142, 144, 158);
+const MUTED: Color = Color::Rgb(104, 107, 122);
 const EDITOR_TEXT: Color = Color::Rgb(130, 132, 145);
 const EDITOR_MUTED: Color = Color::Rgb(98, 101, 116);
 const EDITOR_SELECTION_BG: Color = Color::Rgb(60, 62, 78);
@@ -35,8 +35,8 @@ const DIFF_ADDED_FG: Color = Color::Rgb(120, 220, 140); // Green for additions
 const DIFF_REMOVED_FG: Color = Color::Rgb(220, 100, 100); // Red for removals
 const DIFF_ADDED_BG: Color = Color::Rgb(30, 60, 40); // Dark green background
 const DIFF_REMOVED_BG: Color = Color::Rgb(60, 30, 35); // Dark red background
-const PANEL: Color = Color::Rgb(35, 36, 48);
-const BORDER: Color = Color::Rgb(34, 65, 64);
+const PANEL: Color = Color::Rgb(31, 32, 42);
+const BORDER: Color = Color::Rgb(48, 53, 66);
 const GHOST_FRAMES: [&str; 4] = ["◌", "◎", "◍", "◉"];
 const CURSOR: &str = "│";
 

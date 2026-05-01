@@ -419,11 +419,11 @@ impl App {
             }
             "recall" => {
                 let mut lines = self
-                    .history
+                    .activity_log
                     .iter()
                     .rev()
                     .take(5)
-                    .cloned()
+                    .map(|entry| format!("[{}] {}", entry.timestamp, entry.label))
                     .collect::<Vec<_>>();
 
                 if lines.is_empty() {
@@ -1240,11 +1240,24 @@ impl App {
 
     pub(super) fn add_strix_log(&mut self, message: impl Into<String>) {
         let timestamp = self.uptime();
-        self.strix_logs
-            .push(format!("[{}] {}", timestamp, message.into()));
+        let message = message.into();
+        self.strix_logs.push(format!("[{}] {}", timestamp, message));
         // Keep only last 50 log entries
         if self.strix_logs.len() > 50 {
             self.strix_logs.drain(0..self.strix_logs.len() - 50);
+        }
+    }
+
+    pub(super) fn add_activity(&mut self, label: impl Into<String>) {
+        let timestamp = self.uptime();
+        self.activity_log.push_back(ActivityEntry {
+            timestamp,
+            label: label.into(),
+        });
+
+        if self.activity_log.len() > 80 {
+            self.activity_log
+                .drain(0..self.activity_log.len().saturating_sub(80));
         }
     }
 

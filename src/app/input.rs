@@ -91,8 +91,8 @@ impl App {
 
         if self.is_ai_chat() {
             match mouse_event.kind {
-                MouseEventKind::ScrollUp => self.scroll_chat_up(3),
-                MouseEventKind::ScrollDown => self.scroll_chat_down(3),
+                MouseEventKind::ScrollUp => self.scroll_chat_up(1),
+                MouseEventKind::ScrollDown => self.scroll_chat_down(1),
                 _ => {}
             }
             return;

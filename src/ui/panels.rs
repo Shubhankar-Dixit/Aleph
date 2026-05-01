@@ -371,7 +371,10 @@ pub(super) fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect
     if is_openrouter_selected {
         if app.is_openrouter_login_pending() {
             status_lines.push(Line::from(vec![Span::styled(
-                format!("{} Waiting for OpenRouter authorization...", app.thinking_frame()),
+                format!(
+                    "{} Waiting for OpenRouter authorization...",
+                    app.thinking_frame()
+                ),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             )]));
             status_lines.push(Line::from(vec![Span::styled(
@@ -396,7 +399,10 @@ pub(super) fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect
     } else {
         if app.is_strix_login_pending() {
             status_lines.push(Line::from(vec![Span::styled(
-                format!("{} Waiting for Strix browser login...", app.thinking_frame()),
+                format!(
+                    "{} Waiting for Strix browser login...",
+                    app.thinking_frame()
+                ),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             )]));
             status_lines.push(Line::from(vec![Span::styled(
@@ -903,14 +909,14 @@ pub(super) fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect)
     let cursor_scroll_line = cursor_visual_row.unwrap_or(cursor_line);
 
     let total_lines = lines.len().max(1);
-    let visible_lines = editor_content_area.height as usize;
+    let visible_lines = (editor_content_area.height as usize).max(1);
 
     // Auto-scroll: ensure cursor is within visible viewport
     let mut effective_scroll_offset = app.editor_scroll_offset();
     if cursor_scroll_line < effective_scroll_offset {
         // Cursor above viewport - scroll up to show it
         effective_scroll_offset = cursor_scroll_line;
-    } else if cursor_scroll_line >= effective_scroll_offset + visible_lines {
+    } else if cursor_scroll_line >= effective_scroll_offset.saturating_add(visible_lines) {
         // Cursor below viewport - scroll down to show it
         effective_scroll_offset = cursor_scroll_line.saturating_sub(visible_lines - 1);
     }

@@ -701,65 +701,64 @@ impl App {
     }
 
     pub(super) fn editor_move_up(&mut self) {
-        // Find the start of the current line
-        let current_pos = self.editor_cursor;
+        let current_pos = Self::clamp_to_char_boundary(&self.editor_buffer, self.editor_cursor);
         let line_start = self.editor_buffer[..current_pos]
             .rfind('\n')
             .map(|pos| pos + 1)
             .unwrap_or(0);
 
-        // If we're on the first line, can't move up
         if line_start == 0 {
             return;
         }
 
-        // Calculate column position within current line
-        let column = current_pos - line_start;
-
-        // Find the start of the previous line
+        let column = self.editor_buffer[line_start..current_pos].chars().count();
         let prev_line_end = line_start - 1;
         let prev_line_start = self.editor_buffer[..prev_line_end]
             .rfind('\n')
             .map(|pos| pos + 1)
             .unwrap_or(0);
+        let prev_line = &self.editor_buffer[prev_line_start..prev_line_end];
+        let new_column = column.min(prev_line.chars().count());
+        let new_offset = prev_line
+            .char_indices()
+            .nth(new_column)
+            .map(|(offset, _)| offset)
+            .unwrap_or(prev_line.len());
 
-        // Move cursor to the same column in the previous line (or end of line if shorter)
-        let prev_line_len = prev_line_end - prev_line_start;
-        let new_column = column.min(prev_line_len);
-        self.editor_cursor = prev_line_start + new_column;
+        self.editor_cursor = prev_line_start + new_offset;
     }
 
     pub(super) fn editor_move_down(&mut self) {
-        // Find the end of the current line
-        let current_pos = self.editor_cursor;
+        let current_pos = Self::clamp_to_char_boundary(&self.editor_buffer, self.editor_cursor);
         let line_end = self.editor_buffer[current_pos..]
             .find('\n')
             .map(|pos| current_pos + pos)
             .unwrap_or(self.editor_buffer.len());
 
-        // If we're on the last line, can't move down
         if line_end >= self.editor_buffer.len() {
             return;
         }
 
-        // Calculate column position within current line
         let line_start = self.editor_buffer[..current_pos]
             .rfind('\n')
             .map(|pos| pos + 1)
             .unwrap_or(0);
-        let column = current_pos - line_start;
+        let column = self.editor_buffer[line_start..current_pos].chars().count();
 
-        // Find the end of the next line
         let next_line_start = line_end + 1;
         let next_line_end = self.editor_buffer[next_line_start..]
             .find('\n')
             .map(|pos| next_line_start + pos)
             .unwrap_or(self.editor_buffer.len());
+        let next_line = &self.editor_buffer[next_line_start..next_line_end];
+        let new_column = column.min(next_line.chars().count());
+        let new_offset = next_line
+            .char_indices()
+            .nth(new_column)
+            .map(|(offset, _)| offset)
+            .unwrap_or(next_line.len());
 
-        // Move cursor to the same column in the next line (or end of line if shorter)
-        let next_line_len = next_line_end - next_line_start;
-        let new_column = column.min(next_line_len);
-        self.editor_cursor = next_line_start + new_column;
+        self.editor_cursor = next_line_start + new_offset;
     }
 
     pub(super) fn sync_selection(&mut self) {

@@ -1,7 +1,8 @@
 use super::*;
 
 pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
-    let max_width = 80;
+    let show_activity = area.width >= 108;
+    let max_width = if show_activity { 112 } else { 88 };
     let center_width = area.width.saturating_sub(8).min(max_width);
     let left_padding = area.width.saturating_sub(center_width) / 2;
 
@@ -26,8 +27,25 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
             Constraint::Min(0),
         ]);
 
+    let content_area = top_h_chunks.split(v_chunks[2])[1];
+    let content_chunks = if show_activity {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(48),
+                Constraint::Length(2),
+                Constraint::Length(30),
+            ])
+            .split(content_area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0)])
+            .split(content_area)
+    };
+
     let meta_area = top_h_chunks.split(v_chunks[0])[1];
-    let chat_area = top_h_chunks.split(v_chunks[2])[1];
+    let chat_area = content_chunks[0];
     let input_area = top_h_chunks.split(v_chunks[4])[1];
     let hints_area = top_h_chunks.split(v_chunks[5])[1];
 
@@ -57,14 +75,14 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
             "Aleph {} {} {}",
             mode_label,
             app.thinking_frame(),
-            app.thinking_status()
+            app.activity_headline()
         )
     } else if app.is_thinking() {
         format!(
             "Aleph {} {} {}",
             mode_label,
             app.thinking_frame(),
-            app.thinking_status()
+            app.activity_headline()
         )
     } else {
         format!(
@@ -83,22 +101,23 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     if app.is_streaming() || app.is_thinking() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
-            format!("{} {}", app.thinking_frame(), app.thinking_status()),
+            format!("{} {}", app.thinking_frame(), app.activity_headline()),
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )]));
     }
 
-    let wrap_setting = Wrap { trim: false };
+    let lines = wrap_lines_to_width(lines, chat_area.width as usize);
     let visible_lines = chat_area.height as usize;
     let max_scroll = lines.len().saturating_sub(visible_lines);
     let scroll_y = max_scroll
         .saturating_sub(app.chat_scroll_offset().min(max_scroll))
         .min(u16::MAX as usize) as u16;
 
-    let messages_widget = Paragraph::new(lines)
-        .wrap(wrap_setting)
-        .scroll((scroll_y, 0));
+    let messages_widget = Paragraph::new(lines).scroll((scroll_y, 0));
     frame.render_widget(messages_widget, chat_area);
+    if show_activity {
+        render_activity_panel(frame, app, content_chunks[2]);
+    }
 
     let input_buffer = app.chat_input_buffer();
     let cursor = app.chat_input_cursor().min(input_buffer.len());
@@ -132,6 +151,89 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         .alignment(Alignment::Right)
         .style(Style::default().fg(MUTED));
     frame.render_widget(bottom_hints, hints_area);
+}
+
+fn render_activity_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            "Activity",
+            Style::default()
+                .fg(ACCENT_SOFT)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(BORDER));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let entries = app.recent_activity(inner.height.saturating_sub(1) as usize);
+    let lines = if entries.is_empty() {
+        vec![Line::from(vec![Span::styled(
+            "No activity yet.",
+            Style::default().fg(MUTED),
+        )])]
+    } else {
+        entries
+            .into_iter()
+            .rev()
+            .map(|entry| {
+                Line::from(vec![
+                    Span::styled(format!("{} ", entry.timestamp), Style::default().fg(MUTED)),
+                    Span::styled(entry.label, Style::default().fg(TEXT)),
+                ])
+            })
+            .collect()
+    };
+
+    frame.render_widget(
+        Paragraph::new(wrap_lines_to_width(lines, inner.width as usize)),
+        inner,
+    );
+}
+
+fn wrap_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    let width = width.saturating_sub(1).max(1);
+    let mut wrapped = Vec::new();
+
+    for line in lines {
+        let mut current_spans = Vec::new();
+        let mut current_width = 0usize;
+
+        for span in line.spans {
+            let style = span.style;
+            let mut segment = String::new();
+
+            for ch in span.content.chars() {
+                if ch == '\n' {
+                    if !segment.is_empty() {
+                        current_spans.push(Span::styled(std::mem::take(&mut segment), style));
+                    }
+                    wrapped.push(Line::from(std::mem::take(&mut current_spans)));
+                    current_width = 0;
+                    continue;
+                }
+
+                if current_width >= width {
+                    if !segment.is_empty() {
+                        current_spans.push(Span::styled(std::mem::take(&mut segment), style));
+                    }
+                    wrapped.push(Line::from(std::mem::take(&mut current_spans)));
+                    current_width = 0;
+                }
+
+                segment.push(ch);
+                current_width += 1;
+            }
+
+            if !segment.is_empty() {
+                current_spans.push(Span::styled(segment, style));
+            }
+        }
+
+        wrapped.push(Line::from(current_spans));
+    }
+
+    wrapped
 }
 
 pub(super) fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {

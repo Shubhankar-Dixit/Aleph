@@ -863,6 +863,37 @@ fn agent_mode_can_search_notes_without_provider() {
 }
 
 #[test]
+fn agent_search_extracts_subject_from_find_note_request() {
+    let mut app = App::new();
+    app.notes = vec![
+        test_note(
+            1,
+            None,
+            "Founder Advice",
+            "Notes on advice from Steve Jobs and Peter Thiel.",
+        ),
+        test_note(2, None, "Groceries", "milk eggs bread"),
+    ];
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer =
+        String::from("find a note that I have on advice from steve jobs and peter thiel");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_ai_chat());
+    assert!(app.pending_agent_decision.is_none());
+    assert_eq!(app.chat_messages().len(), 2);
+    assert!(app.chat_messages()[1].content.contains("Founder Advice"));
+    assert!(!app.chat_messages()[1]
+        .content
+        .contains("find a note that I have"));
+}
+
+#[test]
 fn agent_mode_can_go_through_memories_without_provider() {
     let mut app = App::new();
     app.openrouter_api_key = None;
@@ -999,4 +1030,19 @@ fn local_save_target_does_not_assign_obsidian_or_strix_source() {
 
     assert!(app.notes[index].remote_id.is_none());
     assert!(app.notes[index].obsidian_path.is_none());
+}
+
+#[test]
+fn editor_vertical_navigation_keeps_cursor_on_char_boundary() {
+    let mut app = App::new();
+    app.editor_buffer = String::from("ééé\nab");
+    app.editor_cursor = "éé".len();
+
+    app.editor_move_down();
+    assert!(app.editor_buffer.is_char_boundary(app.editor_cursor));
+    assert_eq!(app.editor_cursor, app.editor_buffer.len());
+
+    app.editor_move_up();
+    assert!(app.editor_buffer.is_char_boundary(app.editor_cursor));
+    assert_eq!(app.editor_cursor, "éé".len());
 }

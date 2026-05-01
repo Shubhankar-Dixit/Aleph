@@ -59,10 +59,10 @@ const EDITOR_IMAGES_CONFIG: &str = "editor-images";
 const OBSIDIAN_PAIRING_DISABLED_CONFIG: &str = "obsidian-vault-disabled";
 const STRIX_TOKEN_CONFIG: &str = "strix-access-token";
 const MAX_CHAT_MESSAGES: usize = 24;
-const CHAT_TEXT: Color = Color::Rgb(198, 198, 210);
-const CHAT_MUTED: Color = Color::Rgb(120, 122, 138);
-const CHAT_ACCENT: Color = Color::Rgb(156, 146, 201);
-const CHAT_ACCENT_SOFT: Color = Color::Rgb(115, 106, 155);
+const CHAT_TEXT: Color = Color::Rgb(142, 144, 158);
+const CHAT_MUTED: Color = Color::Rgb(104, 107, 122);
+const CHAT_ACCENT: Color = Color::Rgb(136, 129, 176);
+const CHAT_ACCENT_SOFT: Color = Color::Rgb(112, 108, 148);
 
 enum ChatStreamUpdate {
     Delta(String),
@@ -130,6 +130,7 @@ pub struct App {
     redo_stack: VecDeque<EditorState>,
     search_state: SearchState,
     chat_messages: Vec<ChatMessage>,
+    activity_log: VecDeque<ActivityEntry>,
     chat_input_buffer: String,
     chat_input_cursor: usize,
     chat_scroll_offset: usize,
