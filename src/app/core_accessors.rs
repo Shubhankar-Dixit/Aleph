@@ -96,6 +96,7 @@ impl App {
             strix_logs: Vec::new(),
             streaming_buffer: String::new(),
             streaming_active: false,
+            thinking_status: String::new(),
             chat_render_cache: Vec::new(),
             chat_render_dirty: false,
             chat_cache_stable_len: 0,
@@ -117,6 +118,8 @@ impl App {
             title_cursor: 0,
             expanded_folders: Vec::new(),
         };
+
+        app.rebuild_obsidian_folders_from_cached_notes();
 
         if app.strix_access_token.is_some() {
             if let Ok(notes) = Self::load_cached_strix_notes() {
@@ -575,6 +578,7 @@ impl App {
                     }
                     self.chat_render_dirty = true;
                     self.thinking = true;
+                    self.thinking_status = String::from("Streaming response...");
                 }
                 Ok(ChatStreamUpdate::Done) => {
                     if self.streaming_buffer.trim().is_empty() {
@@ -593,6 +597,7 @@ impl App {
                     self.rebuild_chat_render_cache();
                     self.chat_render_dirty = false;
                     self.thinking = false;
+                    self.thinking_status.clear();
                     self.thinking_ticks_remaining = 0;
                     self.chat_stream_rx = None;
                     self.last_action = String::from("AI response received.");
@@ -620,6 +625,7 @@ impl App {
                     self.rebuild_chat_render_cache();
                     self.chat_render_dirty = false;
                     self.thinking = false;
+                    self.thinking_status.clear();
                     self.thinking_ticks_remaining = 0;
                     self.chat_stream_rx = None;
                     self.last_action = String::from("AI request failed.");
@@ -627,6 +633,11 @@ impl App {
                 }
                 Err(TryRecvError::Empty) => {
                     self.thinking = true;
+                    if self.streaming_buffer.is_empty() {
+                        self.thinking_status = String::from("Waiting for response...");
+                    } else {
+                        self.thinking_status = String::from("Streaming response...");
+                    }
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
@@ -645,6 +656,7 @@ impl App {
                     self.rebuild_chat_render_cache();
                     self.chat_render_dirty = false;
                     self.thinking = false;
+                    self.thinking_status.clear();
                     self.thinking_ticks_remaining = 0;
                     self.chat_stream_rx = None;
                     self.last_action = String::from("AI request disconnected.");
@@ -1014,8 +1026,13 @@ impl App {
         self.strix_login_rx.is_some()
     }
 
+    pub fn thinking_status(&self) -> &str {
+        &self.thinking_status
+    }
+
     pub fn thinking_frame(&self) -> &'static str {
-        THINKING_FRAMES[(self.tick as usize) % THINKING_FRAMES.len()]
+        let frame_index = ((self.tick / 4) as usize) % THINKING_FRAMES.len();
+        THINKING_FRAMES[frame_index]
     }
 
     pub fn command_label(command: &CommandSpec) -> String {

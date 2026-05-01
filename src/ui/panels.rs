@@ -370,10 +370,8 @@ pub(super) fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect
 
     if is_openrouter_selected {
         if app.is_openrouter_login_pending() {
-            let pulse = crate::app::THINKING_FRAMES
-                [(app.tick() as usize) % crate::app::THINKING_FRAMES.len()];
             status_lines.push(Line::from(vec![Span::styled(
-                format!("{} Waiting for OpenRouter authorization...", pulse),
+                format!("{} Waiting for OpenRouter authorization...", app.thinking_frame()),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             )]));
             status_lines.push(Line::from(vec![Span::styled(
@@ -397,10 +395,8 @@ pub(super) fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect
         }
     } else {
         if app.is_strix_login_pending() {
-            let pulse = crate::app::THINKING_FRAMES
-                [(app.tick() as usize) % crate::app::THINKING_FRAMES.len()];
             status_lines.push(Line::from(vec![Span::styled(
-                format!("{} Waiting for Strix browser login...", pulse),
+                format!("{} Waiting for Strix browser login...", app.thinking_frame()),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             )]));
             status_lines.push(Line::from(vec![Span::styled(

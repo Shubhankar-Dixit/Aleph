@@ -208,6 +208,7 @@ impl App {
                 }
                 self.strix_login_cancel = None;
                 self.thinking = false;
+                self.thinking_status.clear();
                 self.thinking_ticks_remaining = 0;
                 self.streaming_buffer.clear();
                 self.streaming_active = false;
@@ -940,6 +941,7 @@ impl App {
         if self.is_strix_connected() {
             self.ensure_cached_strix_notes_loaded();
         }
+        self.rebuild_obsidian_folders_from_cached_notes();
 
         if self.folders.is_empty() {
             self.note_list_indices = (0..self.notes.len()).collect();

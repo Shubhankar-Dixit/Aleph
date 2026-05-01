@@ -201,7 +201,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 app.thinking_frame(),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" focusing..."),
+            Span::raw(" "),
+            Span::raw(app.thinking_status()),
         ]))
         .style(Style::default().fg(MUTED))
         .alignment(Alignment::Right)

@@ -229,11 +229,44 @@ fn note_list_handles_unicode_obsidian_folder_and_title() {
     app.notes = vec![test_note(1, None, "計画とアイデアの長いノート", "body")];
     app.notes[0].folder_id = Some(99);
     app.notes[0].obsidian_path = Some(PathBuf::from("/tmp/unicode.md"));
+    app.expanded_folders.push(99);
 
     app.open_note_list_panel();
 
-    assert_eq!(app.panel_lines.len(), 1);
-    assert!(app.panel_lines[0].contains("[研究ノート集]"));
+    assert_eq!(app.panel_lines.len(), 2);
+    assert!(app.panel_lines[0].contains("研究ノート集"));
+    assert!(app.panel_lines[1].contains("計画とアイデアの長いノート"));
+}
+
+#[test]
+fn note_list_rebuilds_obsidian_tree_from_cached_paths() {
+    let root = std::env::temp_dir().join(format!("aleph-cached-tree-test-{}", App::now_millis()));
+    let mut app = App::new();
+    app.obsidian_vault_path = Some(root.clone());
+    app.folders.clear();
+    app.expanded_folders.clear();
+    app.notes = vec![
+        test_note(1, None, "Inbox", "# Inbox"),
+        test_note(2, None, "Project Plan", "# Project Plan"),
+    ];
+    app.notes[0].obsidian_path = Some(root.join("Inbox.md"));
+    app.notes[1].obsidian_path = Some(root.join("Projects").join("Plan.md"));
+
+    app.open_note_list_panel();
+
+    assert!(app.panel_title.contains("Space expand/collapse"));
+    assert!(app.panel_lines.iter().any(|line| line.contains("Obsidian")));
+    assert!(app
+        .panel_lines
+        .iter()
+        .any(|line| line.contains("aleph-cached-tree-test")));
+    assert!(app.panel_lines.iter().any(|line| line.contains("Projects")));
+    assert!(app.panel_lines.iter().any(|line| line.contains("Inbox")));
+    assert!(app
+        .panel_lines
+        .iter()
+        .any(|line| line.contains("Project Plan")));
+    assert!(app.notes.iter().all(|note| note.folder_id.is_some()));
 }
 
 #[test]
@@ -788,6 +821,70 @@ fn agent_mode_can_choose_existing_note_by_title() {
     assert!(app.is_full_editor());
     assert_eq!(app.editor_note_index, Some(3));
     assert!(app.pending_agent_decision.is_none());
+}
+
+#[test]
+fn agent_mode_can_read_named_note_without_provider() {
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("read Feature ideas");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_ai_chat());
+    assert!(app.pending_agent_decision.is_none());
+    assert_eq!(app.chat_messages().len(), 2);
+    assert!(app.chat_messages()[1].content.contains("Feature ideas"));
+    assert!(app.chat_messages()[1].content.contains("feature notes"));
+}
+
+#[test]
+fn agent_mode_can_search_notes_without_provider() {
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("find notes about gateway");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_ai_chat());
+    assert!(app.pending_agent_decision.is_none());
+    assert_eq!(app.chat_messages().len(), 2);
+    assert!(app.chat_messages()[1].content.contains("Strix gateway"));
+}
+
+#[test]
+fn agent_mode_can_go_through_memories_without_provider() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.memories = vec![
+        String::from("Prefer concise notes."),
+        String::from("Launch work uses the Aleph vault."),
+    ];
+    app.refresh_connection_state();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("go through memories");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_ai_chat());
+    assert!(app.pending_agent_decision.is_none());
+    assert_eq!(app.chat_messages().len(), 2);
+    assert!(app.chat_messages()[1].content.contains("Saved memories"));
+    assert!(app.chat_messages()[1]
+        .content
+        .contains("Prefer concise notes"));
 }
 
 #[test]

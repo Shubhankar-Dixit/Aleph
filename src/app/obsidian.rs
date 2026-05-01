@@ -132,6 +132,47 @@ impl App {
         Ok(imported)
     }
 
+    pub(super) fn rebuild_obsidian_folders_from_cached_notes(&mut self) {
+        let Some(vault_path) = self.obsidian_vault_path.clone() else {
+            return;
+        };
+        if !self.folders.is_empty() {
+            return;
+        }
+
+        let obsidian_notes = self
+            .notes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, note)| {
+                note.obsidian_path
+                    .as_ref()
+                    .map(|path| (index, path.clone()))
+            })
+            .collect::<Vec<_>>();
+        if obsidian_notes.is_empty() {
+            return;
+        }
+
+        let folder_root_id = self.ensure_folder_path(&[String::from("Obsidian")], None);
+        let vault_name = Self::vault_display_name(&vault_path);
+        let vault_folder_id = self.ensure_folder_path(&[vault_name], Some(folder_root_id));
+        if !self.expanded_folders.contains(&folder_root_id) {
+            self.expanded_folders.push(folder_root_id);
+        }
+        if !self.expanded_folders.contains(&vault_folder_id) {
+            self.expanded_folders.push(vault_folder_id);
+        }
+
+        for (index, path) in obsidian_notes {
+            let relative = path.strip_prefix(&vault_path).unwrap_or(path.as_path());
+            let folder_id = self.obsidian_folder_id(relative, vault_folder_id);
+            if let Some(note) = self.notes.get_mut(index) {
+                note.folder_id = folder_id;
+            }
+        }
+    }
+
     pub(super) fn upsert_obsidian_note(
         &mut self,
         path: PathBuf,

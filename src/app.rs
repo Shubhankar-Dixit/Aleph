@@ -56,7 +56,6 @@ const NOTE_SAVE_TARGET_CONFIG: &str = "note-save-target";
 const AI_PROVIDER_CONFIG: &str = "ai-provider";
 const AGENT_MODE_CONFIG: &str = "agent-mode";
 const EDITOR_IMAGES_CONFIG: &str = "editor-images";
-const LOCAL_NOTES_CONFIG: &str = "notes.json";
 const OBSIDIAN_PAIRING_DISABLED_CONFIG: &str = "obsidian-vault-disabled";
 const STRIX_TOKEN_CONFIG: &str = "strix-access-token";
 const MAX_CHAT_MESSAGES: usize = 24;
@@ -76,12 +75,17 @@ enum AgentAction {
     Chat,
     CreateNote,
     EditNote,
+    ReadNote,
+    SearchNotes,
+    ListMemories,
+    SearchMemories,
 }
 
 struct AgentDecision {
     action: AgentAction,
     note_index: Option<usize>,
     title: Option<String>,
+    search_query: Option<String>,
     rationale: String,
 }
 
@@ -144,6 +148,7 @@ pub struct App {
     strix_logs: Vec<String>,
     streaming_buffer: String,
     streaming_active: bool,
+    thinking_status: String,
     chat_render_cache: Vec<Line<'static>>,
     chat_render_dirty: bool,
     chat_cache_stable_len: usize,

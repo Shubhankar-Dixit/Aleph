@@ -1,5 +1,5 @@
-use super::*;
 use super::commands_notes::TreeItem;
+use super::*;
 
 #[allow(dead_code)]
 impl App {
@@ -344,6 +344,7 @@ impl App {
         self.ai_overlay_visible = true;
         self.ai_overlay_pulse_ticks = 6;
         self.thinking = false;
+        self.thinking_status.clear();
         self.thinking_ticks_remaining = 0;
         self.ai_input_buffer.clear();
         self.ai_input_cursor = 0;
@@ -357,6 +358,7 @@ impl App {
         self.ai_overlay_visible = false;
         self.ai_overlay_pulse_ticks = 0;
         self.thinking = false;
+        self.thinking_status.clear();
         self.thinking_ticks_remaining = 0;
         self.ghost_result = None;
         self.pending_ai_edit = None;
@@ -646,21 +648,26 @@ impl App {
             _ => {}
         }
     }
-    
+
     fn toggle_folder_at_selection(&mut self) {
         // Extract folder ID from the current selection
         // Since we use usize::MAX as a marker, we need to track which folder is at which position
         // For simplicity, we'll rebuild the tree to find the folder
         let mut tree_items: Vec<TreeItem> = Vec::new();
-        let root_folders: Vec<&Folder> = self.folders.iter().filter(|f| f.parent_id.is_none()).collect();
-        
-        let uncategorized_notes: Vec<usize> = self.notes
+        let root_folders: Vec<&Folder> = self
+            .folders
+            .iter()
+            .filter(|f| f.parent_id.is_none())
+            .collect();
+
+        let uncategorized_notes: Vec<usize> = self
+            .notes
             .iter()
             .enumerate()
             .filter(|(_, note)| note.folder_id.is_none())
             .map(|(index, _)| index)
             .collect();
-        
+
         if !uncategorized_notes.is_empty() {
             tree_items.push(TreeItem::Folder {
                 id: 0,
@@ -669,7 +676,7 @@ impl App {
                 expanded: self.expanded_folders.contains(&0),
                 note_count: uncategorized_notes.len(),
             });
-            
+
             if self.expanded_folders.contains(&0) {
                 for &note_index in &uncategorized_notes {
                     tree_items.push(TreeItem::Note {
@@ -679,11 +686,11 @@ impl App {
                 }
             }
         }
-        
+
         for folder in &root_folders {
             self.build_folder_tree_items(&mut tree_items, folder.id, 0);
         }
-        
+
         // Find the folder at the current selection
         if let Some(item) = tree_items.get(self.note_list_selected) {
             if let TreeItem::Folder { id, .. } = item {
@@ -703,6 +710,11 @@ impl App {
             self.last_action = String::from("No note selected to delete.");
             return;
         };
+        if note_index == usize::MAX {
+            self.note_list_pending_delete = None;
+            self.last_action = String::from("Select a note to delete.");
+            return;
+        }
         let note_title = self
             .notes
             .get(note_index)

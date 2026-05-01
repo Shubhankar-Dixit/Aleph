@@ -612,6 +612,7 @@ impl App {
 
         self.panel_mode = PanelMode::AiChat;
         self.thinking = true;
+        self.thinking_status = String::from("Aleph is thinking...");
         self.thinking_ticks_remaining = 20;
         self.chat_scroll_offset = 0;
         self.streaming_buffer.clear();
@@ -668,8 +669,9 @@ impl App {
         let mut conversation = Vec::new();
         conversation.push((
             String::from("system"),
-            String::from("You are Aleph, a concise terminal assistant. Keep answers practical and grounded. If the user asks for detail, expand, but default to short, useful responses."),
+            String::from("You are Aleph, a concise terminal assistant. Keep answers practical and grounded. Use the provided workspace context when it is relevant, and say when the local notes or memories do not contain enough evidence."),
         ));
+        conversation.push((String::from("system"), self.agent_workspace_context()));
 
         let mut recent_messages: Vec<_> =
             self.chat_messages.iter().rev().take(12).cloned().collect();

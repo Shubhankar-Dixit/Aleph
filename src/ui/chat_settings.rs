@@ -53,9 +53,19 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let title = if app.is_streaming() {
-        format!("Aleph {} {} streaming...", mode_label, app.thinking_frame())
+        format!(
+            "Aleph {} {} {}",
+            mode_label,
+            app.thinking_frame(),
+            app.thinking_status()
+        )
     } else if app.is_thinking() {
-        format!("Aleph {} {} focusing...", mode_label, app.thinking_frame())
+        format!(
+            "Aleph {} {} {}",
+            mode_label,
+            app.thinking_frame(),
+            app.thinking_status()
+        )
     } else {
         format!(
             "Aleph {} · {} {}",
@@ -70,10 +80,10 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(top_meta, meta_area);
 
     let mut lines: Vec<Line<'static>> = app.chat_render_lines().to_vec();
-    if app.is_streaming() {
+    if app.is_streaming() || app.is_thinking() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
-            format!("{} typing...", app.thinking_frame()),
+            format!("{} {}", app.thinking_frame(), app.thinking_status()),
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )]));
     }

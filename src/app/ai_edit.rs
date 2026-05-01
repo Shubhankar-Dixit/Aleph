@@ -18,6 +18,7 @@ impl App {
         self.ghost_result = None;
         self.pending_ai_edit = None;
         self.thinking = true;
+        self.thinking_status = String::from("Aleph is editing...");
         self.thinking_ticks_remaining = 20;
 
         // Build a conversation for the ghost editor
@@ -56,6 +57,7 @@ impl App {
                     self.ghost_result = Some(String::from("OpenRouter is not configured as a model provider. Run /login openrouter first."));
                     self.ghost_streaming = false;
                     self.thinking = false;
+                    self.thinking_status.clear();
                     self.thinking_ticks_remaining = 0;
                     self.ghost_stream_rx = None;
                     return;
@@ -77,6 +79,7 @@ impl App {
                     ));
                     self.ghost_streaming = false;
                     self.thinking = false;
+                    self.thinking_status.clear();
                     self.thinking_ticks_remaining = 0;
                     self.ghost_stream_rx = None;
                     return;
@@ -127,10 +130,12 @@ impl App {
                         buf.push_str(&chunk);
                     }
                     self.thinking = true;
+                    self.thinking_status = String::from("Aleph is editing...");
                 }
                 Ok(ChatStreamUpdate::Done) => {
                     self.ghost_streaming = false;
                     self.thinking = false;
+                    self.thinking_status.clear();
                     self.thinking_ticks_remaining = 0;
                     self.ghost_stream_rx = None;
 
@@ -175,6 +180,7 @@ impl App {
                     self.ghost_result = Some(format!("Error: {}", error));
                     self.ghost_streaming = false;
                     self.thinking = false;
+                    self.thinking_status.clear();
                     self.thinking_ticks_remaining = 0;
                     self.ghost_stream_rx = None;
                     self.last_action = String::from("Ghost request failed.");
@@ -182,12 +188,14 @@ impl App {
                 }
                 Err(TryRecvError::Empty) => {
                     self.thinking = true;
+                    self.thinking_status = String::from("Aleph is editing...");
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.ghost_result = Some(String::from("Ghost disconnected."));
                     self.ghost_streaming = false;
                     self.thinking = false;
+                    self.thinking_status.clear();
                     self.thinking_ticks_remaining = 0;
                     self.ghost_stream_rx = None;
                     finished = true;

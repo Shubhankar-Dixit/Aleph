@@ -135,4 +135,6 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
 ];
 
-pub const THINKING_FRAMES: [&str; 10] = ["◡", "⊙", "◠", "⊙", "◡", "⊙", "◉", "●", "◉", "⊙"];
+pub const THINKING_FRAMES: [&str; 16] = [
+    "◌", "ॐ", "Ω", "Ψ", "Д", "Ж", "א", "⌘", "⚛", "ᚠ", "ᛟ", "ꙮ", "Ξ", "Δ", "Ц", "Ш"
+];

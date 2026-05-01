@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(not(test))]
+const LOCAL_NOTES_CONFIG: &str = "notes.json";
+
 #[allow(dead_code)]
 impl App {
     pub(super) fn load_strix_notes(&self, query: &str, limit: usize) -> Result<Vec<Note>, String> {
@@ -745,6 +748,7 @@ impl App {
 
         // Reset UI state
         self.thinking = false;
+        self.thinking_status.clear();
         self.thinking_ticks_remaining = 0;
         self.ai_overlay_visible = false;
         self.ai_overlay_pulse_ticks = 0;

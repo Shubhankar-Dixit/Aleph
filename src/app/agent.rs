@@ -9,6 +9,13 @@ impl App {
                 self.stage_agent_action(query, decision);
                 true
             }
+            AgentAction::ReadNote
+            | AgentAction::SearchNotes
+            | AgentAction::ListMemories
+            | AgentAction::SearchMemories => {
+                self.run_agent_context_action(query, decision);
+                true
+            }
             AgentAction::Chat => false,
         }
     }
@@ -56,6 +63,10 @@ impl App {
                     note_title
                 )
             }
+            AgentAction::ReadNote
+            | AgentAction::SearchNotes
+            | AgentAction::ListMemories
+            | AgentAction::SearchMemories => String::new(),
             AgentAction::Chat => String::new(),
         }
     }
@@ -68,6 +79,13 @@ impl App {
         match decision.action {
             AgentAction::CreateNote => self.start_note_create_agent(&query, decision.title),
             AgentAction::EditNote => self.start_note_edit_agent(&query, decision),
+            AgentAction::ReadNote
+            | AgentAction::SearchNotes
+            | AgentAction::ListMemories
+            | AgentAction::SearchMemories => {
+                self.run_agent_context_action(&query, decision);
+                true
+            }
             AgentAction::Chat => false,
         }
     }
@@ -94,10 +112,6 @@ impl App {
     }
 
     pub(super) fn plan_agent_action(&self, query: &str) -> AgentDecision {
-        if let Some(decision) = self.plan_agent_action_with_provider(query) {
-            return decision;
-        }
-
         self.plan_agent_action_locally(query)
     }
 
@@ -107,11 +121,50 @@ impl App {
                 action: AgentAction::Chat,
                 note_index: None,
                 title: None,
+                search_query: None,
                 rationale: String::from("question"),
             };
         }
 
         let target_note = self.resolve_agent_note_target(query);
+        if self.looks_like_note_read_request(query) {
+            return AgentDecision {
+                action: AgentAction::ReadNote,
+                note_index: target_note,
+                title: None,
+                search_query: Self::infer_agent_search_query(query),
+                rationale: String::from("read-note"),
+            };
+        }
+        if Self::looks_like_note_search_request(query) {
+            return AgentDecision {
+                action: AgentAction::SearchNotes,
+                note_index: None,
+                title: None,
+                search_query: Self::infer_agent_search_query(query),
+                rationale: String::from("search-notes"),
+            };
+        }
+        if Self::looks_like_memory_list_request(query)
+            && Self::infer_agent_search_query(query).is_none()
+        {
+            return AgentDecision {
+                action: AgentAction::ListMemories,
+                note_index: None,
+                title: None,
+                search_query: None,
+                rationale: String::from("list-memories"),
+            };
+        }
+        if Self::looks_like_memory_search_request(query) {
+            return AgentDecision {
+                action: AgentAction::SearchMemories,
+                note_index: None,
+                title: None,
+                search_query: Self::infer_agent_search_query(query),
+                rationale: String::from("search-memories"),
+            };
+        }
         if Self::looks_like_note_edit_request(query) || self.should_work_on_existing_note(query) {
             let rationale = if target_note.is_some() {
                 "edit-target"
@@ -122,6 +175,7 @@ impl App {
                 action: AgentAction::EditNote,
                 note_index: target_note,
                 title: None,
+                search_query: None,
                 rationale: String::from(rationale),
             };
         }
@@ -130,6 +184,7 @@ impl App {
                 action: AgentAction::CreateNote,
                 note_index: None,
                 title: Self::infer_note_title_from_request(query),
+                search_query: None,
                 rationale: String::from("create"),
             };
         }
@@ -137,6 +192,7 @@ impl App {
             action: AgentAction::Chat,
             note_index: None,
             title: None,
+            search_query: None,
             rationale: String::from("chat"),
         }
     }
@@ -167,11 +223,14 @@ impl App {
     pub(super) fn agent_planner_conversation(&self, query: &str) -> Vec<(String, String)> {
         let system = String::from(
             "You are Aleph's agent planner. Decide what Aleph should do with the user's chat input. \
-             You may choose exactly one action: chat, create_note, edit_note. \
+             You may choose exactly one action: chat, create_note, edit_note, read_note, search_notes, list_memories, search_memories. \
+             Use read_note when the user asks to open, read, inspect, summarize, or answer from a specific note. \
+             Use search_notes when the user asks to find notes, look across notes, or identify notes about a topic. \
+             Use list_memories or search_memories when the user asks what Aleph remembers or asks to go through memories. \
              Use edit_note when the user asks to work on, continue, improve, rewrite, append to, organize, or otherwise change an existing/current note. \
              Use create_note when the user wants new durable writing and no existing note is the right target. \
              Use chat for questions, explanations, brainstorming without durable write intent, or when you need to ask a clarification. \
-             Return ONLY compact JSON with this schema: {\"action\":\"chat|create_note|edit_note\",\"note_id\":number|null,\"title\":string|null,\"rationale\":string}. \
+             Return ONLY compact JSON with this schema: {\"action\":\"chat|create_note|edit_note|read_note|search_notes|list_memories|search_memories\",\"note_id\":number|null,\"title\":string|null,\"query\":string|null,\"rationale\":string}. \
              Do not write prose outside JSON.",
         );
 
@@ -219,6 +278,10 @@ impl App {
             "chat" => AgentAction::Chat,
             "create_note" => AgentAction::CreateNote,
             "edit_note" => AgentAction::EditNote,
+            "read_note" => AgentAction::ReadNote,
+            "search_notes" => AgentAction::SearchNotes,
+            "list_memories" => AgentAction::ListMemories,
+            "search_memories" => AgentAction::SearchMemories,
             _ => return None,
         };
         let note_index = value
@@ -240,6 +303,8 @@ impl App {
             .or_else(|| {
                 if action == AgentAction::EditNote {
                     self.resolve_agent_note_target(query)
+                } else if action == AgentAction::ReadNote {
+                    self.resolve_agent_note_target(query)
                 } else {
                     None
                 }
@@ -259,11 +324,19 @@ impl App {
             .chars()
             .take(120)
             .collect::<String>();
+        let search_query = value
+            .get("query")
+            .and_then(|query| query.as_str())
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .map(|query| query.chars().take(120).collect::<String>())
+            .or_else(|| Self::infer_agent_search_query(query));
 
         Some(AgentDecision {
             action,
             note_index,
             title,
+            search_query,
             rationale,
         })
     }
@@ -277,6 +350,174 @@ impl App {
         let start = trimmed.find('{')?;
         let end = trimmed.rfind('}')?;
         (start < end).then_some(&trimmed[start..=end])
+    }
+
+    pub(super) fn run_agent_context_action(&mut self, query: &str, decision: AgentDecision) {
+        self.panel_mode = PanelMode::AiChat;
+        self.chat_scroll_offset = 0;
+        self.push_chat_message("user", query.trim());
+
+        let response = match decision.action {
+            AgentAction::ReadNote => self.agent_read_note_response(&decision),
+            AgentAction::SearchNotes => self.agent_search_notes_response(&decision, query),
+            AgentAction::ListMemories => self.agent_list_memories_response(),
+            AgentAction::SearchMemories => self.agent_search_memories_response(&decision, query),
+            _ => String::from("That agent action is not available here."),
+        };
+
+        self.push_chat_message("assistant", response);
+        self.last_action = format!("Agent: {}", decision.rationale);
+    }
+
+    pub(super) fn agent_workspace_context(&self) -> String {
+        let selected = self
+            .notes
+            .get(self.selected_note)
+            .map(|note| {
+                format!(
+                    "Selected note: #{} `{}`\n{}",
+                    note.id,
+                    note.title,
+                    Self::preview_text(&note.content, 900)
+                )
+            })
+            .unwrap_or_else(|| String::from("Selected note: none"));
+
+        let notes = self
+            .notes
+            .iter()
+            .take(12)
+            .map(|note| {
+                format!(
+                    "- #{} `{}`: {}",
+                    note.id,
+                    note.title,
+                    Self::preview_text(&note.content, 180)
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let memories = self
+            .memories
+            .iter()
+            .take(12)
+            .enumerate()
+            .map(|(index, memory)| format!("- memory {}: {}", index + 1, memory))
+            .collect::<Vec<_>>();
+
+        format!(
+            "Workspace context:\n{}\n\nRecent note index:\n{}\n\nMemories:\n{}",
+            selected,
+            if notes.is_empty() {
+                String::from("- none")
+            } else {
+                notes.join("\n")
+            },
+            if memories.is_empty() {
+                String::from("- none")
+            } else {
+                memories.join("\n")
+            }
+        )
+    }
+
+    pub(super) fn agent_read_note_response(&self, decision: &AgentDecision) -> String {
+        let Some(index) = decision.note_index.or_else(|| self.current_note_index()) else {
+            return String::from("I could not find a note to read.");
+        };
+        let Some(note) = self.notes.get(index) else {
+            return String::from("I could not find that note.");
+        };
+
+        let source = Self::note_source_label(note);
+        format!(
+            "Read note `#{}`: `{}`\n{}\n\n{}",
+            note.id,
+            note.title,
+            source,
+            Self::preview_text(&note.content, 1200)
+        )
+    }
+
+    pub(super) fn agent_search_notes_response(
+        &self,
+        decision: &AgentDecision,
+        original_query: &str,
+    ) -> String {
+        let query = decision
+            .search_query
+            .as_deref()
+            .unwrap_or(original_query)
+            .trim()
+            .to_lowercase();
+        let mut matches = self
+            .notes
+            .iter()
+            .filter(|note| {
+                query.is_empty()
+                    || note.title.to_lowercase().contains(&query)
+                    || note.content.to_lowercase().contains(&query)
+            })
+            .take(8)
+            .map(|note| {
+                format!(
+                    "- `#{}` `{}`: {}",
+                    note.id,
+                    note.title,
+                    Self::preview_text(&note.content, 180)
+                )
+            })
+            .collect::<Vec<_>>();
+
+        if matches.is_empty() {
+            return format!("I did not find notes matching `{}`.", query);
+        }
+
+        matches.insert(0, format!("Found {} note match(es):", matches.len()));
+        matches.join("\n")
+    }
+
+    pub(super) fn agent_list_memories_response(&self) -> String {
+        if self.memories.is_empty() {
+            return String::from("There are no saved memories yet.");
+        }
+
+        let mut lines = self
+            .memories
+            .iter()
+            .take(12)
+            .enumerate()
+            .map(|(index, memory)| format!("{}. {}", index + 1, memory))
+            .collect::<Vec<_>>();
+        lines.insert(0, format!("Saved memories ({}):", self.memories.len()));
+        lines.join("\n")
+    }
+
+    pub(super) fn agent_search_memories_response(
+        &self,
+        decision: &AgentDecision,
+        original_query: &str,
+    ) -> String {
+        let query = decision
+            .search_query
+            .as_deref()
+            .unwrap_or(original_query)
+            .trim()
+            .to_lowercase();
+        let mut matches = self
+            .memories
+            .iter()
+            .filter(|memory| query.is_empty() || memory.to_lowercase().contains(&query))
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if matches.is_empty() {
+            return format!("I did not find memories matching `{}`.", query);
+        }
+
+        matches.insert(0, format!("Found {} memory match(es):", matches.len()));
+        matches.join("\n")
     }
 
     pub(super) fn start_note_create_agent(&mut self, query: &str, title: Option<String>) -> bool {
@@ -365,6 +606,112 @@ impl App {
         .any(|needle| lower.contains(needle));
 
         starts_like_write_task && (mentions_note || content_shape)
+    }
+
+    pub(super) fn looks_like_note_read_request(&self, query: &str) -> bool {
+        let lower = query.to_lowercase();
+        let mentions_specific_note = lower.contains("current note")
+            || lower.contains("selected note")
+            || lower.contains("this note")
+            || lower.contains("that note")
+            || self.find_note_mentioned_in_text(query).is_some();
+        let wants_read = [
+            "read",
+            "open",
+            "show",
+            "inspect",
+            "summarize",
+            "what does",
+            "what's in",
+            "what is in",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+        wants_read && mentions_specific_note
+    }
+
+    pub(super) fn looks_like_note_search_request(query: &str) -> bool {
+        let lower = query.to_lowercase();
+        let mentions_notes = lower.contains("note") || lower.contains("notes");
+        let wants_search = [
+            "search",
+            "find",
+            "look through",
+            "go through",
+            "scan",
+            "which notes",
+            "notes about",
+            "anything about",
+            "where did i write",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+        mentions_notes && wants_search
+    }
+
+    pub(super) fn looks_like_memory_list_request(query: &str) -> bool {
+        let lower = query.to_lowercase();
+        let mentions_memories = lower.contains("memory") || lower.contains("memories");
+        let wants_list = [
+            "list",
+            "show",
+            "what do you remember",
+            "what have you remembered",
+            "go through",
+            "review",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+        mentions_memories && wants_list
+    }
+
+    pub(super) fn looks_like_memory_search_request(query: &str) -> bool {
+        let lower = query.to_lowercase();
+        let mentions_memories = lower.contains("memory") || lower.contains("memories");
+        let wants_search = [
+            "search",
+            "find",
+            "look through",
+            "go through",
+            "scan",
+            "anything about",
+            "remember about",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+        mentions_memories && wants_search
+    }
+
+    pub(super) fn infer_agent_search_query(query: &str) -> Option<String> {
+        let trimmed = query.trim();
+        let lower = trimmed.to_lowercase();
+        for marker in [
+            " about ",
+            " for ",
+            " matching ",
+            " containing ",
+            " called ",
+            " named ",
+            " titled ",
+        ] {
+            if let Some((_, rest)) = lower.split_once(marker) {
+                let start = trimmed.len().saturating_sub(rest.len());
+                let candidate = trimmed[start..]
+                    .split(['.', '?', '!', ';'])
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+                if !candidate.is_empty() {
+                    return Some(candidate.chars().take(120).collect());
+                }
+            }
+        }
+
+        None
     }
 
     pub(super) fn infer_note_title_from_request(query: &str) -> Option<String> {
