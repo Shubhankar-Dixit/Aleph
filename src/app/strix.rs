@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(not(test))]
 const LOCAL_NOTES_CONFIG: &str = "notes.json";
 
 #[allow(dead_code)]
@@ -248,13 +247,28 @@ impl App {
         }
 
         #[cfg(test)]
-        return std::env::temp_dir().join("aleph-test-notes-disabled.json");
+        {
+            if let Ok(dir) = std::env::var("ALEPH_CONFIG_DIR") {
+                return PathBuf::from(dir).join(LOCAL_NOTES_CONFIG);
+            }
+
+            return std::env::temp_dir().join(format!(
+                "aleph-test-notes-disabled-{}.json",
+                std::process::id()
+            ));
+        }
 
         #[cfg(not(test))]
         Self::aleph_config_dir().join(LOCAL_NOTES_CONFIG)
     }
 
     pub(super) fn load_local_notes() -> Result<Vec<Note>, String> {
+        #[cfg(test)]
+        if std::env::var("ALEPH_NOTES_PATH").is_err() && std::env::var("ALEPH_CONFIG_DIR").is_err()
+        {
+            return Err(String::from("local note cache is disabled for this test"));
+        }
+
         let path = Self::local_notes_path();
         if !path.exists() {
             return Err(String::from("local note cache does not exist"));

@@ -806,16 +806,23 @@ impl App {
         if let Ok(dir) = std::env::var("ALEPH_CONFIG_DIR") {
             return PathBuf::from(dir);
         }
-        if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
-            return PathBuf::from(dir).join("aleph");
+        #[cfg(test)]
+        {
+            std::env::temp_dir().join(format!("aleph-test-config-{}", std::process::id()))
         }
-        if let Ok(dir) = std::env::var("LOCALAPPDATA").or_else(|_| std::env::var("APPDATA")) {
-            return PathBuf::from(dir).join("Aleph");
+        #[cfg(not(test))]
+        {
+            if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
+                return PathBuf::from(dir).join("aleph");
+            }
+            if let Ok(dir) = std::env::var("LOCALAPPDATA").or_else(|_| std::env::var("APPDATA")) {
+                return PathBuf::from(dir).join("Aleph");
+            }
+            if let Ok(home) = std::env::var("HOME") {
+                return PathBuf::from(home).join(".config").join("aleph");
+            }
+            std::env::temp_dir().join("aleph")
         }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".config").join("aleph");
-        }
-        std::env::temp_dir().join("aleph")
     }
 
     pub(super) fn obsidian_pairing_path() -> PathBuf {

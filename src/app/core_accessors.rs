@@ -3,9 +3,21 @@ use super::*;
 #[allow(dead_code)]
 impl App {
     pub fn new() -> Self {
+        #[cfg(test)]
+        let openrouter_api_key = None;
+        #[cfg(not(test))]
         let openrouter_api_key = Self::load_openrouter_api_key();
+
+        #[cfg(test)]
+        let strix_access_token = None;
+        #[cfg(not(test))]
         let strix_access_token = Self::load_strix_access_token();
+
+        #[cfg(test)]
+        let obsidian_vault_path = None;
+        #[cfg(not(test))]
         let obsidian_vault_path = Self::load_obsidian_vault_path();
+
         let obsidian_vaults = Self::discover_obsidian_vaults();
         let connected = openrouter_api_key.is_some() || strix_access_token.is_some();
         let default_ai_provider = if openrouter_api_key.is_some() {
@@ -15,7 +27,12 @@ impl App {
         } else {
             AiProvider::OpenRouter
         };
+
+        #[cfg(test)]
+        let ai_provider = default_ai_provider;
+        #[cfg(not(test))]
         let ai_provider = Self::load_ai_provider().unwrap_or(default_ai_provider);
+
         let default_note_save_target = if strix_access_token.is_some() {
             NoteSaveTarget::Strix
         } else if obsidian_vault_path.is_some() {
@@ -23,6 +40,10 @@ impl App {
         } else {
             NoteSaveTarget::Local
         };
+
+        #[cfg(test)]
+        let note_save_target = default_note_save_target;
+        #[cfg(not(test))]
         let note_save_target = Self::load_note_save_target()
             .filter(|target| {
                 Self::note_save_target_is_available(
@@ -32,6 +53,21 @@ impl App {
                 )
             })
             .unwrap_or(default_note_save_target);
+
+        #[cfg(test)]
+        let notes = Self::default_local_notes();
+        #[cfg(not(test))]
+        let notes = Self::load_local_notes().unwrap_or_else(|_| Self::default_local_notes());
+
+        #[cfg(test)]
+        let editor_images_enabled = false;
+        #[cfg(not(test))]
+        let editor_images_enabled = Self::load_editor_images_enabled().unwrap_or(false);
+
+        #[cfg(test)]
+        let agent_mode_enabled = true;
+        #[cfg(not(test))]
+        let agent_mode_enabled = Self::load_agent_mode_enabled().unwrap_or(true);
 
         let mut app = Self {
             started_at: Instant::now(),
@@ -45,7 +81,7 @@ impl App {
             last_action: String::from("Ready to accept input."),
             connected,
             folders: Vec::new(),
-            notes: Self::load_local_notes().unwrap_or_else(|_| Self::default_local_notes()),
+            notes,
             memories: Vec::new(),
             canvases: Vec::new(),
             selected_note: 0,
@@ -66,7 +102,7 @@ impl App {
             suggestion_filter: None,
             editor_scroll_offset: 0,
             editor_word_wrap: true,
-            editor_images_enabled: Self::load_editor_images_enabled().unwrap_or(false),
+            editor_images_enabled,
             editor_cursor_style: CursorStyle::Line,
             editor_selection: Selection::default(),
             undo_stack: VecDeque::with_capacity(100),
@@ -101,7 +137,7 @@ impl App {
             chat_render_cache: Vec::new(),
             chat_render_dirty: false,
             chat_cache_stable_len: 0,
-            agent_mode_enabled: Self::load_agent_mode_enabled().unwrap_or(true),
+            agent_mode_enabled,
             login_picker_selected: 0,
             settings_selected: 0,
             pending_agent_query: None,

@@ -28,6 +28,14 @@ fn ctrl(code: KeyCode) -> KeyEvent {
     }
 }
 
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    ENV_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap()
+}
+
 fn test_note(id: usize, remote_id: Option<&str>, title: &str, content: &str) -> Note {
     Note {
         id,
@@ -92,11 +100,7 @@ fn clear_notes_is_hidden_from_command_list() {
 
 #[test]
 fn hidden_clear_notes_resets_note_state_and_caches() {
-    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _guard = ENV_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap();
+    let _guard = env_lock();
     let root = std::env::temp_dir().join(format!("aleph-clear-notes-test-{}", App::now_millis()));
     let config_dir = root.join("config");
     let cache_dir = root.join("cache");
@@ -271,6 +275,7 @@ fn note_list_rebuilds_obsidian_tree_from_cached_paths() {
 
 #[test]
 fn settings_round_trip_to_config() {
+    let _guard = env_lock();
     let config_dir =
         std::env::temp_dir().join(format!("aleph-settings-test-{}", App::now_millis()));
     std::env::set_var("ALEPH_CONFIG_DIR", &config_dir);
@@ -350,6 +355,7 @@ fn clicking_settings_obsidian_row_opens_pairing_when_unpaired() {
 
 #[test]
 fn reset_clears_obsidian_pairing_fallback_file() {
+    let _guard = env_lock();
     let config_dir =
         std::env::temp_dir().join(format!("aleph-obsidian-reset-test-{}", App::now_millis()));
     std::env::set_var("ALEPH_CONFIG_DIR", &config_dir);
@@ -400,11 +406,7 @@ fn strix_sync_merge_preserves_local_only_notes() {
 
 #[test]
 fn upsert_existing_synced_note_updates_cache() {
-    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _guard = ENV_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap();
+    let _guard = env_lock();
     let cache_path =
         std::env::temp_dir().join(format!("aleph-strix-cache-test-{}.json", App::now_millis()));
     std::env::set_var("ALEPH_STRIX_CACHE", &cache_path);
@@ -423,11 +425,7 @@ fn upsert_existing_synced_note_updates_cache() {
 
 #[test]
 fn local_notes_round_trip_through_cache() {
-    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _guard = ENV_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap();
+    let _guard = env_lock();
     let notes_path =
         std::env::temp_dir().join(format!("aleph-local-notes-test-{}.json", App::now_millis()));
     std::env::set_var("ALEPH_NOTES_PATH", &notes_path);
@@ -448,11 +446,7 @@ fn local_notes_round_trip_through_cache() {
 
 #[test]
 fn legacy_sample_notes_are_not_loaded_from_local_cache() {
-    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _guard = ENV_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap();
+    let _guard = env_lock();
     let notes_path = std::env::temp_dir().join(format!(
         "aleph-legacy-sample-notes-test-{}.json",
         App::now_millis()

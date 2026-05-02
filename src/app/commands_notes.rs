@@ -934,7 +934,8 @@ impl App {
     }
 
     pub(super) fn split_note_body_args(args: &str) -> (&str, &str) {
-        args.split_once("::").unwrap_or((args, ""))
+        let (title, body) = args.split_once("::").unwrap_or((args, ""));
+        (title.trim(), body.trim_start())
     }
 
     pub(super) fn open_note_list_panel(&mut self) {

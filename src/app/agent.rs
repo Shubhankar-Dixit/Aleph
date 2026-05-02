@@ -147,9 +147,7 @@ impl App {
                 rationale: String::from("search-notes"),
             };
         }
-        if Self::looks_like_memory_list_request(query)
-            && Self::infer_agent_search_query(query).is_none()
-        {
+        if Self::looks_like_memory_list_request(query) {
             return AgentDecision {
                 action: AgentAction::ListMemories,
                 note_index: None,
