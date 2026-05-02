@@ -69,6 +69,9 @@ impl App {
         #[cfg(not(test))]
         let agent_mode_enabled = Self::load_agent_mode_enabled().unwrap_or(true);
 
+        let (temporal_forks, current_fork_id) =
+            Self::load_temporal_fork_state().unwrap_or_else(|_| (Vec::new(), None));
+
         let mut app = Self {
             started_at: Instant::now(),
             tick: 0,
@@ -154,6 +157,8 @@ impl App {
             title_buffer: String::new(),
             title_cursor: 0,
             expanded_folders: Vec::new(),
+            temporal_forks,
+            current_fork_id,
         };
 
         app.rebuild_obsidian_folders_from_cached_notes();

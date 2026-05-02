@@ -65,6 +65,30 @@ pub struct ActivityEntry {
     pub label: String,
 }
 
+#[derive(Clone)]
+pub struct RepoContext {
+    pub cwd: String,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub dirty_files: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct TemporalFork {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub label: String,
+    pub reason: String,
+    pub created_at: String,
+    pub notes: Vec<Note>,
+    pub folders: Vec<Folder>,
+    pub memories: Vec<String>,
+    pub selected_note: usize,
+    pub activity_context: Vec<ActivityEntry>,
+    pub chat_context: Vec<ChatMessage>,
+    pub repo_context: Option<RepoContext>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CursorStyle {
     Block,

@@ -689,6 +689,7 @@ impl App {
         // Clear all cached data files
         let _ = std::fs::remove_file(Self::strix_cache_path());
         let _ = std::fs::remove_file(Self::local_notes_path());
+        let _ = std::fs::remove_file(Self::temporal_fork_cache_path());
         let _ = std::fs::remove_file(Self::ai_provider_path());
         let _ = std::fs::remove_file(Self::note_save_target_path());
         let _ = std::fs::remove_file(Self::agent_mode_path());
@@ -722,6 +723,8 @@ impl App {
         self.selected_note = 0;
         self.memories.clear();
         self.canvases.clear();
+        self.temporal_forks.clear();
+        self.current_fork_id = None;
 
         // Clear editor state
         self.editor_buffer.clear();

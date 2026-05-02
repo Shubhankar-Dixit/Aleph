@@ -234,11 +234,12 @@ impl App {
             self.open_note_editor(note_index);
         }
 
+        self.create_auto_temporal_fork("Before AI edit apply");
         self.save_undo_state();
         self.editor_buffer = proposal.proposed;
         self.editor_cursor = self.editor_buffer.len();
         self.ghost_result = None;
-        self.save_editor();
+        self.save_editor_with_temporal_fork(None);
         self.last_action = String::from("Applied AI note edits.");
         self.close_ai_overlay();
     }

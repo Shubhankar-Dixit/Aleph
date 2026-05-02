@@ -20,10 +20,17 @@ impl App {
     }
 
     pub(super) fn save_editor(&mut self) {
+        self.save_editor_with_temporal_fork(Some("Before note save"));
+    }
+
+    pub(super) fn save_editor_with_temporal_fork(&mut self, fork_label: Option<&str>) {
         let Some(index) = self.editor_note_index else {
             return;
         };
 
+        if let Some(label) = fork_label {
+            self.create_auto_temporal_fork(label);
+        }
         let updated_at = self.uptime();
         if let Some(note) = self.notes.get_mut(index) {
             note.content = self.editor_buffer.clone();

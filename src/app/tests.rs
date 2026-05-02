@@ -610,6 +610,200 @@ fn note_append_can_target_a_note() {
 }
 
 #[test]
+fn temporal_fork_manual_creation_persists_and_renders() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-forks-test-{}", App::now_millis()));
+    let forks_path = root.join("temporal-forks.json");
+    let notes_path = root.join("notes.json");
+    fs::create_dir_all(&root).unwrap();
+    std::env::set_var("ALEPH_FORKS_PATH", &forks_path);
+    std::env::set_var("ALEPH_NOTES_PATH", &notes_path);
+
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    app.memories.push(String::from("remember this timeline"));
+    app.execute_command("path save", "alpha path");
+
+    assert_eq!(app.temporal_forks.len(), 1);
+    assert!(app.panel_title().contains("Saved path"));
+    assert!(app
+        .panel_lines()
+        .iter()
+        .any(|line| line.contains("alpha path")));
+
+    let (loaded, current) = App::load_temporal_fork_state().unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].label, "alpha path");
+    assert_eq!(
+        loaded[0].memories,
+        vec![String::from("remember this timeline")]
+    );
+    assert_eq!(current.as_deref(), Some(loaded[0].id.as_str()));
+
+    app.execute_command("path list", "");
+    assert!(app
+        .panel_lines()
+        .iter()
+        .any(|line| line.contains("alpha path")));
+    app.execute_command("path show", "alpha path");
+    assert!(app
+        .panel_lines()
+        .iter()
+        .any(|line| line.contains("Memories: 1")));
+
+    std::env::remove_var("ALEPH_FORKS_PATH");
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn temporal_fork_auto_snapshots_before_note_writes() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-auto-forks-test-{}", App::now_millis()));
+    let forks_path = root.join("temporal-forks.json");
+    let notes_path = root.join("notes.json");
+    fs::create_dir_all(&root).unwrap();
+    std::env::set_var("ALEPH_FORKS_PATH", &forks_path);
+    std::env::set_var("ALEPH_NOTES_PATH", &notes_path);
+
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    app.note_save_target = NoteSaveTarget::Local;
+
+    app.execute_command("note append", "Feature ideas :: added target text");
+    app.execute_command("note create", "Forked draft :: first line");
+    app.open_note_editor(0);
+    app.editor_buffer.push_str("\nSaved from editor");
+    app.save_editor();
+    app.delete_note_at_index(1).unwrap();
+
+    assert!(app
+        .temporal_forks
+        .iter()
+        .any(|fork| fork.label == "Before note append"));
+    assert!(app
+        .temporal_forks
+        .iter()
+        .any(|fork| fork.label == "Before note create"));
+    assert!(app
+        .temporal_forks
+        .iter()
+        .any(|fork| fork.label == "Before note save"));
+    assert!(app
+        .temporal_forks
+        .iter()
+        .any(|fork| fork.label == "Before note delete"));
+
+    std::env::remove_var("ALEPH_FORKS_PATH");
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn temporal_fork_auto_snapshots_before_ai_apply() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-ai-forks-test-{}", App::now_millis()));
+    let forks_path = root.join("temporal-forks.json");
+    let notes_path = root.join("notes.json");
+    fs::create_dir_all(&root).unwrap();
+    std::env::set_var("ALEPH_FORKS_PATH", &forks_path);
+    std::env::set_var("ALEPH_NOTES_PATH", &notes_path);
+
+    let mut app = App::new();
+    app.note_save_target = NoteSaveTarget::Local;
+    app.open_note_editor(0);
+    let original = app.editor_buffer.clone();
+    let proposed = format!("{}\n\nAI branch", original);
+    app.pending_ai_edit = Some(AiEditProposal {
+        note_index: Some(0),
+        title: None,
+        instruction: String::from("append"),
+        proposed,
+        diff_lines: Vec::new(),
+    });
+
+    app.apply_pending_ai_edit();
+
+    assert!(app
+        .temporal_forks
+        .iter()
+        .any(|fork| fork.label == "Before AI edit apply"));
+    assert_eq!(
+        app.temporal_forks
+            .iter()
+            .filter(|fork| fork.label == "Before AI edit apply")
+            .count(),
+        1
+    );
+
+    std::env::remove_var("ALEPH_FORKS_PATH");
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn temporal_fork_checkout_restores_local_state_only() {
+    let _guard = env_lock();
+    let root =
+        std::env::temp_dir().join(format!("aleph-checkout-forks-test-{}", App::now_millis()));
+    let forks_path = root.join("temporal-forks.json");
+    let notes_path = root.join("notes.json");
+    let obsidian_note = root.join("External.md");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&obsidian_note, "external file stayed put").unwrap();
+    std::env::set_var("ALEPH_FORKS_PATH", &forks_path);
+    std::env::set_var("ALEPH_NOTES_PATH", &notes_path);
+
+    let mut app = App::new();
+    app.notes = vec![test_note(1, Some("remote-1"), "Timeline", "fork body")];
+    app.notes[0].obsidian_path = Some(obsidian_note.clone());
+    app.memories = vec![String::from("memory before branch")];
+    app.selected_note = 0;
+    let fork_id = app.create_temporal_fork("restore point", "manual").unwrap();
+
+    app.note_save_target = NoteSaveTarget::Strix;
+    app.notes[0].content = String::from("mutated body");
+    app.memories.clear();
+    let index = app.resolve_temporal_fork_index(&fork_id).unwrap();
+    let result = app.checkout_temporal_fork(index);
+
+    assert!(result.is_ok());
+    assert_eq!(app.notes[0].content, "fork body");
+    assert_eq!(app.memories, vec![String::from("memory before branch")]);
+    assert_eq!(
+        fs::read_to_string(&obsidian_note).unwrap(),
+        "external file stayed put"
+    );
+
+    std::env::remove_var("ALEPH_FORKS_PATH");
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn temporal_fork_repo_context_degrades_outside_git_repo() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-no-git-forks-test-{}", App::now_millis()));
+    let forks_path = root.join("temporal-forks.json");
+    let notes_path = root.join("notes.json");
+    fs::create_dir_all(&root).unwrap();
+    let original_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+    std::env::set_var("ALEPH_FORKS_PATH", &forks_path);
+    std::env::set_var("ALEPH_NOTES_PATH", &notes_path);
+
+    let mut app = App::new();
+    app.create_temporal_fork("outside git", "manual").unwrap();
+
+    assert!(app.temporal_forks[0].repo_context.is_none());
+
+    std::env::set_current_dir(original_cwd).unwrap();
+    std::env::remove_var("ALEPH_FORKS_PATH");
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn note_list_delete_requires_second_press() {
     let mut app = App::new();
     let original_count = app.notes.len();

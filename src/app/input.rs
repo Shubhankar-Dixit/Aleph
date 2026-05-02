@@ -598,6 +598,24 @@ impl App {
             ("create", "note create"),
             ("list", "note list"),
             ("ls", "note list"),
+            ("path now", "path save"),
+            ("path open", "path show"),
+            ("path read", "path show"),
+            ("path checkout", "path return"),
+            ("path back", "path return"),
+            ("world save", "path save"),
+            ("world now", "path save"),
+            ("world list", "path list"),
+            ("world show", "path show"),
+            ("world open", "path show"),
+            ("world read", "path show"),
+            ("world return", "path return"),
+            ("world checkout", "path return"),
+            ("world back", "path return"),
+            ("fork now", "path save"),
+            ("fork list", "path list"),
+            ("fork read", "path show"),
+            ("fork checkout", "path return"),
         ];
 
         for (alias, command) in aliases {
@@ -621,6 +639,8 @@ impl App {
                 | "ask"
                 | "agent edit"
                 | "note move"
+                | "path show"
+                | "path return"
                 | "folder create"
                 | "folder delete"
                 | "folder notes"

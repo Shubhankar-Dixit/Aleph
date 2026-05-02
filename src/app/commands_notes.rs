@@ -433,6 +433,11 @@ impl App {
                 self.set_result_panel("Recent activity", lines);
                 self.last_action = String::from("Showed recent activity.");
             }
+            "path save" | "path list" | "path show" | "path return" | "world save"
+            | "world list" | "world show" | "world return" | "fork now" | "fork list"
+            | "fork read" | "fork checkout" => {
+                self.handle_fork_command(command, args);
+            }
             "ask" => {
                 let query = args.trim();
                 let lines = if query.is_empty() {
@@ -589,6 +594,7 @@ impl App {
                     return;
                 }
 
+                self.create_auto_temporal_fork("Before note append");
                 let updated_at = self.uptime();
                 let (note_title, note_content) = {
                     let note = &mut self.notes[index];
@@ -690,6 +696,7 @@ impl App {
 
                 let note_title = self.notes[note_index].title.clone();
                 let folder_name = self.get_folder_name(folder_id).unwrap_or_default();
+                self.create_auto_temporal_fork("Before note move");
                 self.notes[note_index].folder_id = Some(folder_id);
                 self.notes[note_index].updated_at = self.uptime();
 
@@ -719,6 +726,7 @@ impl App {
                 }
 
                 let new_id = self.folders.iter().map(|f| f.id).max().unwrap_or(0) + 1;
+                self.create_auto_temporal_fork("Before folder create");
                 self.folders.push(Folder {
                     id: new_id,
                     name: name.to_string(),
@@ -753,6 +761,7 @@ impl App {
                 };
 
                 let folder_name = self.get_folder_name(folder_id).unwrap_or_default();
+                self.create_auto_temporal_fork("Before folder delete");
 
                 // Move notes to parent or make them uncategorized
                 for note in &mut self.notes {
@@ -843,6 +852,7 @@ impl App {
                     return;
                 }
 
+                self.create_auto_temporal_fork("Before memory save");
                 self.memories.push(memory.to_string());
                 self.set_result_panel(
                     "Memory saved",
@@ -1144,6 +1154,7 @@ impl App {
             folder_id: self.current_folder_id,
         };
 
+        self.create_auto_temporal_fork("Before note create");
         self.notes.push(note);
         let index = self.notes.len() - 1;
         if let Err(error) = self.persist_note(index) {
@@ -1158,6 +1169,7 @@ impl App {
             return Err(String::from("Note not found."));
         };
 
+        self.create_auto_temporal_fork("Before note delete");
         if let Some(path) = note.obsidian_path.as_ref() {
             match fs::remove_file(path) {
                 Ok(()) => {}

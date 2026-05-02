@@ -34,6 +34,7 @@ pub mod model;
 mod notes_editor;
 mod obsidian;
 mod strix;
+mod temporal_forks;
 
 pub use commands::{COMMANDS, THINKING_FRAMES};
 pub use model::*;
@@ -170,6 +171,8 @@ pub struct App {
     title_buffer: String,
     title_cursor: usize,
     expanded_folders: Vec<usize>,
+    temporal_forks: Vec<TemporalFork>,
+    current_fork_id: Option<String>,
 }
 
 #[cfg(test)]
