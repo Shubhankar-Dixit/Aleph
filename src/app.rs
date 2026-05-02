@@ -78,6 +78,7 @@ enum AgentAction {
     EditNote,
     ReadNote,
     SearchNotes,
+    SaveMemory,
     ListMemories,
     SearchMemories,
 }
@@ -171,6 +172,8 @@ pub struct App {
     title_buffer: String,
     title_cursor: usize,
     expanded_folders: Vec<usize>,
+    path_list_selected: usize,
+    path_list_pending_delete: Option<usize>,
     temporal_forks: Vec<TemporalFork>,
     current_fork_id: Option<String>,
 }

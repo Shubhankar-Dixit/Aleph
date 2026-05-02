@@ -196,6 +196,11 @@ fn wrap_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'sta
     let mut wrapped = Vec::new();
 
     for line in lines {
+        if line_is_table_row(&line) {
+            wrapped.push(line);
+            continue;
+        }
+
         let mut current_spans = Vec::new();
         let mut current_width = 0usize;
 
@@ -234,6 +239,18 @@ fn wrap_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'sta
     }
 
     wrapped
+}
+
+fn line_is_table_row(line: &Line<'static>) -> bool {
+    let text = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    let trimmed = text.trim();
+    trimmed.starts_with('|')
+        && trimmed.ends_with('|')
+        && trimmed.chars().filter(|&c| c == '|').count() >= 2
 }
 
 pub(super) fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {

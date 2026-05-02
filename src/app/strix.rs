@@ -262,6 +262,98 @@ impl App {
         Self::aleph_config_dir().join(LOCAL_NOTES_CONFIG)
     }
 
+    pub(super) fn local_memories_path() -> PathBuf {
+        if let Ok(path) = std::env::var("ALEPH_MEMORIES_PATH") {
+            return PathBuf::from(path);
+        }
+
+        #[cfg(test)]
+        {
+            if let Ok(dir) = std::env::var("ALEPH_CONFIG_DIR") {
+                return PathBuf::from(dir).join("memories.json");
+            }
+
+            return std::env::temp_dir().join(format!(
+                "aleph-test-memories-disabled-{}.json",
+                std::process::id()
+            ));
+        }
+
+        #[cfg(not(test))]
+        Self::aleph_config_dir().join("memories.json")
+    }
+
+    pub(super) fn load_local_memories() -> Result<Vec<String>, String> {
+        #[cfg(test)]
+        if std::env::var("ALEPH_MEMORIES_PATH").is_err()
+            && std::env::var("ALEPH_CONFIG_DIR").is_err()
+        {
+            return Err(String::from("local memory cache is disabled for this test"));
+        }
+
+        let path = Self::local_memories_path();
+        if !path.exists() {
+            return Err(String::from("local memory cache does not exist"));
+        }
+
+        let body = fs::read_to_string(&path).map_err(|error| {
+            format!(
+                "failed to read local memories '{}': {}",
+                path.display(),
+                error
+            )
+        })?;
+        let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+            format!(
+                "failed to parse local memories '{}': {}",
+                path.display(),
+                error
+            )
+        })?;
+        let memories = value
+            .get("memories")
+            .and_then(|memories| memories.as_array())
+            .ok_or_else(|| String::from("local memory cache did not include memories"))?;
+
+        let loaded = memories
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        Ok(loaded)
+    }
+
+    pub(super) fn save_local_memories(memories: &[String]) -> Result<(), String> {
+        let path = Self::local_memories_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create local memories directory '{}': {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+
+        let payload = serde_json::json!({
+            "version": 1,
+            "savedAt": Self::now_millis(),
+            "memories": memories,
+        });
+
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&payload)
+                .map_err(|error| format!("failed to encode local memories: {}", error))?,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to write local memories '{}': {}",
+                path.display(),
+                error
+            )
+        })
+    }
+
     pub(super) fn load_local_notes() -> Result<Vec<Note>, String> {
         #[cfg(test)]
         if std::env::var("ALEPH_NOTES_PATH").is_err() && std::env::var("ALEPH_CONFIG_DIR").is_err()

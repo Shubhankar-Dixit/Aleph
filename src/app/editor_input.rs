@@ -740,6 +740,89 @@ impl App {
         }
     }
 
+    pub(super) fn handle_path_list_key(&mut self, key_event: KeyEvent) {
+        if key_event.kind != KeyEventKind::Press && key_event.kind != KeyEventKind::Repeat {
+            return;
+        }
+        match key_event.code {
+            KeyCode::Esc => {
+                self.path_list_pending_delete = None;
+                self.panel_mode = PanelMode::Commands;
+                self.panel_title = String::from("Commands");
+                self.panel_lines.clear();
+                self.last_action = String::from("Exited path list.");
+            }
+            KeyCode::Up => {
+                if self.path_list_selected > 0 {
+                    self.path_list_pending_delete = None;
+                    self.path_list_selected -= 1;
+                    self.last_action = format!("Selected path {}", self.path_list_selected + 1);
+                }
+            }
+            KeyCode::Down => {
+                if self.path_list_selected + 1 < self.temporal_forks.len() {
+                    self.path_list_pending_delete = None;
+                    self.path_list_selected += 1;
+                    self.last_action = format!("Selected path {}", self.path_list_selected + 1);
+                }
+            }
+            KeyCode::Enter => {
+                if self.path_list_delete_is_pending() {
+                    self.confirm_or_stage_path_delete();
+                    return;
+                }
+                // Show path details for the selected fork
+                if self.path_list_selected < self.temporal_forks.len() {
+                    let lines = self.temporal_fork_detail_lines(self.path_list_selected);
+                    let title = format!(
+                        "Path: {}",
+                        self.temporal_forks[self.path_list_selected].label
+                    );
+                    self.set_result_panel(title, lines);
+                }
+            }
+            KeyCode::Delete | KeyCode::Backspace if key_event.kind == KeyEventKind::Press => {
+                self.confirm_or_stage_path_delete();
+            }
+            KeyCode::Char('d') | KeyCode::Char('D')
+                if key_event.kind == KeyEventKind::Press && self.path_list_delete_is_pending() =>
+            {
+                self.confirm_or_stage_path_delete();
+            }
+            KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.request_quit();
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn confirm_or_stage_path_delete(&mut self) {
+        if self.temporal_forks.is_empty() {
+            self.last_action = String::from("No paths to delete.");
+            return;
+        }
+        let selected = self.path_list_selected;
+        let fork_label = self.temporal_forks[selected].label.clone();
+        if self.path_list_pending_delete == Some(selected) {
+            match self.delete_temporal_fork_at_index(selected) {
+                Ok(label) => {
+                    self.open_path_list_panel();
+                    self.last_action = format!("Deleted path: {}", label);
+                }
+                Err(error) => {
+                    self.path_list_pending_delete = None;
+                    self.last_action = format!("Delete failed: {}", error);
+                }
+            }
+        } else {
+            self.path_list_pending_delete = Some(selected);
+            self.last_action = format!(
+                "Press Delete, Enter, or d again to delete '{}'. Esc or move to cancel.",
+                fork_label
+            );
+        }
+    }
+
     pub(super) fn handle_vault_picker_key(&mut self, key_event: KeyEvent) {
         if key_event.kind != KeyEventKind::Press && key_event.kind != KeyEventKind::Repeat {
             return;

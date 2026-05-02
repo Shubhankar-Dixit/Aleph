@@ -13,7 +13,7 @@ mod panels;
 
 use self::panels::{
     render_commands_panel, render_note_editor_panel, render_note_list_panel,
-    render_obsidian_vault_picker_panel,
+    render_obsidian_vault_picker_panel, render_path_list_panel,
 };
 use crate::app::{AiProvider, App, PanelMode};
 use chat_settings::{render_full_chat, render_obsidian_sync_confirm_panel, render_settings_panel};
@@ -229,6 +229,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         PanelMode::Commands | PanelMode::LoginPicker => render_commands_panel(frame, app, root[4]),
         PanelMode::VaultPicker => render_obsidian_vault_picker_panel(frame, app, root[4]),
         PanelMode::NoteList => render_note_list_panel(frame, app, root[4]),
+        PanelMode::PathList => render_path_list_panel(frame, app, root[4]),
         PanelMode::NoteEditor => render_note_editor_panel(frame, app, root[4]),
         PanelMode::Settings => render_settings_panel(frame, app, root[4]),
         PanelMode::ObsidianSyncConfirm => render_obsidian_sync_confirm_panel(frame, app, root[4]),

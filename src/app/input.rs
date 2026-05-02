@@ -23,6 +23,10 @@ impl App {
             self.handle_note_list_key(key_event);
             return;
         }
+        if self.is_path_list() {
+            self.handle_path_list_key(key_event);
+            return;
+        }
         if self.is_vault_picker() {
             self.handle_vault_picker_key(key_event);
             return;

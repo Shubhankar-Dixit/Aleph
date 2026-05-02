@@ -37,8 +37,7 @@ impl App {
                 }
             }
             "path list" | "world list" | "fork list" => {
-                let lines = self.temporal_fork_list_lines();
-                self.set_result_panel("Saved paths", lines);
+                self.open_path_list_panel();
                 self.last_action = String::from("Listed saved paths.");
             }
             "path show" | "world show" | "fork read" => {
@@ -236,6 +235,72 @@ impl App {
             )
         }));
         lines
+    }
+
+    pub(super) fn open_path_list_panel(&mut self) {
+        self.panel_lines = if self.temporal_forks.is_empty() {
+            vec![String::from(
+                "No paths saved yet. Use /path save <name> at a decision point.",
+            )]
+        } else {
+            self.temporal_forks
+                .iter()
+                .map(|fork| {
+                    let repo = fork
+                        .repo_context
+                        .as_ref()
+                        .and_then(|repo| {
+                            repo.branch
+                                .as_ref()
+                                .map(|branch| format!(" [{}]", branch))
+                                .or_else(|| repo.head.as_ref().map(|head| format!(" [{}]", head)))
+                        })
+                        .unwrap_or_default();
+                    let current = if self.current_fork_id.as_deref() == Some(fork.id.as_str()) {
+                        " *"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{}{}  {}  {}  notes:{}{}",
+                        fork.id,
+                        current,
+                        fork.created_at,
+                        fork.label,
+                        fork.notes.len(),
+                        repo
+                    )
+                })
+                .collect()
+        };
+        self.path_list_selected = self
+            .path_list_selected
+            .min(self.temporal_forks.len().saturating_sub(1));
+        self.path_list_pending_delete = None;
+        self.panel_mode = PanelMode::PathList;
+        self.panel_title = String::from("Saved paths (Enter inspect, Delete delete)");
+    }
+
+    pub(super) fn delete_temporal_fork_at_index(&mut self, index: usize) -> Result<String, String> {
+        if index >= self.temporal_forks.len() {
+            return Err(String::from("Path not found."));
+        }
+
+        let removed = self.temporal_forks.remove(index);
+        if self.current_fork_id.as_deref() == Some(removed.id.as_str()) {
+            self.current_fork_id = self.temporal_forks.last().map(|fork| fork.id.clone());
+        }
+
+        if let Err(error) = self.save_temporal_fork_state() {
+            self.temporal_forks.insert(index, removed);
+            return Err(error);
+        }
+
+        self.path_list_selected = self
+            .path_list_selected
+            .min(self.temporal_forks.len().saturating_sub(1));
+        self.path_list_pending_delete = None;
+        Ok(removed.label)
     }
 
     pub(super) fn temporal_fork_detail_lines(&self, index: usize) -> Vec<String> {

@@ -1,5 +1,16 @@
 use super::*;
 
+pub(super) struct NoteSearchResult {
+    index: usize,
+    score: usize,
+    snippets: Vec<String>,
+}
+
+pub(super) struct MemorySearchResult {
+    index: usize,
+    score: usize,
+}
+
 #[allow(dead_code)]
 impl App {
     pub(super) fn try_start_agent_action(&mut self, query: &str) -> bool {
@@ -11,6 +22,7 @@ impl App {
             }
             AgentAction::ReadNote
             | AgentAction::SearchNotes
+            | AgentAction::SaveMemory
             | AgentAction::ListMemories
             | AgentAction::SearchMemories => {
                 self.run_agent_context_action(query, decision);
@@ -67,6 +79,7 @@ impl App {
             }
             AgentAction::ReadNote
             | AgentAction::SearchNotes
+            | AgentAction::SaveMemory
             | AgentAction::ListMemories
             | AgentAction::SearchMemories => String::new(),
             AgentAction::Chat => String::new(),
@@ -83,6 +96,7 @@ impl App {
             AgentAction::EditNote => self.start_note_edit_agent(&query, decision),
             AgentAction::ReadNote
             | AgentAction::SearchNotes
+            | AgentAction::SaveMemory
             | AgentAction::ListMemories
             | AgentAction::SearchMemories => {
                 self.run_agent_context_action(&query, decision);
@@ -156,6 +170,15 @@ impl App {
                 rationale: String::from("list-memories"),
             };
         }
+        if Self::looks_like_memory_save_request(query) {
+            return AgentDecision {
+                action: AgentAction::SaveMemory,
+                note_index: None,
+                title: None,
+                search_query: Self::infer_memory_text_from_request(query),
+                rationale: String::from("save-memory"),
+            };
+        }
         if Self::looks_like_memory_search_request(query) {
             return AgentDecision {
                 action: AgentAction::SearchMemories,
@@ -223,14 +246,15 @@ impl App {
     pub(super) fn agent_planner_conversation(&self, query: &str) -> Vec<(String, String)> {
         let system = String::from(
             "You are Aleph's agent planner. Decide what Aleph should do with the user's chat input. \
-             You may choose exactly one action: chat, create_note, edit_note, read_note, search_notes, list_memories, search_memories. \
+             You may choose exactly one action: chat, create_note, edit_note, read_note, search_notes, save_memory, list_memories, search_memories. \
              Use read_note when the user asks to open, read, inspect, summarize, or answer from a specific note. \
              Use search_notes when the user asks to find notes, look across notes, or identify notes about a topic. \
+             Use save_memory when the user explicitly asks Aleph to remember, save as memory, or keep a durable preference/fact. \
              Use list_memories or search_memories when the user asks what Aleph remembers or asks to go through memories. \
              Use edit_note when the user asks to work on, continue, improve, rewrite, append to, organize, or otherwise change an existing/current note. \
              Use create_note when the user wants new durable writing and no existing note is the right target. \
              Use chat for questions, explanations, brainstorming without durable write intent, or when you need to ask a clarification. \
-             Return ONLY compact JSON with this schema: {\"action\":\"chat|create_note|edit_note|read_note|search_notes|list_memories|search_memories\",\"note_id\":number|null,\"title\":string|null,\"query\":string|null,\"rationale\":string}. \
+             Return ONLY compact JSON with this schema: {\"action\":\"chat|create_note|edit_note|read_note|search_notes|save_memory|list_memories|search_memories\",\"note_id\":number|null,\"title\":string|null,\"query\":string|null,\"rationale\":string}. \
              Do not write prose outside JSON.",
         );
 
@@ -280,6 +304,7 @@ impl App {
             "edit_note" => AgentAction::EditNote,
             "read_note" => AgentAction::ReadNote,
             "search_notes" => AgentAction::SearchNotes,
+            "save_memory" => AgentAction::SaveMemory,
             "list_memories" => AgentAction::ListMemories,
             "search_memories" => AgentAction::SearchMemories,
             _ => return None,
@@ -330,7 +355,13 @@ impl App {
             .map(str::trim)
             .filter(|query| !query.is_empty())
             .map(|query| query.chars().take(120).collect::<String>())
-            .or_else(|| Self::infer_agent_search_query(query));
+            .or_else(|| {
+                if action == AgentAction::SaveMemory {
+                    Self::infer_memory_text_from_request(query)
+                } else {
+                    Self::infer_agent_search_query(query)
+                }
+            });
 
         Some(AgentDecision {
             action,
@@ -361,6 +392,7 @@ impl App {
         let response = match decision.action {
             AgentAction::ReadNote => self.agent_read_note_response(&decision),
             AgentAction::SearchNotes => self.agent_search_notes_response(&decision, query),
+            AgentAction::SaveMemory => self.agent_save_memory_response(&decision, query),
             AgentAction::ListMemories => self.agent_list_memories_response(),
             AgentAction::SearchMemories => self.agent_search_memories_response(&decision, query),
             _ => String::from("That agent action is not available here."),
@@ -372,6 +404,10 @@ impl App {
     }
 
     pub(super) fn agent_workspace_context(&self) -> String {
+        self.agent_workspace_context_for_query("")
+    }
+
+    pub(super) fn agent_workspace_context_for_query(&self, query: &str) -> String {
         let selected = self
             .notes
             .get(self.selected_note)
@@ -385,30 +421,64 @@ impl App {
             })
             .unwrap_or_else(|| String::from("Selected note: none"));
 
-        let notes = self
-            .notes
-            .iter()
-            .take(12)
-            .map(|note| {
-                format!(
-                    "- #{} `{}`: {}",
-                    note.id,
-                    note.title,
-                    Self::preview_text(&note.content, 180)
-                )
-            })
-            .collect::<Vec<_>>();
+        let ranked_notes = self.ranked_note_matches(query, 12);
+        let notes = if ranked_notes.is_empty() {
+            self.notes
+                .iter()
+                .take(12)
+                .map(|note| {
+                    format!(
+                        "- #{} `{}`: {}",
+                        note.id,
+                        note.title,
+                        Self::preview_text(&note.content, 180)
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            ranked_notes
+                .iter()
+                .map(|result| {
+                    let note = &self.notes[result.index];
+                    let source = Self::note_source_label(note);
+                    let snippets = if result.snippets.is_empty() {
+                        Self::preview_text(&note.content, 220)
+                    } else {
+                        result.snippets.join(" ... ")
+                    };
+                    format!(
+                        "- #{} `{}` [{}] score={} {}",
+                        note.id, note.title, source, result.score, snippets
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
 
-        let memories = self
-            .memories
-            .iter()
-            .take(12)
-            .enumerate()
-            .map(|(index, memory)| format!("- memory {}: {}", index + 1, memory))
-            .collect::<Vec<_>>();
+        let memory_matches = self.ranked_memory_matches(query, 8);
+        let memories = if memory_matches.is_empty() {
+            self.memories
+                .iter()
+                .take(12)
+                .enumerate()
+                .map(|(index, memory)| format!("- memory {}: {}", index + 1, memory))
+                .collect::<Vec<_>>()
+        } else {
+            memory_matches
+                .iter()
+                .map(|result| {
+                    format!(
+                        "- memory {} score={}: {}",
+                        result.index + 1,
+                        result.score,
+                        self.memories[result.index]
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
 
         format!(
-            "Workspace context:\n{}\n\nRecent note index:\n{}\n\nMemories:\n{}",
+            "Workspace context for query: `{}`\n{}\n\nRelevant notes:\n{}\n\nRelevant memories:\n{}",
+            query.trim(),
             selected,
             if notes.is_empty() {
                 String::from("- none")
@@ -423,8 +493,140 @@ impl App {
         )
     }
 
+    pub(super) fn ranked_note_matches(&self, query: &str, limit: usize) -> Vec<NoteSearchResult> {
+        let cleaned = Self::infer_agent_search_query(query).unwrap_or_default();
+        let lower_query = cleaned.to_lowercase();
+        let query_terms = Self::agent_search_terms(&lower_query);
+        let mut matches = self
+            .notes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, note)| {
+                let title = note.title.to_lowercase();
+                let content = note.content.to_lowercase();
+                let phrase_match = !lower_query.is_empty()
+                    && (title.contains(&lower_query) || content.contains(&lower_query));
+                let title_hits = query_terms
+                    .iter()
+                    .filter(|term| title.contains(term.as_str()))
+                    .count();
+                let content_hits = query_terms
+                    .iter()
+                    .filter(|term| content.contains(term.as_str()))
+                    .count();
+                let term_hits = title_hits + content_hits;
+                let selected_boost = usize::from(index == self.selected_note);
+
+                if !lower_query.is_empty()
+                    && !phrase_match
+                    && term_hits == 0
+                    && !query_terms.is_empty()
+                {
+                    return None;
+                }
+
+                let score = (usize::from(phrase_match) * 10)
+                    + (title_hits * 5)
+                    + content_hits
+                    + selected_boost;
+                let snippets = Self::note_match_snippets(note, &lower_query, &query_terms, 2);
+                Some(NoteSearchResult {
+                    index,
+                    score,
+                    snippets,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        matches.sort_by(|left, right| {
+            right.score.cmp(&left.score).then_with(|| {
+                self.notes[left.index]
+                    .title
+                    .cmp(&self.notes[right.index].title)
+            })
+        });
+        matches.truncate(limit);
+        matches
+    }
+
+    pub(super) fn ranked_memory_matches(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Vec<MemorySearchResult> {
+        let cleaned = Self::infer_agent_search_query(query).unwrap_or_default();
+        let lower_query = cleaned.to_lowercase();
+        let query_terms = Self::agent_search_terms(&lower_query);
+        let mut matches = self
+            .memories
+            .iter()
+            .enumerate()
+            .filter_map(|(index, memory)| {
+                let lower = memory.to_lowercase();
+                let phrase_match = !lower_query.is_empty() && lower.contains(&lower_query);
+                let term_hits = query_terms
+                    .iter()
+                    .filter(|term| lower.contains(term.as_str()))
+                    .count();
+                if !lower_query.is_empty()
+                    && !phrase_match
+                    && term_hits == 0
+                    && !query_terms.is_empty()
+                {
+                    return None;
+                }
+                Some(MemorySearchResult {
+                    index,
+                    score: (usize::from(phrase_match) * 8) + term_hits,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        matches.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.index.cmp(&right.index))
+        });
+        matches.truncate(limit);
+        matches
+    }
+
+    pub(super) fn note_match_snippets(
+        note: &Note,
+        query: &str,
+        terms: &[String],
+        limit: usize,
+    ) -> Vec<String> {
+        let mut snippets = Vec::new();
+        for line in note.content.lines() {
+            let lower = line.to_lowercase();
+            let matched = (!query.is_empty() && lower.contains(query))
+                || terms.iter().any(|term| lower.contains(term.as_str()));
+            if matched {
+                snippets.push(Self::preview_text(line.trim(), 220));
+            }
+            if snippets.len() >= limit {
+                break;
+            }
+        }
+        if snippets.is_empty() {
+            snippets.push(Self::preview_text(&note.content, 220));
+        }
+        snippets
+    }
+
     pub(super) fn agent_read_note_response(&self, decision: &AgentDecision) -> String {
-        let Some(index) = decision.note_index.or_else(|| self.current_note_index()) else {
+        let inferred = decision.search_query.as_deref().and_then(|query| {
+            self.ranked_note_matches(query, 1)
+                .first()
+                .map(|result| result.index)
+        });
+        let Some(index) = decision
+            .note_index
+            .or(inferred)
+            .or_else(|| self.current_note_index())
+        else {
             return String::from("I could not find a note to read.");
         };
         let Some(note) = self.notes.get(index) else {
@@ -437,8 +639,37 @@ impl App {
             note.id,
             note.title,
             source,
-            Self::preview_text(&note.content, 1200)
+            Self::preview_text(&note.content, 2400)
         )
+    }
+
+    pub(super) fn agent_save_memory_response(
+        &mut self,
+        decision: &AgentDecision,
+        original_query: &str,
+    ) -> String {
+        let memory = decision
+            .search_query
+            .as_deref()
+            .unwrap_or(original_query)
+            .trim();
+        let Some(memory) = Self::normalize_memory_text(memory) else {
+            return String::from("I could not find a memory to save.");
+        };
+
+        match self.save_memory_text(&memory) {
+            Ok(()) => {
+                if self.is_strix_connected() {
+                    format!("Saved memory locally: {}", memory)
+                } else {
+                    format!(
+                        "Saved memory locally because Strix memories are not connected: {}",
+                        memory
+                    )
+                }
+            }
+            Err(error) => format!("Memory save failed: {}", error),
+        }
     }
 
     pub(super) fn agent_search_notes_response(
@@ -451,55 +682,27 @@ impl App {
             .as_deref()
             .unwrap_or(original_query)
             .trim()
-            .to_lowercase();
-        let query_terms = Self::agent_search_terms(&query);
-        let mut matches = self
-            .notes
-            .iter()
-            .filter_map(|note| {
-                let haystack = format!(
-                    "{} {}",
-                    note.title.to_lowercase(),
-                    note.content.to_lowercase()
-                );
-                let phrase_match = !query.is_empty() && haystack.contains(&query);
-                let term_score = query_terms
-                    .iter()
-                    .filter(|term| haystack.contains(term.as_str()))
-                    .count();
-                let term_match = query_terms.is_empty()
-                    || term_score == query_terms.len()
-                    || (query_terms.len() >= 3 && term_score >= 2);
-
-                (query.is_empty() || phrase_match || term_match).then_some((term_score, note))
-            })
-            .collect::<Vec<_>>();
-
-        matches.sort_by(|(left_score, left_note), (right_score, right_note)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| left_note.title.cmp(&right_note.title))
-        });
-
-        let mut matches = matches
-            .into_iter()
-            .take(8)
-            .map(|(_, note)| {
-                format!(
-                    "- `#{}` `{}`: {}",
-                    note.id,
-                    note.title,
-                    Self::preview_text(&note.content, 180)
-                )
-            })
-            .collect::<Vec<_>>();
+            .to_string();
+        let matches = self.ranked_note_matches(&query, 8);
 
         if matches.is_empty() {
             return format!("I did not find notes matching `{}`.", query);
         }
 
-        matches.insert(0, format!("Found {} note match(es):", matches.len()));
-        matches.join("\n")
+        let mut lines = Vec::with_capacity(matches.len() + 1);
+        lines.push(format!("Found {} note match(es):", matches.len()));
+        for result in matches {
+            let note = &self.notes[result.index];
+            lines.push(format!(
+                "- `#{}` `{}` score={} [{}]\n  {}",
+                note.id,
+                note.title,
+                result.score,
+                Self::note_source_label(note),
+                result.snippets.join("\n  ")
+            ));
+        }
+        lines.join("\n")
     }
 
     pub(super) fn agent_list_memories_response(&self) -> String {
@@ -528,21 +731,86 @@ impl App {
             .as_deref()
             .unwrap_or(original_query)
             .trim()
-            .to_lowercase();
-        let mut matches = self
-            .memories
-            .iter()
-            .filter(|memory| query.is_empty() || memory.to_lowercase().contains(&query))
-            .take(12)
-            .cloned()
-            .collect::<Vec<_>>();
+            .to_string();
+        let matches = self.ranked_memory_matches(&query, 12);
 
         if matches.is_empty() {
             return format!("I did not find memories matching `{}`.", query);
         }
 
-        matches.insert(0, format!("Found {} memory match(es):", matches.len()));
-        matches.join("\n")
+        let mut lines = Vec::with_capacity(matches.len() + 1);
+        lines.push(format!("Found {} memory match(es):", matches.len()));
+        lines.extend(matches.into_iter().map(|result| {
+            format!(
+                "- memory {} score={}: {}",
+                result.index + 1,
+                result.score,
+                self.memories[result.index]
+            )
+        }));
+        lines.join("\n")
+    }
+
+    pub(super) fn save_memory_text(&mut self, memory: &str) -> Result<(), String> {
+        let memory = memory.trim();
+        if memory.is_empty() {
+            return Err(String::from("Memory text was empty."));
+        }
+        if self
+            .memories
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(memory))
+        {
+            return Ok(());
+        }
+
+        self.create_auto_temporal_fork("Before memory save");
+        self.memories.push(memory.to_string());
+        if let Err(error) = Self::save_local_memories(&self.memories) {
+            self.memories.pop();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(super) fn normalize_memory_text(text: &str) -> Option<String> {
+        let mut memory = text.trim();
+        for prefix in [
+            "remember that",
+            "remember:",
+            "remember",
+            "save memory:",
+            "save memory",
+            "memory save",
+            "please remember that",
+            "please remember",
+        ] {
+            if memory.to_lowercase().starts_with(prefix) {
+                memory = memory[prefix.len()..].trim();
+                break;
+            }
+        }
+        let memory = memory.trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+        (!memory.is_empty()).then(|| memory.chars().take(500).collect())
+    }
+
+    pub(super) fn looks_like_memory_save_request(query: &str) -> bool {
+        let lower = query.trim_start().to_lowercase();
+        [
+            "remember that ",
+            "remember:",
+            "please remember that ",
+            "please remember ",
+            "save memory ",
+            "save memory:",
+            "memory save ",
+        ]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+    }
+
+    pub(super) fn infer_memory_text_from_request(query: &str) -> Option<String> {
+        Self::normalize_memory_text(query)
     }
 
     pub(super) fn start_note_create_agent(&mut self, query: &str, title: Option<String>) -> bool {

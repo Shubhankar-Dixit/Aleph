@@ -1234,3 +1234,94 @@ fn editor_vertical_navigation_keeps_cursor_on_char_boundary() {
     assert!(app.editor_buffer.is_char_boundary(app.editor_cursor));
     assert_eq!(app.editor_cursor, "éé".len());
 }
+
+#[test]
+fn chat_markdown_tables_are_padded_as_blocks() {
+    let lines = App::render_chat_markdown_lines_owned(
+        "| Name | Count |\n| --- | ---: |\n| Alpha | 2 |\n| Beta project | 14 |",
+    );
+    let text = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(text[0], "| Name         | Count |");
+    assert_eq!(text[1], "| ------------ | ----- |");
+    assert_eq!(text[2], "| Alpha        | 2     |");
+    assert_eq!(text[3], "| Beta project | 14    |");
+}
+
+#[test]
+fn agent_note_search_ranks_relevant_notes_with_snippets() {
+    let mut app = App::new();
+    app.notes = vec![
+        test_note(1, None, "Cooking", "Pasta and sauce"),
+        test_note(
+            2,
+            None,
+            "Rust terminal UI",
+            "Ratatui table rendering and scroll behavior in chat.",
+        ),
+        test_note(3, None, "Garden", "Seeds and water"),
+    ];
+    app.selected_note = 0;
+
+    let response = app.agent_search_notes_response(
+        &AgentDecision {
+            action: AgentAction::SearchNotes,
+            note_index: None,
+            title: None,
+            search_query: Some(String::from("table scroll chat")),
+            rationale: String::from("test"),
+        },
+        "find notes about table scroll chat",
+    );
+
+    assert!(response.contains("Rust terminal UI"));
+    assert!(response.contains("Ratatui table rendering"));
+    assert!(!response.contains("Cooking"));
+}
+
+#[test]
+fn memory_save_persists_to_local_cache() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-memory-test-{}", App::now_millis()));
+    fs::create_dir_all(&root).unwrap();
+    let previous_config_dir = std::env::var_os("ALEPH_CONFIG_DIR");
+    std::env::set_var("ALEPH_CONFIG_DIR", &root);
+
+    let mut app = App::new();
+    app.memories.clear();
+    let response = app.agent_save_memory_response(
+        &AgentDecision {
+            action: AgentAction::SaveMemory,
+            note_index: None,
+            title: None,
+            search_query: Some(String::from("remember that tables should stay aligned")),
+            rationale: String::from("test"),
+        },
+        "",
+    );
+
+    assert!(response.contains("Saved memory locally"));
+    assert_eq!(
+        app.memories,
+        vec![String::from("tables should stay aligned")]
+    );
+    assert_eq!(
+        App::load_local_memories().unwrap(),
+        vec![String::from("tables should stay aligned")]
+    );
+
+    if let Some(previous) = previous_config_dir {
+        std::env::set_var("ALEPH_CONFIG_DIR", previous);
+    } else {
+        std::env::remove_var("ALEPH_CONFIG_DIR");
+    }
+    let _ = fs::remove_dir_all(root);
+}

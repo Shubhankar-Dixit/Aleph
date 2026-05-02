@@ -60,6 +60,11 @@ impl App {
         let notes = Self::load_local_notes().unwrap_or_else(|_| Self::default_local_notes());
 
         #[cfg(test)]
+        let memories = Vec::new();
+        #[cfg(not(test))]
+        let memories = Self::load_local_memories().unwrap_or_default();
+
+        #[cfg(test)]
         let editor_images_enabled = false;
         #[cfg(not(test))]
         let editor_images_enabled = Self::load_editor_images_enabled().unwrap_or(false);
@@ -85,7 +90,7 @@ impl App {
             connected,
             folders: Vec::new(),
             notes,
-            memories: Vec::new(),
+            memories,
             canvases: Vec::new(),
             selected_note: 0,
             current_folder_id: None,
@@ -157,6 +162,8 @@ impl App {
             title_buffer: String::new(),
             title_cursor: 0,
             expanded_folders: Vec::new(),
+            path_list_selected: 0,
+            path_list_pending_delete: None,
             temporal_forks,
             current_fork_id,
         };
@@ -981,6 +988,10 @@ impl App {
         self.panel_mode == PanelMode::NoteList
     }
 
+    pub fn is_path_list(&self) -> bool {
+        self.panel_mode == PanelMode::PathList
+    }
+
     pub fn is_vault_picker(&self) -> bool {
         self.panel_mode == PanelMode::VaultPicker
     }
@@ -1003,6 +1014,14 @@ impl App {
             .copied()
             .map(|index| self.note_list_pending_delete == Some(index))
             .unwrap_or(false)
+    }
+
+    pub fn path_list_selected(&self) -> usize {
+        self.path_list_selected
+    }
+
+    pub fn path_list_delete_is_pending(&self) -> bool {
+        self.path_list_pending_delete == Some(self.path_list_selected)
     }
 
     pub fn obsidian_vaults(&self) -> &[ObsidianVault] {

@@ -552,6 +552,47 @@ impl App {
                     .add_modifier(Modifier::BOLD | Modifier::ITALIC),
             ));
             return Line::from(spans);
+        } else if trimmed.starts_with('|') && trimmed.ends_with('|') {
+            let pipe_count = trimmed.chars().filter(|&c| c == '|').count();
+            if pipe_count >= 2 {
+                let is_separator = trimmed
+                    .trim_start_matches('|')
+                    .trim_end_matches('|')
+                    .split('|')
+                    .all(|cell| {
+                        cell.trim()
+                            .chars()
+                            .all(|c| c == '-' || c == ':' || c == ' ')
+                    });
+                if is_separator {
+                    return Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(CHAT_MUTED),
+                    ));
+                }
+                let mut table_spans = Vec::new();
+                if indent_len > 0 {
+                    table_spans.push(Span::raw(line[..indent_len].to_string()));
+                }
+                let parts: Vec<&str> = trimmed.split('|').collect();
+                for (i, part) in parts.iter().enumerate() {
+                    if i == 0 && part.is_empty() {
+                        table_spans.push(Span::styled("|", Style::default().fg(CHAT_MUTED)));
+                    } else if i == parts.len() - 1 && part.is_empty() {
+                        // trailing empty after last pipe
+                    } else {
+                        table_spans.push(Span::styled(
+                            part.to_string(),
+                            Style::default().fg(CHAT_TEXT),
+                        ));
+                        if i < parts.len() - 1 {
+                            table_spans.push(Span::styled("|", Style::default().fg(CHAT_MUTED)));
+                        }
+                    }
+                }
+                return Line::from(table_spans);
+            }
+            remaining = trimmed;
         } else if let Some(stripped) = trimmed.strip_prefix("- ") {
             if indent_len > 0 {
                 spans.push(Span::raw(line[..indent_len].to_string()));
@@ -581,6 +622,106 @@ impl App {
         Line::from(spans)
     }
 
+    pub(super) fn render_chat_markdown_lines_owned(content: &str) -> Vec<Line<'static>> {
+        let mut rendered = Vec::new();
+        let lines = content.lines().collect::<Vec<_>>();
+        let mut index = 0;
+
+        while index < lines.len() {
+            let line = lines[index];
+            if line.is_empty() {
+                rendered.push(Line::from(""));
+                index += 1;
+                continue;
+            }
+
+            if Self::is_chat_table_line(line) {
+                let start = index;
+                while index < lines.len() && Self::is_chat_table_line(lines[index]) {
+                    index += 1;
+                }
+                for table_line in Self::format_chat_table_block(&lines[start..index]) {
+                    rendered.push(Self::render_chat_markdown_line_owned(&table_line));
+                }
+                continue;
+            }
+
+            rendered.push(Self::render_chat_markdown_line_owned(line));
+            index += 1;
+        }
+
+        rendered
+    }
+
+    pub(super) fn is_chat_table_line(line: &str) -> bool {
+        let trimmed = line.trim();
+        trimmed.starts_with('|')
+            && trimmed.ends_with('|')
+            && trimmed.chars().filter(|&c| c == '|').count() >= 2
+    }
+
+    pub(super) fn format_chat_table_block(lines: &[&str]) -> Vec<String> {
+        let rows = lines
+            .iter()
+            .map(|line| {
+                line.trim()
+                    .trim_matches('|')
+                    .split('|')
+                    .map(|cell| cell.trim().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+        if columns == 0 {
+            return lines.iter().map(|line| (*line).to_string()).collect();
+        }
+
+        let mut widths = vec![0usize; columns];
+        for row in &rows {
+            if Self::is_chat_table_separator_cells(row) {
+                continue;
+            }
+            for (column, cell) in row.iter().enumerate() {
+                widths[column] = widths[column].max(cell.chars().count());
+            }
+        }
+        for width in &mut widths {
+            *width = (*width).max(3);
+        }
+
+        rows.into_iter()
+            .map(|row| {
+                if Self::is_chat_table_separator_cells(&row) {
+                    let cells = widths
+                        .iter()
+                        .map(|width| "-".repeat(*width))
+                        .collect::<Vec<_>>();
+                    return format!("| {} |", cells.join(" | "));
+                }
+
+                let cells = (0..columns)
+                    .map(|column| {
+                        let cell = row.get(column).map(String::as_str).unwrap_or("");
+                        let padding = widths[column].saturating_sub(cell.chars().count());
+                        format!("{}{}", cell, " ".repeat(padding))
+                    })
+                    .collect::<Vec<_>>();
+                format!("| {} |", cells.join(" | "))
+            })
+            .collect()
+    }
+
+    fn is_chat_table_separator_cells(cells: &[String]) -> bool {
+        !cells.is_empty()
+            && cells.iter().all(|cell| {
+                let trimmed = cell.trim();
+                !trimmed.is_empty()
+                    && trimmed
+                        .chars()
+                        .all(|c| c == '-' || c == ':' || c.is_whitespace())
+            })
+    }
+
     pub(super) fn start_chat_turn(&mut self, query: String) -> bool {
         let query = query.trim().to_string();
         if query.is_empty() {
@@ -599,7 +740,7 @@ impl App {
         self.push_chat_message("user", query.clone());
 
         let conversation = match provider {
-            AiProvider::OpenRouter => self.openrouter_conversation(),
+            AiProvider::OpenRouter => self.openrouter_conversation(&query),
             AiProvider::Strix => Vec::new(),
         };
         let strix_notes = if provider == AiProvider::Strix {
@@ -668,13 +809,16 @@ impl App {
         true
     }
 
-    pub(super) fn openrouter_conversation(&self) -> Vec<(String, String)> {
+    pub(super) fn openrouter_conversation(&self, query: &str) -> Vec<(String, String)> {
         let mut conversation = Vec::new();
         conversation.push((
             String::from("system"),
             String::from("You are Aleph, a concise terminal assistant. Keep answers practical and grounded. Use the provided workspace context when it is relevant, and say when the local notes or memories do not contain enough evidence."),
         ));
-        conversation.push((String::from("system"), self.agent_workspace_context()));
+        conversation.push((
+            String::from("system"),
+            self.agent_workspace_context_for_query(query),
+        ));
 
         let mut recent_messages: Vec<_> =
             self.chat_messages.iter().rev().take(12).cloned().collect();
@@ -742,13 +886,7 @@ impl App {
                 continue;
             }
 
-            for content_line in message.content.lines() {
-                if content_line.is_empty() {
-                    lines.push(Line::from(""));
-                } else {
-                    lines.push(Self::render_chat_markdown_line_owned(content_line));
-                }
-            }
+            lines.extend(Self::render_chat_markdown_lines_owned(&message.content));
         }
 
         self.chat_render_cache = lines;
@@ -758,19 +896,19 @@ impl App {
     /// Used during streaming so we don't re-parse every previous message's
     /// markdown on each token from the model.
     pub(super) fn rebuild_chat_render_cache_streaming(&mut self) {
+        let old_len = self.chat_render_cache.len();
         self.chat_render_cache.truncate(self.chat_cache_stable_len);
 
         if let Some(last_msg) = self.chat_messages.last() {
             if !last_msg.content.trim().is_empty() {
-                for content_line in last_msg.content.lines() {
-                    if content_line.is_empty() {
-                        self.chat_render_cache.push(Line::from(""));
-                    } else {
-                        self.chat_render_cache
-                            .push(Self::render_chat_markdown_line_owned(content_line));
-                    }
-                }
+                self.chat_render_cache
+                    .extend(Self::render_chat_markdown_lines_owned(&last_msg.content));
             }
+        }
+
+        if self.chat_scroll_offset > 0 {
+            let delta = self.chat_render_cache.len().saturating_sub(old_len);
+            self.chat_scroll_offset = self.chat_scroll_offset.saturating_add(delta);
         }
     }
 

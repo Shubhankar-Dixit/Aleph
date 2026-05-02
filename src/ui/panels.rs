@@ -771,6 +771,75 @@ pub(super) fn render_note_list_panel(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+pub(super) fn render_path_list_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            app.panel_title(),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    let selected = app
+        .path_list_selected()
+        .min(app.panel_lines().len().saturating_sub(1));
+    let rows = app
+        .panel_lines()
+        .iter()
+        .map(|line| {
+            Row::new(vec![Cell::from(Span::styled(
+                line,
+                Style::default().fg(MUTED),
+            ))])
+        })
+        .collect::<Vec<_>>();
+
+    let table = Table::new(rows, [Constraint::Min(0)])
+        .row_highlight_style(Style::default().fg(TEXT).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▶ ")
+        .column_spacing(0);
+
+    let mut table_state = ratatui::widgets::TableState::default();
+    if !app.panel_lines().is_empty() {
+        table_state.select(Some(selected));
+    }
+    frame.render_stateful_widget(table, sections[0], &mut table_state);
+
+    let footer = if app.path_list_delete_is_pending() {
+        Line::from(vec![
+            Span::styled("Delete", Style::default().fg(Color::Rgb(209, 118, 128))),
+            Span::raw(" confirm · "),
+            Span::styled("Enter", Style::default().fg(Color::Rgb(209, 118, 128))),
+            Span::raw(" confirm · "),
+            Span::styled("d", Style::default().fg(Color::Rgb(209, 118, 128))),
+            Span::raw(" confirm · "),
+            Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
+            Span::raw(" cancel"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(ACCENT)),
+            Span::raw(" inspect · "),
+            Span::styled("Delete", Style::default().fg(ACCENT_SOFT)),
+            Span::raw(" delete · "),
+            Span::styled("Esc", Style::default().fg(MUTED)),
+            Span::raw(" close"),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(footer)
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(MUTED)),
+        sections[1],
+    );
+}
+
 pub(super) fn render_note_editor_panel(frame: &mut Frame, app: &App, area: Rect) {
     let base_title = app
         .editor_note_title()

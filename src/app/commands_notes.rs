@@ -852,16 +852,22 @@ impl App {
                     return;
                 }
 
-                self.create_auto_temporal_fork("Before memory save");
-                self.memories.push(memory.to_string());
-                self.set_result_panel(
-                    "Memory saved",
-                    vec![
-                        memory.to_string(),
-                        String::from("Stored in the local demo memory list."),
-                    ],
-                );
-                self.last_action = String::from("Saved a memory.");
+                match self.save_memory_text(memory) {
+                    Ok(()) => {
+                        self.set_result_panel(
+                            "Memory saved",
+                            vec![
+                                memory.to_string(),
+                                String::from("Stored in the local memory cache."),
+                            ],
+                        );
+                        self.last_action = String::from("Saved a memory.");
+                    }
+                    Err(error) => {
+                        self.set_result_panel("Memory save failed", vec![error]);
+                        self.last_action = String::from("Memory save failed.");
+                    }
+                }
             }
             "memory search" => {
                 let query = args.trim().to_lowercase();
