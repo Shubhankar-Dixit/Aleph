@@ -66,6 +66,22 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Show recent note activity",
     },
     CommandSpec {
+        name: "path save",
+        description: "Save this decision point so you can explore another path",
+    },
+    CommandSpec {
+        name: "path list",
+        description: "List saved paths and decision points",
+    },
+    CommandSpec {
+        name: "path show",
+        description: "Inspect a saved path by name or id",
+    },
+    CommandSpec {
+        name: "path return",
+        description: "Return Aleph to a saved path",
+    },
+    CommandSpec {
         name: "ask",
         description: "Ask the selected AI provider a question",
     },
@@ -135,4 +151,6 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
 ];
 
-pub const THINKING_FRAMES: [&str; 10] = ["◡", "⊙", "◠", "⊙", "◡", "⊙", "◉", "●", "◉", "⊙"];
+pub const THINKING_FRAMES: [&str; 16] = [
+    "◌", "ॐ", "Ω", "Ψ", "Д", "Ж", "א", "⌘", "⚛", "ᚠ", "ᛟ", "ꙮ", "Ξ", "Δ", "Ц", "Ш",
+];

@@ -134,6 +134,41 @@ fn render_markdown_line_with_theme(line: &str, theme: MarkdownTheme) -> Line<'_>
             base_style.add_modifier(Modifier::BOLD | Modifier::ITALIC),
         ));
         return Line::from(spans);
+    } else if trimmed.starts_with('|') && trimmed.ends_with('|') {
+        let pipe_count = trimmed.chars().filter(|&c| c == '|').count();
+        if pipe_count >= 2 {
+            let is_separator = trimmed
+                .trim_start_matches('|')
+                .trim_end_matches('|')
+                .split('|')
+                .all(|cell| {
+                    cell.trim()
+                        .chars()
+                        .all(|c| c == '-' || c == ':' || c == ' ')
+                });
+            if is_separator {
+                return Line::from(Span::styled(line, Style::default().fg(theme.muted)));
+            }
+            let mut table_spans = Vec::new();
+            if indent_len > 0 {
+                table_spans.push(Span::styled(&line[..indent_len], base_style));
+            }
+            let parts: Vec<&str> = trimmed.split('|').collect();
+            for (i, part) in parts.iter().enumerate() {
+                if i == 0 && part.is_empty() {
+                    table_spans.push(Span::styled("|", Style::default().fg(theme.muted)));
+                } else if i == parts.len() - 1 && part.is_empty() {
+                    // trailing empty after last pipe
+                } else {
+                    table_spans.push(Span::styled(*part, base_style));
+                    if i < parts.len() - 1 {
+                        table_spans.push(Span::styled("|", Style::default().fg(theme.muted)));
+                    }
+                }
+            }
+            return Line::from(table_spans);
+        }
+        remaining = trimmed;
     } else if let Some(stripped) = trimmed.strip_prefix("- ") {
         if indent_len > 0 {
             spans.push(Span::styled(&line[..indent_len], base_style));
