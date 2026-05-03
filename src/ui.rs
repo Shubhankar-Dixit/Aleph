@@ -16,6 +16,7 @@ use self::panels::{
     render_obsidian_vault_picker_panel, render_path_list_panel,
 };
 use crate::app::{AiProvider, App, PanelMode};
+pub(crate) use chat_settings::settings_items_area;
 use chat_settings::{render_full_chat, render_obsidian_sync_confirm_panel, render_settings_panel};
 use editor::render_full_editor;
 use markdown::{
@@ -40,6 +41,20 @@ const BORDER: Color = Color::Rgb(48, 53, 66);
 const GHOST_FRAMES: [&str; 4] = ["◌", "◎", "◍", "◉"];
 const CURSOR: &str = "│";
 
+pub(crate) fn app_root_layout(area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(8),
+            Constraint::Length(4),
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .margin(1)
+        .split(area)
+}
+
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
@@ -55,17 +70,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         return;
     }
 
-    let root = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(8),
-            Constraint::Length(4),
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Min(0),
-        ])
-        .margin(1)
-        .split(area);
+    let root = app_root_layout(area);
 
     let logo = Layout::default()
         .direction(Direction::Horizontal)

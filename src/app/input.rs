@@ -1,4 +1,5 @@
 use super::*;
+use ratatui::prelude::Rect;
 
 #[allow(dead_code)]
 impl App {
@@ -115,19 +116,47 @@ impl App {
             return;
         }
 
-        const SETTINGS_LIST_START_ROW: u16 = 20;
-        const SETTINGS_ITEM_COUNT: usize = 8;
-
-        let Some(row) = mouse_event.row.checked_sub(SETTINGS_LIST_START_ROW) else {
+        let Ok((width, height)) = crossterm::terminal::size() else {
             return;
         };
-        let index = row as usize;
-        if index >= SETTINGS_ITEM_COUNT {
+
+        self.handle_settings_mouse_with_size(mouse_event, height, width);
+    }
+
+    fn handle_settings_mouse_with_size(
+        &mut self,
+        mouse_event: MouseEvent,
+        terminal_height: u16,
+        terminal_width: u16,
+    ) {
+        let Some(index) =
+            Self::settings_index_for_mouse_row(terminal_height, terminal_width, mouse_event.row)
+        else {
             return;
-        }
+        };
 
         self.settings_selected = index;
         self.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    fn settings_index_for_mouse_row(
+        terminal_height: u16,
+        terminal_width: u16,
+        row: u16,
+    ) -> Option<usize> {
+        const SETTINGS_ITEM_COUNT: usize = 8;
+
+        let terminal_area = Rect::new(0, 0, terminal_width, terminal_height);
+        let panel_area = crate::ui::app_root_layout(terminal_area)[4];
+        let settings_rows = crate::ui::settings_items_area(panel_area);
+
+        let offset = row.checked_sub(settings_rows.y)?;
+        let index = offset as usize;
+        if offset < settings_rows.height && index < SETTINGS_ITEM_COUNT {
+            Some(index)
+        } else {
+            None
+        }
     }
 
     pub(super) fn handle_editor_key(&mut self, key_event: KeyEvent) {

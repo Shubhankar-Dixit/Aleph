@@ -1,5 +1,24 @@
 use super::*;
 
+pub(crate) fn settings_items_area(area: Rect) -> Rect {
+    let inner = area.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    settings_panel_sections(inner)[1]
+}
+
+fn settings_panel_sections(inner: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(inner)
+}
+
 pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let show_activity = area.width >= 108;
     let max_width = if show_activity { 112 } else { 88 };
@@ -266,14 +285,7 @@ pub(super) fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
 
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(inner);
+    let sections = settings_panel_sections(inner);
 
     let header = Paragraph::new(vec![Line::from(vec![Span::styled(
         "Manage your connections, model provider, and preferences",

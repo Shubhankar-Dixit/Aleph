@@ -343,14 +343,28 @@ fn clicking_settings_obsidian_row_opens_pairing_when_unpaired() {
     app.obsidian_vault_path = None;
 
     app.open_settings_panel();
-    app.handle_mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: 4,
-        row: 24,
-        modifiers: KeyModifiers::NONE,
-    });
+    app.handle_settings_mouse_with_size(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: 24,
+            modifiers: KeyModifiers::NONE,
+        },
+        40,
+        80,
+    );
 
     assert!(app.is_vault_picker());
+}
+
+#[test]
+fn settings_mouse_hit_test_tracks_rendered_panel_layout() {
+    assert_eq!(App::settings_index_for_mouse_row(40, 80, 20), Some(0));
+    assert_eq!(App::settings_index_for_mouse_row(40, 80, 24), Some(4));
+    assert_eq!(App::settings_index_for_mouse_row(40, 80, 19), None);
+
+    assert_eq!(App::settings_index_for_mouse_row(22, 80, 20), None);
+    assert_eq!(App::settings_index_for_mouse_row(22, 80, 24), None);
 }
 
 #[test]
