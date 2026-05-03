@@ -927,6 +927,9 @@ impl App {
 
     pub(super) fn looks_like_note_search_request(query: &str) -> bool {
         let lower = query.to_lowercase();
+        if Self::looks_like_note_create_request(query) {
+            return false;
+        }
         let mentions_notes = lower.contains("note") || lower.contains("notes");
         let wants_search = [
             "search",
@@ -1239,6 +1242,9 @@ impl App {
     pub(super) fn looks_like_note_edit_request(query: &str) -> bool {
         let lower = query.to_lowercase();
         if Self::looks_like_how_to_question(&lower) {
+            return false;
+        }
+        if Self::looks_like_note_create_request(query) {
             return false;
         }
 

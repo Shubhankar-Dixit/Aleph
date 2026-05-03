@@ -123,7 +123,7 @@ impl App {
         self.handle_settings_mouse_with_size(mouse_event, height, width);
     }
 
-    fn handle_settings_mouse_with_size(
+    pub(super) fn handle_settings_mouse_with_size(
         &mut self,
         mouse_event: MouseEvent,
         terminal_height: u16,
@@ -139,7 +139,7 @@ impl App {
         self.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     }
 
-    fn settings_index_for_mouse_row(
+    pub(super) fn settings_index_for_mouse_row(
         terminal_height: u16,
         terminal_width: u16,
         row: u16,
