@@ -76,6 +76,8 @@ impl App {
 
         let (temporal_forks, current_fork_id) =
             Self::load_temporal_fork_state().unwrap_or_else(|_| (Vec::new(), None));
+        let (rooms, active_room_index) =
+            Self::load_room_state().unwrap_or_else(|_| Self::default_room_state());
 
         let mut app = Self {
             started_at: Instant::now(),
@@ -89,6 +91,8 @@ impl App {
             last_action: String::from("Ready to accept input."),
             connected,
             folders: Vec::new(),
+            rooms,
+            active_room_index,
             notes,
             memories,
             canvases: Vec::new(),
@@ -158,6 +162,8 @@ impl App {
             note_list_selected: 0,
             note_list_indices: Vec::new(),
             note_list_pending_delete: None,
+            room_list_selected: 0,
+            room_list_pending_delete: None,
             editing_title: false,
             title_buffer: String::new(),
             title_cursor: 0,
@@ -209,10 +215,13 @@ impl App {
     pub fn run_cli_command(&mut self, args: &[String]) -> Result<Vec<String>, String> {
         if args.is_empty() {
             return Ok(vec![
-                String::from("Usage: aleph notes <list|search|read|write|append|create> ..."),
+                String::from("Usage: aleph <notes|room|obsidian|sync> ..."),
                 String::from("Examples:"),
                 String::from("  aleph notes search roadmap"),
                 String::from("  aleph notes read <id>"),
+                String::from("  aleph room list"),
+                String::from("  aleph room use <name>"),
+                String::from("  aleph room all"),
                 String::from("  aleph notes write <id> -   # content from stdin"),
             ]);
         }
@@ -228,9 +237,13 @@ impl App {
             return self.run_obsidian_cli_command(&args[1..]);
         }
 
+        if area == "room" || area == "rooms" {
+            return self.run_room_cli_command(&args[1..]);
+        }
+
         if area != "notes" && area != "note" {
             return Err(format!(
-                "Unknown Aleph CLI area '{}'. Try 'notes' or 'obsidian'.",
+                "Unknown Aleph CLI area '{}'. Try 'notes', 'room', or 'obsidian'.",
                 area
             ));
         }
@@ -392,6 +405,59 @@ impl App {
                 )])
             }
             _ => Err(format!("Unknown notes action '{}'.", action)),
+        }
+    }
+
+    pub(super) fn run_room_cli_command(&mut self, args: &[String]) -> Result<Vec<String>, String> {
+        let action = args.first().map(|value| value.as_str()).unwrap_or("list");
+        match action {
+            "list" => Ok(self.room_list_lines()),
+            "show" => {
+                let target = args.get(1..).unwrap_or(&[]).join(" ");
+                let result = if target.trim().is_empty() {
+                    self.room_detail_lines(self.active_room_index)
+                } else {
+                    self.resolve_room_index(&target)
+                        .ok_or_else(|| format!("No room matched '{}'.", target))
+                        .and_then(|index| self.room_detail_lines(index))
+                };
+
+                result.map(|(title, lines)| {
+                    std::iter::once(format!("Room: {}", title))
+                        .chain(lines)
+                        .collect()
+                })
+            }
+            "use" => {
+                let target = args.get(1..).unwrap_or(&[]).join(" ");
+                if target.trim().is_empty() {
+                    return Err(String::from("Usage: aleph room use <name>"));
+                }
+
+                self.switch_room_by_name(&target).map(|lines| {
+                    std::iter::once(format!("Room: {}", self.active_room_label()))
+                        .chain(lines)
+                        .collect()
+                })
+            }
+            "next" => self.cycle_room(1).map(|lines| {
+                std::iter::once(format!("Room: {}", self.active_room_label()))
+                    .chain(lines)
+                    .collect()
+            }),
+            "prev" | "previous" => self.cycle_room(-1).map(|lines| {
+                std::iter::once(format!("Room: {}", self.active_room_label()))
+                    .chain(lines)
+                    .collect()
+            }),
+            _ => {
+                let target = args.join(" ");
+                self.switch_room_by_name(&target).map(|lines| {
+                    std::iter::once(format!("Room: {}", self.active_room_label()))
+                        .chain(lines)
+                        .collect()
+                })
+            }
         }
     }
 
@@ -937,6 +1003,55 @@ impl App {
         self.notes.get(self.selected_note)
     }
 
+    pub fn active_room_label(&self) -> &str {
+        self.active_room_ref().name.as_str()
+    }
+
+    pub fn room_scope_summary(&self) -> String {
+        let room = self.active_room_ref();
+        if Self::is_global_room(room) {
+            return String::from("all notes · no room filter");
+        }
+
+        format!(
+            "{} paths · {} tags · {} filters",
+            room.project_paths.len(),
+            room.tags.len(),
+            room.filters.len()
+        )
+    }
+
+    pub fn is_global_scope(&self) -> bool {
+        Self::is_global_room(self.active_room_ref())
+    }
+
+    pub fn room_accent(&self) -> Color {
+        let room = self.active_room_ref();
+        Color::Rgb(room.accent[0], room.accent[1], room.accent[2])
+    }
+
+    pub fn room_accent_soft(&self) -> Color {
+        match self.room_accent() {
+            Color::Rgb(red, green, blue) => Color::Rgb(
+                ((red as u16 * 3 + 96) / 4) as u8,
+                ((green as u16 * 3 + 96) / 4) as u8,
+                ((blue as u16 * 3 + 96) / 4) as u8,
+            ),
+            color => color,
+        }
+    }
+
+    pub fn room_note_count(&self) -> usize {
+        self.room_note_indices().len()
+    }
+
+    pub fn room_recent_session_count(&self) -> usize {
+        self.temporal_forks
+            .iter()
+            .filter(|fork| self.room_matches_session(fork))
+            .count()
+    }
+
     pub fn ai_provider(&self) -> AiProvider {
         self.ai_provider
     }
@@ -988,6 +1103,10 @@ impl App {
         self.panel_mode == PanelMode::NoteList
     }
 
+    pub fn is_room_list(&self) -> bool {
+        self.panel_mode == PanelMode::RoomList
+    }
+
     pub fn is_path_list(&self) -> bool {
         self.panel_mode == PanelMode::PathList
     }
@@ -1013,6 +1132,16 @@ impl App {
             .get(self.note_list_selected)
             .copied()
             .map(|index| self.note_list_pending_delete == Some(index))
+            .unwrap_or(false)
+    }
+
+    pub fn room_list_selected(&self) -> usize {
+        self.room_list_selected
+    }
+
+    pub fn room_list_delete_is_pending(&self) -> bool {
+        self.room_list_pending_delete
+            .map(|index| index == self.room_list_selected)
             .unwrap_or(false)
     }
 
@@ -1114,6 +1243,37 @@ impl App {
         format!("/{}", command.name)
     }
 
+    pub(super) fn command_match_rank(command: &CommandSpec, query: &str) -> Option<usize> {
+        if query.is_empty() {
+            return Some(0);
+        }
+
+        if command.name == query {
+            return Some(0);
+        }
+
+        if command.name.starts_with(query) {
+            return Some(1);
+        }
+
+        if query
+            .strip_prefix(command.name)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+        {
+            return Some(2);
+        }
+
+        if command.name.contains(query) {
+            return Some(3);
+        }
+
+        command
+            .description
+            .to_lowercase()
+            .contains(query)
+            .then_some(4)
+    }
+
     pub fn selected_suggestion(&self) -> usize {
         self.selected_suggestion
     }
@@ -1126,25 +1286,10 @@ impl App {
         let query = if let Some(ref filter) = self.suggestion_filter {
             filter.clone()
         } else {
-            self.normalized_prompt().to_lowercase()
+            self.command_query()
         };
 
-        // Get filtered or full list
-        let all: Vec<_> = if !query.is_empty() {
-            COMMANDS
-                .iter()
-                .filter(|cmd| {
-                    self.is_command_visible(cmd)
-                        && (cmd.name.contains(&query)
-                            || cmd.description.to_lowercase().contains(&query))
-                })
-                .collect()
-        } else {
-            COMMANDS
-                .iter()
-                .filter(|cmd| self.is_command_visible(cmd))
-                .collect()
-        };
+        let all = self.matching_commands(&query);
 
         let total = all.len();
 
@@ -1193,30 +1338,92 @@ impl App {
             return Vec::new();
         }
 
-        let query = self.normalized_prompt().to_lowercase();
+        let query = self.command_query();
 
-        // Show all commands when query is empty
+        let mut commands = self.matching_commands(&query);
+        commands.truncate(limit);
+        commands
+    }
+
+    pub(super) fn matching_commands(&self, query: &str) -> Vec<&'static CommandSpec> {
         if query.is_empty() {
-            let mut all: Vec<_> = COMMANDS
+            return COMMANDS
                 .iter()
-                .filter(|cmd| self.is_command_visible(cmd))
+                .filter(|cmd| self.is_command_visible(cmd) && Self::is_command_family_entry(cmd))
                 .collect();
-            all.truncate(limit);
-            return all;
         }
 
-        // Filter commands by query
-        let mut matches: Vec<&'static CommandSpec> = COMMANDS
+        if let Some(base) = query.strip_suffix(' ') {
+            if !base.is_empty() && Self::command_has_subcommands(base) {
+                let prefix = format!("{} ", base);
+                return COMMANDS
+                    .iter()
+                    .filter(|cmd| self.is_command_visible(cmd) && cmd.name.starts_with(&prefix))
+                    .collect();
+            }
+        }
+
+        let mut matches: Vec<(usize, &'static CommandSpec)> = COMMANDS
             .iter()
-            .filter(|command| {
+            .filter_map(|command| {
                 self.is_command_visible(command)
-                    && (command.name.contains(&query)
-                        || command.description.to_lowercase().contains(&query))
+                    .then(|| Self::command_match_rank(command, &query).map(|rank| (rank, command)))
+                    .flatten()
             })
             .collect();
 
-        matches.truncate(limit);
-        matches
+        matches.sort_by_key(|(rank, command)| {
+            (*rank, std::cmp::Reverse(command.name.len()))
+        });
+        matches.into_iter().map(|(_, command)| command).collect()
+    }
+
+    fn is_command_family_entry(command: &CommandSpec) -> bool {
+        !command.name.contains(char::is_whitespace)
+    }
+
+    pub(super) fn command_has_subcommands(command: &str) -> bool {
+        let prefix = format!("{} ", command);
+        COMMANDS.iter().any(|candidate| candidate.name.starts_with(&prefix))
+    }
+
+    pub fn command_subcommand_summary(command: &CommandSpec) -> Option<String> {
+        let prefix = format!("{} ", command.name);
+        let subcommands = COMMANDS
+            .iter()
+            .filter_map(|candidate| candidate.name.strip_prefix(&prefix))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .fold(Vec::<&str>::new(), |mut names, name| {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+                names
+            });
+
+        if subcommands.is_empty() {
+            None
+        } else {
+            Some(format!("Enter to expand: {}", subcommands.join(" · ")))
+        }
+    }
+
+    pub(super) fn command_query(&self) -> String {
+        let raw = self.prompt.trim_start();
+        if !raw.starts_with('/') {
+            return String::new();
+        }
+
+        let without_slash = raw.trim_start_matches('/');
+        let normalized = Self::normalize_command_input(without_slash.trim());
+        if normalized.is_empty() {
+            return normalized;
+        }
+
+        if without_slash.ends_with(char::is_whitespace) {
+            format!("{} ", normalized.to_lowercase())
+        } else {
+            normalized.to_lowercase()
+        }
     }
 
     pub(super) fn is_command_visible(&self, cmd: &CommandSpec) -> bool {
@@ -1234,15 +1441,8 @@ impl App {
             return 0;
         }
 
-        let query = self.normalized_prompt().to_lowercase();
+        let query = self.command_query();
 
-        COMMANDS
-            .iter()
-            .filter(|command| {
-                query.is_empty()
-                    || command.name.contains(&query)
-                    || command.description.to_lowercase().contains(&query)
-            })
-            .count()
+        self.matching_commands(&query).len()
     }
 }

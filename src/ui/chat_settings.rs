@@ -24,6 +24,8 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let max_width = if show_activity { 112 } else { 88 };
     let center_width = area.width.saturating_sub(8).min(max_width);
     let left_padding = area.width.saturating_sub(center_width) / 2;
+    let room_accent = app.room_accent();
+    let room_accent_soft = app.room_accent_soft();
 
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -69,9 +71,11 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let hints_area = top_h_chunks.split(v_chunks[5])[1];
 
     let meta_style = if app.is_thinking() {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(room_accent)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(MUTED)
+        Style::default().fg(room_accent_soft)
     };
 
     let mode_label = if app.is_agent_mode_enabled() {
@@ -105,8 +109,9 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         )
     } else {
         format!(
-            "Aleph {} · {} {}",
+            "Aleph {} · {} · {} {}",
             mode_label,
+            app.active_room_label(),
             app.ai_provider_label(),
             provider_status
         )
@@ -121,7 +126,9 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
             format!("{} {}", app.thinking_frame(), app.activity_headline()),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(room_accent)
+                .add_modifier(Modifier::BOLD),
         )]));
     }
 
@@ -146,7 +153,9 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let input_line = Paragraph::new(Line::from(vec![
         Span::styled(
             "> ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(room_accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(before_cursor, Style::default().fg(TEXT)),
         Span::styled(CURSOR, Style::default().fg(MUTED)),
@@ -155,15 +164,15 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(input_line, input_area);
 
     let hints_spans = vec![
-        Span::styled("Enter", Style::default().fg(ACCENT)),
+        Span::styled("Enter", Style::default().fg(room_accent)),
         Span::raw(" send · "),
-        Span::styled("PgUp/PgDn", Style::default().fg(ACCENT_SOFT)),
+        Span::styled("PgUp/PgDn", Style::default().fg(room_accent_soft)),
         Span::raw(" scroll · "),
-        Span::styled("Ctrl+G", Style::default().fg(ACCENT_SOFT)),
+        Span::styled("Ctrl+G", Style::default().fg(room_accent_soft)),
         Span::raw(" mode · "),
-        Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
+        Span::styled("Esc", Style::default().fg(room_accent_soft)),
         Span::raw(" exit · "),
-        Span::styled("Ctrl+C", Style::default().fg(ACCENT)),
+        Span::styled("Ctrl+C", Style::default().fg(room_accent)),
         Span::raw(" quit"),
     ];
     let bottom_hints = Paragraph::new(Line::from(hints_spans))
@@ -276,7 +285,9 @@ pub(super) fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
             app.panel_title(),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(app.room_accent())
+                .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(BORDER))
@@ -288,7 +299,7 @@ pub(super) fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
     let sections = settings_panel_sections(inner);
 
     let header = Paragraph::new(vec![Line::from(vec![Span::styled(
-        "Manage your connections, model provider, and preferences",
+        "Manage your connections, room scope, and preferences",
         Style::default().fg(MUTED),
     )])]);
     frame.render_widget(header, sections[0]);
@@ -315,6 +326,10 @@ pub(super) fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
         (
             "Model Provider".to_string(),
             format!("{} (Enter to cycle)", model_provider_label),
+        ),
+        (
+            "Room Scope".to_string(),
+            format!("{} ({})", app.active_room_label(), app.room_scope_summary()),
         ),
         (
             "Mode".to_string(),

@@ -10,8 +10,48 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Show session, note, and runtime health",
     },
     CommandSpec {
-        name: "sync",
-        description: "Pull notes from Strix into the current Aleph session",
+        name: "search",
+        description: "Search notes and memories",
+    },
+    CommandSpec {
+        name: "note",
+        description: "List notes; type /note to see note actions",
+    },
+    CommandSpec {
+        name: "memory",
+        description: "List memories; type /memory to see memory actions",
+    },
+    CommandSpec {
+        name: "room",
+        description: "List rooms or switch scope (usage: /room <name> | /room all)",
+    },
+    CommandSpec {
+        name: "rooms",
+        description: "Alias for /room; list rooms or switch by name",
+    },
+    CommandSpec {
+        name: "recall",
+        description: "Show recent note activity",
+    },
+    CommandSpec {
+        name: "path",
+        description: "List saved thinking paths",
+    },
+    CommandSpec {
+        name: "settings",
+        description: "Show useful connection, sync, editor, and AI settings",
+    },
+    CommandSpec {
+        name: "folder",
+        description: "List folders; type /folder to see folder actions",
+    },
+    CommandSpec {
+        name: "obsidian",
+        description: "Show Obsidian pairing status and available vault actions",
+    },
+    CommandSpec {
+        name: "logout",
+        description: "Sign out",
     },
     CommandSpec {
         name: "doctor",
@@ -22,8 +62,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Inspect local runtime configuration",
     },
     CommandSpec {
-        name: "settings",
-        description: "Show useful connection, sync, editor, and AI settings",
+        name: "sync",
+        description: "Pull notes from Strix into the current Aleph session",
+    },
+    CommandSpec {
+        name: "ask",
+        description: "Ask the selected AI provider a question",
     },
     CommandSpec {
         name: "mode agent",
@@ -34,36 +78,28 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Use plain chat responses without taking note actions",
     },
     CommandSpec {
-        name: "logout",
-        description: "Sign out",
+        name: "serve mcp",
+        description: "Start the MCP server",
     },
     CommandSpec {
-        name: "obsidian pair",
-        description: "Pair a local Obsidian vault (usage: /obsidian pair | /obsidian pair <path|number|name>)",
+        name: "room list",
+        description: "Interactively list rooms; Enter switches and Delete removes",
     },
     CommandSpec {
-        name: "obsidian vaults",
-        description: "List detected Obsidian vaults",
+        name: "room show",
+        description: "Inspect a room's project paths, tags, filters, and recent sessions",
     },
     CommandSpec {
-        name: "obsidian sync",
-        description: "Import Markdown notes from the paired Obsidian vault",
+        name: "room use",
+        description: "Switch to a room by name",
     },
     CommandSpec {
-        name: "obsidian status",
-        description: "Show the paired Obsidian vault and discovery config",
+        name: "room next",
+        description: "Cycle to the next room",
     },
     CommandSpec {
-        name: "obsidian open",
-        description: "Open the paired vault or selected note in Obsidian",
-    },
-    CommandSpec {
-        name: "search",
-        description: "Search notes and memories",
-    },
-    CommandSpec {
-        name: "recall",
-        description: "Show recent note activity",
+        name: "room prev",
+        description: "Cycle to the previous room",
     },
     CommandSpec {
         name: "path save",
@@ -80,10 +116,6 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "path return",
         description: "Return Aleph to a saved path",
-    },
-    CommandSpec {
-        name: "ask",
-        description: "Ask the selected AI provider a question",
     },
     CommandSpec {
         name: "agent edit",
@@ -146,8 +178,24 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Search stored memories",
     },
     CommandSpec {
-        name: "serve mcp",
-        description: "Start the MCP server",
+        name: "obsidian pair",
+        description: "Pair a local Obsidian vault (usage: /obsidian pair | /obsidian pair <path|number|name>)",
+    },
+    CommandSpec {
+        name: "obsidian vaults",
+        description: "List detected Obsidian vaults",
+    },
+    CommandSpec {
+        name: "obsidian sync",
+        description: "Import Markdown notes from the paired Obsidian vault",
+    },
+    CommandSpec {
+        name: "obsidian status",
+        description: "Show the paired Obsidian vault and discovery config",
+    },
+    CommandSpec {
+        name: "obsidian open",
+        description: "Open the paired vault or selected note in Obsidian",
     },
 ];
 

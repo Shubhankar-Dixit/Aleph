@@ -786,6 +786,7 @@ impl App {
         let _ = std::fs::remove_file(Self::note_save_target_path());
         let _ = std::fs::remove_file(Self::agent_mode_path());
         let _ = std::fs::remove_file(Self::editor_images_path());
+        let _ = std::fs::remove_file(Self::room_state_path());
 
         // Reset all settings to defaults
         self.ai_provider = AiProvider::OpenRouter;
@@ -810,6 +811,9 @@ impl App {
         self.chat_cache_stable_len = 0;
         self.notes = Self::default_local_notes();
         self.folders.clear();
+        let (rooms, active_room_index) = Self::default_room_state();
+        self.rooms = rooms;
+        self.active_room_index = active_room_index;
         self.current_folder_id = None;
         self.expanded_folders.clear();
         self.selected_note = 0;

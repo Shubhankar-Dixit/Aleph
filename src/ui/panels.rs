@@ -3,23 +3,30 @@ use super::*;
 pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
     let has_status = !app.panel_lines().is_empty();
     let panel_title = app.panel_title();
+    let accent = app.room_accent();
+    let accent_soft = app.room_accent_soft();
+    let panel_border = if app.is_global_scope() {
+        BORDER
+    } else {
+        accent_soft
+    };
 
     // If no status to show and prompt is empty, show minimalist ghost text
     if !has_status && app.is_prompt_empty() {
         // Determine title based on auth state
         let title_text = if app.is_openrouter_connected() || app.is_strix_connected() {
-            "Aleph"
+            format!("Aleph · {}", app.active_room_label())
         } else {
-            "Aleph"
+            format!("Aleph · {}", app.active_room_label())
         };
 
         let block = Block::default()
             .title(Span::styled(
                 title_text,
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(BORDER));
+            .border_style(Style::default().fg(panel_border));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -31,7 +38,7 @@ pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled("  Type ", Style::default().fg(MUTED)),
                 Span::styled(
                     "/",
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     " to see commands, or just ask a question",
@@ -42,8 +49,8 @@ pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
             ghost_lines.push(Line::from(vec![
                 Span::styled("  Try: ", Style::default().fg(MUTED)),
                 Span::styled(
-                    "/ask  /note list  /memory search",
-                    Style::default().fg(ACCENT_SOFT),
+                    "/ask  /note list  /room list",
+                    Style::default().fg(accent_soft),
                 ),
             ]));
         } else {
@@ -51,18 +58,18 @@ pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled("  Type ", Style::default().fg(MUTED)),
                 Span::styled(
                     "/login",
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" to get started, or ", Style::default().fg(MUTED)),
-                Span::styled("/", Style::default().fg(ACCENT)),
+                Span::styled("/", Style::default().fg(accent)),
                 Span::styled(" for commands", Style::default().fg(MUTED)),
             ]));
             ghost_lines.push(Line::from(""));
             ghost_lines.push(Line::from(vec![
                 Span::styled("  Available: ", Style::default().fg(MUTED)),
                 Span::styled(
-                    "/note list  /obsidian pair  /status",
-                    Style::default().fg(ACCENT_SOFT),
+                    "/note list  /room list  /obsidian pair",
+                    Style::default().fg(accent_soft),
                 ),
             ]));
         }
@@ -72,30 +79,15 @@ pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    if has_status && panel_title == "Strix sign-in" {
-        render_strix_sign_in_panel(frame, app, area);
-        return;
-    }
-
-    if app.is_login_picker() {
-        render_login_picker_panel(frame, app, area);
-        return;
-    }
-
-    if has_status && panel_title == "Obsidian pairing" {
-        render_obsidian_pairing_panel(frame, app, area);
-        return;
-    }
-
     // If user is typing a command, show filtered commands
     if app.is_typing_command() {
         let block = Block::default()
             .title(Span::styled(
-                "Commands",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                format!("Commands · {}", app.active_room_label()),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(BORDER))
+            .border_style(Style::default().fg(panel_border))
             .style(Style::default().bg(PANEL));
         let inner = block.inner(area);
         frame.render_widget(Clear, area);
@@ -131,10 +123,12 @@ pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
                     } else {
                         Style::default().fg(Color::Rgb(122, 122, 128))
                     };
+                    let description = App::command_subcommand_summary(command)
+                        .unwrap_or_else(|| (*command).description.to_string());
 
                     Row::new(vec![
                         Cell::from(Span::styled(App::command_label(command), row_style)),
-                        Cell::from(Span::styled((*command).description, row_style)),
+                        Cell::from(Span::styled(description, row_style)),
                     ])
                 })
                 .chain((remaining > 0).then(|| {
@@ -153,14 +147,30 @@ pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
                 .style(Style::default().fg(Color::Rgb(122, 122, 128)));
             frame.render_widget(suggestions_table, inner);
         }
+        return;
+    }
+
+    if has_status && panel_title == "Strix sign-in" {
+        render_strix_sign_in_panel(frame, app, area);
+        return;
+    }
+
+    if app.is_login_picker() {
+        render_login_picker_panel(frame, app, area);
+        return;
+    }
+
+    if has_status && panel_title == "Obsidian pairing" {
+        render_obsidian_pairing_panel(frame, app, area);
+        return;
     } else if has_status {
         let block = Block::default()
             .title(Span::styled(
                 app.panel_title(),
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(BORDER));
+            .border_style(Style::default().fg(panel_border));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -176,11 +186,11 @@ pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
         // Empty state when typing non-command text
         let block = Block::default()
             .title(Span::styled(
-                "Aleph",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                format!("Aleph · {}", app.active_room_label()),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(BORDER));
+            .border_style(Style::default().fg(panel_border));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -757,6 +767,77 @@ pub(super) fn render_note_list_panel(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled("Enter", Style::default().fg(ACCENT)),
             Span::raw(" open · "),
+            Span::styled("Space", Style::default().fg(ACCENT_SOFT)),
+            Span::raw(" fold · "),
+            Span::styled("Delete", Style::default().fg(ACCENT_SOFT)),
+            Span::raw(" delete · "),
+            Span::styled("Esc", Style::default().fg(MUTED)),
+            Span::raw(" close"),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(footer)
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(MUTED)),
+        sections[1],
+    );
+}
+
+pub(super) fn render_room_list_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            app.panel_title(),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    let selected = app
+        .room_list_selected()
+        .min(app.panel_lines().len().saturating_sub(1));
+    let rows = app
+        .panel_lines()
+        .iter()
+        .map(|line| {
+            Row::new(vec![Cell::from(Span::styled(
+                line,
+                Style::default().fg(MUTED),
+            ))])
+        })
+        .collect::<Vec<_>>();
+
+    let table = Table::new(rows, [Constraint::Min(0)])
+        .row_highlight_style(Style::default().fg(TEXT).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▶ ")
+        .column_spacing(0);
+
+    let mut table_state = ratatui::widgets::TableState::default();
+    if !app.panel_lines().is_empty() {
+        table_state.select(Some(selected));
+    }
+    frame.render_stateful_widget(table, sections[0], &mut table_state);
+
+    let footer = if app.room_list_delete_is_pending() {
+        Line::from(vec![
+            Span::styled("Delete", Style::default().fg(Color::Rgb(209, 118, 128))),
+            Span::raw(" confirm · "),
+            Span::styled("Enter", Style::default().fg(Color::Rgb(209, 118, 128))),
+            Span::raw(" confirm · "),
+            Span::styled("d", Style::default().fg(Color::Rgb(209, 118, 128))),
+            Span::raw(" confirm · "),
+            Span::styled("Esc", Style::default().fg(ACCENT_SOFT)),
+            Span::raw(" cancel"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(ACCENT)),
+            Span::raw(" enter · "),
             Span::styled("Delete", Style::default().fg(ACCENT_SOFT)),
             Span::raw(" delete · "),
             Span::styled("Esc", Style::default().fg(MUTED)),

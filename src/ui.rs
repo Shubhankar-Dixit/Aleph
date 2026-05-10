@@ -13,7 +13,7 @@ mod panels;
 
 use self::panels::{
     render_commands_panel, render_note_editor_panel, render_note_list_panel,
-    render_obsidian_vault_picker_panel, render_path_list_panel,
+    render_obsidian_vault_picker_panel, render_path_list_panel, render_room_list_panel,
 };
 use crate::app::{AiProvider, App, PanelMode};
 pub(crate) use chat_settings::settings_items_area;
@@ -144,8 +144,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
     frame.render_widget(title, title_block[0]);
 
     let subtitle = Paragraph::new(Line::from(vec![Span::styled(
-        "terminal and agent runtime for Strix",
-        Style::default().fg(MUTED),
+        format!(
+            "scope {} · {}",
+            app.active_room_label(),
+            app.room_scope_summary()
+        ),
+        Style::default().fg(app.room_accent()),
     )]));
     frame.render_widget(subtitle, title_block[1]);
 
@@ -158,6 +162,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Span::raw(" run selected command, "),
         Span::styled("/note edit", Style::default().fg(MUTED)),
         Span::raw(" opens the editor, "),
+        Span::styled("/room", Style::default().fg(app.room_accent())),
+        Span::raw(" switches scope, "),
         Span::styled("Ctrl+C", Style::default().fg(TEXT)),
         Span::raw(" quit"),
     ]))
@@ -234,6 +240,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         PanelMode::Commands | PanelMode::LoginPicker => render_commands_panel(frame, app, root[4]),
         PanelMode::VaultPicker => render_obsidian_vault_picker_panel(frame, app, root[4]),
         PanelMode::NoteList => render_note_list_panel(frame, app, root[4]),
+        PanelMode::RoomList => render_room_list_panel(frame, app, root[4]),
         PanelMode::PathList => render_path_list_panel(frame, app, root[4]),
         PanelMode::NoteEditor => render_note_editor_panel(frame, app, root[4]),
         PanelMode::Settings => render_settings_panel(frame, app, root[4]),

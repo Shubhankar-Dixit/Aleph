@@ -59,6 +59,26 @@ fn seed_test_notes(app: &mut App) {
     app.selected_note = 0;
 }
 
+fn seed_test_rooms(app: &mut App) {
+    app.rooms = vec![
+        Room {
+            name: String::from("aleph-dev"),
+            project_paths: vec![String::from("/workspace/aleph")],
+            tags: vec![String::from("aleph")],
+            filters: vec![String::from("note")],
+            accent: [136, 129, 176],
+        },
+        Room {
+            name: String::from("strix-core"),
+            project_paths: vec![String::from("/workspace/strix")],
+            tags: vec![String::from("strix")],
+            filters: vec![String::from("gateway")],
+            accent: [106, 163, 178],
+        },
+    ];
+    app.active_room_index = 0;
+}
+
 #[test]
 fn repeated_character_events_do_not_duplicate_input() {
     let mut app = App::new();
@@ -79,23 +99,94 @@ fn unpaired_app_starts_with_single_onboarding_note() {
     assert_eq!(app.notes[0].folder_id, None);
     assert!(app.notes[0].content.contains("/settings"));
     assert!(app.notes[0].content.contains("/obsidian pair"));
+    assert_eq!(app.active_room_label(), "All");
+    assert_eq!(app.room_scope_summary(), "all notes · no room filter");
 }
 
 #[test]
-fn unpaired_note_list_shows_onboarding_note_directly() {
+fn unpaired_note_list_uses_tree_panel_for_local_notes() {
     let mut app = App::new();
 
     app.open_note_list_panel();
 
-    assert_eq!(app.panel_lines.len(), 1);
-    assert!(app.panel_lines[0].contains("Welcome"));
-    assert!(!app.panel_lines[0].contains("Projects"));
-    assert!(!app.panel_lines[0].contains("Ideas"));
+    assert_eq!(app.panel_lines.len(), 2);
+    assert!(app.panel_title.contains("Space expand/collapse"));
+    assert!(app.panel_lines[0].contains("Uncategorized"));
+    assert!(app.panel_lines[1].contains("Welcome"));
+    assert_eq!(app.note_list_indices()[0], usize::MAX);
+    assert_eq!(app.note_list_indices()[1], 0);
+}
+
+#[test]
+fn room_list_command_opens_interactive_panel() {
+    let mut app = App::new();
+    seed_test_rooms(&mut app);
+
+    for character in "/room list".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+
+    assert!(app.is_room_list());
+    assert_eq!(app.panel_lines.len(), 2);
+}
+
+#[test]
+fn room_list_enter_switches_selected_room() {
+    let mut app = App::new();
+    seed_test_rooms(&mut app);
+
+    app.open_room_list_panel();
+    app.handle_room_list_key(press(KeyCode::Down));
+    app.handle_room_list_key(press(KeyCode::Enter));
+
+    assert_eq!(app.active_room_label(), "strix-core");
+    assert!(app.is_room_list());
+    assert_eq!(app.room_list_selected(), 1);
+}
+
+#[test]
+fn room_list_delete_requires_second_press() {
+    let mut app = App::new();
+    seed_test_rooms(&mut app);
+
+    app.open_room_list_panel();
+    app.handle_room_list_key(press(KeyCode::Delete));
+
+    assert_eq!(app.rooms.len(), 2);
+    assert!(app.room_list_delete_is_pending());
+
+    app.handle_room_list_key(press(KeyCode::Delete));
+
+    assert_eq!(app.rooms.len(), 1);
+    assert_eq!(app.active_room_label(), "strix-core");
+    assert!(!app.room_list_delete_is_pending());
+}
+
+#[test]
+fn room_list_cannot_delete_all_scope() {
+    let mut app = App::new();
+    app.open_room_list_panel();
+
+    app.handle_room_list_key(press(KeyCode::Delete));
+
+    assert_eq!(app.active_room_label(), "All");
+    assert!(app.rooms.iter().any(|room| room.name == "All"));
+    assert_eq!(
+        app.last_action(),
+        "All is the default scope and cannot be deleted."
+    );
 }
 
 #[test]
 fn clear_notes_is_hidden_from_command_list() {
     assert!(COMMANDS.iter().all(|command| command.name != "clear-notes"));
+}
+
+#[test]
+fn rooms_is_listed_as_its_own_command() {
+    assert!(COMMANDS.iter().any(|command| command.name == "rooms"));
+    assert!(COMMANDS.iter().any(|command| command.name == "room"));
 }
 
 #[test]
@@ -176,6 +267,113 @@ fn up_and_down_cycle_suggestions() {
 }
 
 #[test]
+fn slash_only_command_list_includes_rooms() {
+    let mut app = App::new();
+
+    app.handle_key(press(KeyCode::Char('/')));
+
+    let suggestions = app.visible_commands(16);
+    assert!(suggestions.iter().any(|command| command.name == "rooms"));
+    assert!(suggestions.iter().any(|command| command.name == "room"));
+}
+
+#[test]
+fn slash_command_window_shows_room_on_first_page() {
+    let mut app = App::new();
+
+    app.handle_key(press(KeyCode::Char('/')));
+
+    let (suggestions, offset) = app.visible_commands_window(8);
+    assert_eq!(offset, 0);
+    assert!(suggestions.iter().any(|command| command.name == "room"));
+}
+
+#[test]
+fn typing_a_fresh_slash_resets_command_selection() {
+    let mut app = App::new();
+
+    app.selected_suggestion = 12;
+    assert!(app.selected_suggestion() > 0);
+
+    app.handle_key(press(KeyCode::Char('/')));
+
+    assert_eq!(app.selected_suggestion(), 0);
+    let suggestions = app.visible_commands(16);
+    assert_eq!(suggestions[0].name, "login");
+    assert!(suggestions.iter().any(|command| command.name == "rooms"));
+}
+
+#[test]
+fn autocomplete_shows_rooms_command_separately() {
+    let mut app = App::new();
+
+    for character in "/rooms".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+
+    let suggestions = app.visible_commands(16);
+    assert!(!suggestions.is_empty());
+    assert_eq!(suggestions[0].name, "rooms");
+}
+
+#[test]
+fn typing_room_prefers_room_over_rooms_alias() {
+    let mut app = App::new();
+
+    for character in "/room".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+
+    let suggestions = app.visible_commands(16);
+    assert!(!suggestions.is_empty());
+    assert_eq!(suggestions[0].name, "room");
+}
+
+#[test]
+fn typing_room_target_keeps_room_command_visible() {
+    let mut app = App::new();
+
+    for character in "/room strix-core".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+
+    let suggestions = app.visible_commands(16);
+    assert!(!suggestions.is_empty());
+    assert_eq!(suggestions[0].name, "room");
+}
+
+#[test]
+fn enter_on_command_family_drills_into_subcommands() {
+    let mut app = App::new();
+
+    for character in "/note".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(app.prompt(), "/note ");
+    let suggestions = app.visible_commands(16);
+    assert!(!suggestions.is_empty());
+    assert!(suggestions.iter().all(|command| command.name.starts_with("note ")));
+    assert!(suggestions.iter().any(|command| command.name == "note list"));
+    assert!(suggestions.iter().any(|command| command.name == "note create"));
+}
+
+#[test]
+fn typing_command_family_space_shows_subcommands_only() {
+    let mut app = App::new();
+
+    for character in "/note ".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+
+    let suggestions = app.visible_commands(16);
+    assert!(!suggestions.is_empty());
+    assert!(suggestions.iter().all(|command| command.name.starts_with("note ")));
+    assert!(!suggestions.iter().any(|command| command.name == "note"));
+}
+
+#[test]
 fn enter_executes_typed_command() {
     let mut app = App::new();
 
@@ -186,6 +384,34 @@ fn enter_executes_typed_command() {
 
     assert_eq!(app.last_action(), "Refreshed provider status.");
     assert_eq!(app.panel_title(), "Status");
+}
+
+#[test]
+fn enter_executes_room_name_as_switch() {
+    let mut app = App::new();
+    seed_test_rooms(&mut app);
+
+    for character in "/room strix-core".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(app.active_room_label(), "strix-core");
+    assert_eq!(app.last_action(), "Switched to room strix-core.");
+    assert_eq!(app.panel_title(), "Room: strix-core");
+}
+
+#[test]
+fn cli_room_name_switches_room_directly() {
+    let mut app = App::new();
+    seed_test_rooms(&mut app);
+
+    let lines = app
+        .run_cli_command(&[String::from("room"), String::from("strix-core")])
+        .unwrap();
+
+    assert_eq!(app.active_room_label(), "strix-core");
+    assert!(lines.iter().any(|line| line.contains("Room: strix-core")));
 }
 
 #[test]
@@ -281,8 +507,6 @@ fn settings_round_trip_to_config() {
     std::env::set_var("ALEPH_CONFIG_DIR", &config_dir);
 
     let mut app = App::new();
-    app.note_save_target = NoteSaveTarget::Obsidian;
-    app.store_note_save_target().unwrap();
     app.ai_provider = AiProvider::Strix;
     app.store_ai_provider().unwrap();
     app.agent_mode_enabled = false;
@@ -290,13 +514,129 @@ fn settings_round_trip_to_config() {
     app.editor_images_enabled = true;
     app.store_editor_images_enabled().unwrap();
 
-    assert_eq!(App::load_note_save_target(), Some(NoteSaveTarget::Obsidian));
     assert_eq!(App::load_ai_provider(), Some(AiProvider::Strix));
     assert_eq!(App::load_agent_mode_enabled(), Some(false));
     assert_eq!(App::load_editor_images_enabled(), Some(true));
 
     std::env::remove_var("ALEPH_CONFIG_DIR");
     let _ = fs::remove_dir_all(config_dir);
+}
+
+#[test]
+fn rooms_round_trip_to_config() {
+    let _guard = env_lock();
+    let config_dir = std::env::temp_dir().join(format!("aleph-rooms-test-{}", App::now_millis()));
+    std::env::set_var("ALEPH_CONFIG_DIR", &config_dir);
+
+    let mut app = App::new();
+    seed_test_rooms(&mut app);
+    app.active_room_index = 1;
+    app.save_room_state().unwrap();
+
+    let (rooms, active_room_index) = App::load_room_state().unwrap();
+    assert_eq!(rooms.len(), 3);
+    assert_eq!(rooms[0].name, "All");
+    assert_eq!(rooms[2].name, "strix-core");
+    assert_eq!(active_room_index, 2);
+
+    std::env::remove_var("ALEPH_CONFIG_DIR");
+    let _ = fs::remove_dir_all(config_dir);
+}
+
+#[test]
+fn room_scope_filters_notes_and_memories() {
+    let mut app = App::new();
+    seed_test_rooms(&mut app);
+    app.notes = vec![
+        test_note(1, None, "Aleph overview", "terminal notes"),
+        test_note(2, None, "Strix gateway", "gateway notes"),
+    ];
+    app.memories = vec![
+        String::from("Aleph workspace memory"),
+        String::from("Strix gateway memory"),
+    ];
+
+    app.switch_room_by_name("strix-core").unwrap();
+
+    let search_results = app.search_notes("gateway");
+    assert_eq!(search_results.len(), 1);
+    assert!(search_results[0].contains("Strix gateway"));
+
+    let memory_results = app
+        .memories
+        .iter()
+        .filter(|memory| app.room_matches_memory(memory))
+        .collect::<Vec<_>>();
+    assert_eq!(memory_results.len(), 1);
+    assert!(memory_results[0].contains("Strix gateway"));
+}
+
+#[test]
+fn all_scope_does_not_filter_notes_or_memories() {
+    let mut app = App::new();
+    seed_test_rooms(&mut app);
+    app.rooms.insert(0, App::global_room());
+    app.active_room_index = 0;
+    app.notes = vec![
+        test_note(1, None, "Aleph overview", "terminal notes"),
+        test_note(2, None, "Strix gateway", "gateway notes"),
+    ];
+    app.memories = vec![
+        String::from("Aleph workspace memory"),
+        String::from("Strix gateway memory"),
+    ];
+
+    assert_eq!(app.search_notes("").len(), 2);
+    assert_eq!(
+        app.memories
+            .iter()
+            .filter(|memory| app.room_matches_memory(memory))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn room_all_returns_to_unfiltered_scope() {
+    let mut app = App::new();
+    seed_test_rooms(&mut app);
+    app.rooms.insert(0, App::global_room());
+    app.active_room_index = 2;
+
+    for character in "/room all".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(app.active_room_label(), "All");
+    assert_eq!(app.room_scope_summary(), "all notes · no room filter");
+}
+
+#[test]
+fn switching_rooms_reconciles_hidden_note_selection() {
+    let mut app = App::new();
+    seed_test_rooms(&mut app);
+    app.notes = vec![
+        test_note(1, None, "Aleph overview", "terminal notes"),
+        test_note(2, None, "Strix gateway", "gateway notes"),
+    ];
+    app.selected_note = 0;
+
+    app.switch_room_by_name("strix-core").unwrap();
+
+    assert_eq!(app.selected_note, 1);
+    assert!(app.resolve_note_index("Aleph overview").is_none());
+    assert!(app.resolve_note_index("Strix gateway").is_some());
+}
+
+#[test]
+fn empty_room_set_uses_safe_fallback_room() {
+    let mut app = App::new();
+    app.rooms.clear();
+    app.active_room_index = 99;
+
+    assert!(!app.active_room_label().is_empty());
+    assert!(!app.room_scope_summary().is_empty());
 }
 
 #[test]
@@ -329,7 +669,7 @@ fn settings_obsidian_row_opens_pairing_when_unpaired() {
     app.obsidian_vault_path = None;
 
     app.open_settings_panel();
-    for _ in 0..4 {
+    for _ in 0..5 {
         app.handle_settings_key(press(KeyCode::Down));
     }
     app.handle_settings_key(press(KeyCode::Enter));
@@ -347,7 +687,7 @@ fn clicking_settings_obsidian_row_opens_pairing_when_unpaired() {
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 4,
-            row: 24,
+            row: 25,
             modifiers: KeyModifiers::NONE,
         },
         40,
@@ -360,11 +700,11 @@ fn clicking_settings_obsidian_row_opens_pairing_when_unpaired() {
 #[test]
 fn settings_mouse_hit_test_tracks_rendered_panel_layout() {
     assert_eq!(App::settings_index_for_mouse_row(40, 80, 20), Some(0));
-    assert_eq!(App::settings_index_for_mouse_row(40, 80, 24), Some(4));
+    assert_eq!(App::settings_index_for_mouse_row(40, 80, 25), Some(5));
     assert_eq!(App::settings_index_for_mouse_row(40, 80, 19), None);
 
     assert_eq!(App::settings_index_for_mouse_row(22, 80, 20), None);
-    assert_eq!(App::settings_index_for_mouse_row(22, 80, 24), None);
+    assert_eq!(App::settings_index_for_mouse_row(22, 80, 25), None);
 }
 
 #[test]

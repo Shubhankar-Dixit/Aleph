@@ -168,6 +168,10 @@ impl App {
 
         let lower = trimmed.to_lowercase();
         self.notes.iter().enumerate().find_map(|(index, note)| {
+            if !self.room_matches_note(note) {
+                return None;
+            }
+
             let title = note.title.to_lowercase();
             let remote_matches = note
                 .remote_id
@@ -184,16 +188,16 @@ impl App {
     }
 
     pub(super) fn note_index_by_id(&self, id: usize) -> Option<usize> {
-        self.notes
-            .iter()
-            .enumerate()
-            .find_map(|(index, note)| (note.id == id).then_some(index))
+        self.notes.iter().enumerate().find_map(|(index, note)| {
+            (note.id == id && self.room_matches_note(note)).then_some(index)
+        })
     }
 
     pub(super) fn search_notes(&self, query: &str) -> Vec<String> {
         let query = query.to_lowercase();
         self.notes
             .iter()
+            .filter(|note| self.room_matches_note(note))
             .filter(|note| {
                 query.is_empty()
                     || note.title.to_lowercase().contains(&query)

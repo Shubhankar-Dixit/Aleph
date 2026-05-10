@@ -24,6 +24,10 @@ impl App {
             self.handle_note_list_key(key_event);
             return;
         }
+        if self.is_room_list() {
+            self.handle_room_list_key(key_event);
+            return;
+        }
         if self.is_path_list() {
             self.handle_path_list_key(key_event);
             return;
@@ -144,7 +148,7 @@ impl App {
         terminal_width: u16,
         row: u16,
     ) -> Option<usize> {
-        const SETTINGS_ITEM_COUNT: usize = 8;
+        const SETTINGS_ITEM_COUNT: usize = 9;
 
         let terminal_area = Rect::new(0, 0, terminal_width, terminal_height);
         let panel_area = crate::ui::app_root_layout(terminal_area)[4];
@@ -430,6 +434,7 @@ impl App {
         self.cursor += character.len_utf8();
         self.history_index = None;
         self.suggestion_filter = None;
+        self.selected_suggestion = 0;
         self.sync_selection();
     }
 
@@ -447,6 +452,7 @@ impl App {
         self.cursor -= previous;
         self.history_index = None;
         self.suggestion_filter = None;
+        self.selected_suggestion = 0;
         self.sync_selection();
     }
 
@@ -463,6 +469,7 @@ impl App {
         self.prompt.drain(self.cursor..self.cursor + next);
         self.history_index = None;
         self.suggestion_filter = None;
+        self.selected_suggestion = 0;
         self.sync_selection();
     }
 
@@ -495,28 +502,12 @@ impl App {
     pub(super) fn cycle_suggestion(&mut self, direction: isize) {
         // Save the current query the first time we cycle
         if self.suggestion_filter.is_none() {
-            let query = self.normalized_prompt().to_lowercase();
+            let query = self.command_query();
             self.suggestion_filter = Some(query);
         }
 
-        // Get filtered list based on suggestion_filter
         let query = self.suggestion_filter.as_ref().unwrap().clone();
-
-        let suggestions: Vec<_> = if query.is_empty() {
-            COMMANDS
-                .iter()
-                .filter(|cmd| self.is_command_visible(cmd))
-                .collect()
-        } else {
-            COMMANDS
-                .iter()
-                .filter(|cmd| {
-                    self.is_command_visible(cmd)
-                        && (cmd.name.contains(&query)
-                            || cmd.description.to_lowercase().contains(&query))
-                })
-                .collect()
-        };
+        let suggestions = self.matching_commands(&query);
 
         if suggestions.is_empty() {
             return;
@@ -579,6 +570,30 @@ impl App {
             self.history.push(format!("/{}", prompt));
             self.history_index = None;
             self.clear_notes_state();
+            self.reset_prompt();
+            return;
+        }
+
+        if Self::command_has_subcommands(&prompt) {
+            self.prompt = format!("/{} ", prompt);
+            self.cursor = self.prompt.len();
+            self.selected_suggestion = 0;
+            self.suggestion_filter = Some(format!("{} ", prompt));
+            self.last_action = format!("Showing /{} commands.", prompt);
+            return;
+        }
+
+        if let Some((command, args)) = Self::room_command_parts(prompt.as_str()) {
+            if args.trim().is_empty() && Self::command_expects_argument(command) {
+                self.prompt = format!("/{} ", command);
+                self.cursor = self.prompt.len();
+                self.last_action = format!("Add a target or text for /{}.", command);
+                return;
+            }
+
+            self.history.push(format!("/{}", prompt));
+            self.history_index = None;
+            self.execute_command(command, args);
             self.reset_prompt();
             return;
         }
@@ -649,6 +664,12 @@ impl App {
             ("fork list", "path list"),
             ("fork read", "path show"),
             ("fork checkout", "path return"),
+            ("rooms", "room"),
+            ("rooms list", "room list"),
+            ("rooms show", "room show"),
+            ("rooms use", "room use"),
+            ("rooms next", "room next"),
+            ("rooms prev", "room prev"),
         ];
 
         for (alias, command) in aliases {
@@ -665,6 +686,38 @@ impl App {
         trimmed.to_string()
     }
 
+    pub(super) fn room_command_parts(prompt: &str) -> Option<(&'static str, &str)> {
+        if prompt == "room" {
+            return Some(("room", ""));
+        }
+
+        let rest = prompt
+            .strip_prefix("room")
+            .filter(|rest| rest.starts_with(char::is_whitespace))?
+            .trim_start();
+
+        for (subcommand, command) in [
+            ("list", "room list"),
+            ("show", "room show"),
+            ("use", "room use"),
+            ("next", "room next"),
+            ("prev", "room prev"),
+        ] {
+            if rest == subcommand {
+                return Some((command, ""));
+            }
+
+            if let Some(args) = rest
+                .strip_prefix(subcommand)
+                .filter(|args| args.starts_with(char::is_whitespace))
+            {
+                return Some((command, args.trim_start()));
+            }
+        }
+
+        Some(("room", rest))
+    }
+
     pub(super) fn command_expects_argument(command: &str) -> bool {
         matches!(
             command,
@@ -674,6 +727,7 @@ impl App {
                 | "note move"
                 | "path show"
                 | "path return"
+                | "room use"
                 | "folder create"
                 | "folder delete"
                 | "folder notes"

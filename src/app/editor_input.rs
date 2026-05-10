@@ -388,7 +388,8 @@ impl App {
         self.panel_title = String::from("Settings");
         self.panel_lines.clear();
         self.settings_selected = 0;
-        self.last_action = String::from("Open settings to manage connections and preferences.");
+        self.last_action =
+            String::from("Open settings to manage connections, rooms, and preferences.");
     }
 
     pub(super) fn handle_settings_key(&mut self, key_event: KeyEvent) {
@@ -408,7 +409,7 @@ impl App {
                 }
             }
             KeyCode::Down => {
-                if self.settings_selected < 7 {
+                if self.settings_selected < 8 {
                     self.settings_selected += 1;
                 }
             }
@@ -456,19 +457,22 @@ impl App {
                         }
                     }
                     1 => {
-                        self.toggle_agent_mode();
+                        let _ = self.cycle_room(1);
                     }
                     2 => {
-                        self.cycle_note_save_target();
+                        self.toggle_agent_mode();
                     }
                     3 => {
-                        self.toggle_editor_images();
+                        self.cycle_note_save_target();
                     }
                     4 => {
+                        self.toggle_editor_images();
+                    }
+                    5 => {
                         // Pair Obsidian vault
                         self.open_vault_picker();
                     }
-                    5 => {
+                    6 => {
                         // Sign out / Logout
                         self.openrouter_api_key = None;
                         self.strix_access_token = None;
@@ -503,7 +507,7 @@ impl App {
                         self.panel_lines.clear();
                         self.last_action = String::from("Signed out.");
                     }
-                    6 => {
+                    7 => {
                         // Reset & Clear Cache
                         self.reset_and_clear_all();
                         self.panel_mode = PanelMode::Commands;
@@ -511,7 +515,7 @@ impl App {
                         self.panel_lines.clear();
                         self.last_action = String::from("Reset complete. All data cleared.");
                     }
-                    7 => {
+                    8 => {
                         // Close settings
                         self.panel_mode = PanelMode::Commands;
                         self.panel_title = String::from("Commands");
@@ -649,49 +653,98 @@ impl App {
         }
     }
 
-    fn toggle_folder_at_selection(&mut self) {
-        // Extract folder ID from the current selection
-        // Since we use usize::MAX as a marker, we need to track which folder is at which position
-        // For simplicity, we'll rebuild the tree to find the folder
-        let mut tree_items: Vec<TreeItem> = Vec::new();
-        let root_folders: Vec<&Folder> = self
-            .folders
-            .iter()
-            .filter(|f| f.parent_id.is_none())
-            .collect();
-
-        let uncategorized_notes: Vec<usize> = self
-            .notes
-            .iter()
-            .enumerate()
-            .filter(|(_, note)| note.folder_id.is_none())
-            .map(|(index, _)| index)
-            .collect();
-
-        if !uncategorized_notes.is_empty() {
-            tree_items.push(TreeItem::Folder {
-                id: 0,
-                name: String::from("Uncategorized"),
-                depth: 0,
-                expanded: self.expanded_folders.contains(&0),
-                note_count: uncategorized_notes.len(),
-            });
-
-            if self.expanded_folders.contains(&0) {
-                for &note_index in &uncategorized_notes {
-                    tree_items.push(TreeItem::Note {
-                        index: note_index,
-                        depth: 1,
-                    });
+    pub(super) fn handle_room_list_key(&mut self, key_event: KeyEvent) {
+        if key_event.kind != KeyEventKind::Press && key_event.kind != KeyEventKind::Repeat {
+            return;
+        }
+        match key_event.code {
+            KeyCode::Esc => {
+                self.room_list_pending_delete = None;
+                self.panel_mode = PanelMode::Commands;
+                self.panel_title = String::from("Commands");
+                self.panel_lines.clear();
+                self.last_action = String::from("Exited room list.");
+            }
+            KeyCode::Up => {
+                if self.room_list_selected > 0 {
+                    self.room_list_pending_delete = None;
+                    self.room_list_selected -= 1;
+                    self.last_action = format!("Selected room {}", self.room_list_selected + 1);
                 }
             }
+            KeyCode::Down => {
+                if self.room_list_selected + 1 < self.rooms.len() {
+                    self.room_list_pending_delete = None;
+                    self.room_list_selected += 1;
+                    self.last_action = format!("Selected room {}", self.room_list_selected + 1);
+                }
+            }
+            KeyCode::Enter => {
+                if self.room_list_delete_is_pending() {
+                    self.confirm_or_stage_room_delete();
+                    return;
+                }
+                if self.room_list_selected < self.rooms.len() {
+                    let target = self.room_list_selected;
+                    if self.switch_room_by_index(target).is_ok() {
+                        self.open_room_list_panel();
+                        self.last_action = format!("Entered room: {}.", self.active_room_label());
+                    }
+                }
+            }
+            KeyCode::Delete | KeyCode::Backspace if key_event.kind == KeyEventKind::Press => {
+                self.confirm_or_stage_room_delete();
+            }
+            KeyCode::Char('d') | KeyCode::Char('D')
+                if key_event.kind == KeyEventKind::Press && self.room_list_delete_is_pending() =>
+            {
+                self.confirm_or_stage_room_delete();
+            }
+            KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.request_quit();
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn confirm_or_stage_room_delete(&mut self) {
+        if self.rooms.len() <= 1 {
+            self.room_list_pending_delete = None;
+            self.last_action = String::from("At least one room must remain.");
+            return;
         }
 
-        for folder in &root_folders {
-            self.build_folder_tree_items(&mut tree_items, folder.id, 0);
+        let selected = self.room_list_selected.min(self.rooms.len() - 1);
+        let room_name = self.rooms[selected].name.clone();
+        if self.rooms.get(selected).is_some_and(Self::is_global_room) {
+            self.room_list_pending_delete = None;
+            self.last_action = String::from("All is the default scope and cannot be deleted.");
+            return;
         }
 
-        // Find the folder at the current selection
+        if self.room_list_pending_delete == Some(selected) {
+            match self.delete_room_at_index(selected) {
+                Ok(name) => {
+                    self.open_room_list_panel();
+                    self.last_action = format!("Deleted room: {}", name);
+                }
+                Err(error) => {
+                    self.room_list_pending_delete = None;
+                    self.last_action = format!("Delete failed: {}", error);
+                }
+            }
+        } else {
+            self.room_list_pending_delete = Some(selected);
+            self.last_action = format!(
+                "Press Delete, Enter, or d again to delete '{}'. Esc or move to cancel.",
+                room_name
+            );
+        }
+    }
+
+    fn toggle_folder_at_selection(&mut self) {
+        let visible_note_indices = self.room_note_indices();
+        let tree_items = self.note_list_tree_items(&visible_note_indices);
         if let Some(item) = tree_items.get(self.note_list_selected) {
             if let TreeItem::Folder { id, .. } = item {
                 if self.expanded_folders.contains(id) {

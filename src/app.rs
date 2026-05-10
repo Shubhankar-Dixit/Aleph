@@ -33,6 +33,7 @@ mod input;
 pub mod model;
 mod notes_editor;
 mod obsidian;
+mod rooms;
 mod strix;
 mod temporal_forks;
 
@@ -105,6 +106,8 @@ pub struct App {
     connected: bool,
     notes: Vec<Note>,
     folders: Vec<Folder>,
+    rooms: Vec<Room>,
+    active_room_index: usize,
     memories: Vec<String>,
     canvases: Vec<String>,
     selected_note: usize,
@@ -168,6 +171,8 @@ pub struct App {
     note_list_selected: usize,
     note_list_indices: Vec<usize>,
     note_list_pending_delete: Option<usize>,
+    room_list_selected: usize,
+    room_list_pending_delete: Option<usize>,
     editing_title: bool,
     title_buffer: String,
     title_cursor: usize,

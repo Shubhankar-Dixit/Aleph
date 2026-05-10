@@ -20,6 +20,15 @@ pub struct Folder {
 }
 
 #[derive(Clone)]
+pub struct Room {
+    pub name: String,
+    pub project_paths: Vec<String>,
+    pub tags: Vec<String>,
+    pub filters: Vec<String>,
+    pub accent: [u8; 3],
+}
+
+#[derive(Clone)]
 pub struct Note {
     pub id: usize,
     pub remote_id: Option<String>,
@@ -47,6 +56,7 @@ pub enum PanelMode {
     AiChat,
     LoginPicker,
     NoteList,
+    RoomList,
     VaultPicker,
     Settings,
     ObsidianSyncConfirm,

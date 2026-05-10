@@ -232,6 +232,9 @@ impl App {
                 );
                 self.last_action = String::from("Disconnected from providers.");
             }
+            "obsidian" => {
+                self.execute_command("obsidian status", args);
+            }
             "obsidian pair" => {
                 self.handle_obsidian_pair(args.trim());
             }
@@ -308,6 +311,10 @@ impl App {
                 self.set_result_panel(
                     "Status",
                     vec![
+                        format!("Room: {}", self.active_room_label()),
+                        format!("Room scope: {}", self.room_scope_summary()),
+                        format!("Room notes: {}", self.room_note_count()),
+                        format!("Room sessions: {}", self.room_recent_session_count()),
                         format!(
                             "OpenRouter: {}",
                             if self.is_openrouter_connected() {
@@ -418,24 +425,105 @@ impl App {
                 self.last_action = format!("Searched for {}.", query);
             }
             "recall" => {
-                let mut lines = self
-                    .activity_log
-                    .iter()
-                    .rev()
-                    .take(5)
-                    .map(|entry| format!("[{}] {}", entry.timestamp, entry.label))
-                    .collect::<Vec<_>>();
-
-                if lines.is_empty() {
-                    lines.push(String::from("No history yet."));
-                }
+                let lines = self.room_recent_session_lines(5);
 
                 self.set_result_panel("Recent activity", lines);
-                self.last_action = String::from("Showed recent activity.");
+                self.last_action = String::from("Showed room recent activity.");
             }
-            "path save" | "path list" | "path show" | "path return" | "world save"
+            "room" => {
+                let target = args.trim();
+                if target.is_empty() {
+                    self.open_room_list_panel();
+                    self.last_action = String::from("Listed rooms.");
+                } else {
+                    match self.switch_room_by_name(target) {
+                        Ok(lines) => {
+                            self.set_result_panel(
+                                format!("Room: {}", self.active_room_label()),
+                                lines,
+                            );
+                            self.last_action =
+                                format!("Switched to room {}.", self.active_room_label());
+                        }
+                        Err(error) => {
+                            self.set_result_panel("Room switch failed", vec![error]);
+                            self.last_action = String::from("Room switch failed.");
+                        }
+                    }
+                }
+            }
+            "room list" => {
+                self.open_room_list_panel();
+                self.last_action = String::from("Listed rooms.");
+            }
+            "room show" => {
+                let target = args.trim();
+                let result = if target.is_empty() {
+                    self.room_detail_lines(self.active_room_index)
+                } else {
+                    self.resolve_room_index(target)
+                        .ok_or_else(|| format!("Room '{}' was not found.", target))
+                        .and_then(|index| self.room_detail_lines(index))
+                };
+
+                match result {
+                    Ok((title, lines)) => {
+                        self.set_result_panel(format!("Room: {}", title), lines);
+                        self.last_action = format!("Showed room {}.", title);
+                    }
+                    Err(error) => {
+                        self.set_result_panel("Room not found", vec![error]);
+                        self.last_action = String::from("Room not found.");
+                    }
+                }
+            }
+            "room use" => {
+                let target = args.trim();
+                if target.is_empty() {
+                    self.set_result_panel(
+                        "Room use",
+                        vec![String::from("Provide a room name after /room use.")],
+                    );
+                    self.last_action = String::from("Room use needs a target.");
+                    return;
+                }
+
+                match self.switch_room_by_name(target) {
+                    Ok(lines) => {
+                        self.set_result_panel(format!("Room: {}", self.active_room_label()), lines);
+                        self.last_action =
+                            format!("Switched to room {}.", self.active_room_label());
+                    }
+                    Err(error) => {
+                        self.set_result_panel("Room switch failed", vec![error]);
+                        self.last_action = String::from("Room switch failed.");
+                    }
+                }
+            }
+            "room next" => match self.cycle_room(1) {
+                Ok(lines) => {
+                    self.set_result_panel(format!("Room: {}", self.active_room_label()), lines);
+                    self.last_action = String::from("Switched to next room.");
+                }
+                Err(error) => {
+                    self.set_result_panel("Room switch failed", vec![error]);
+                    self.last_action = String::from("Room switch failed.");
+                }
+            },
+            "room prev" => match self.cycle_room(-1) {
+                Ok(lines) => {
+                    self.set_result_panel(format!("Room: {}", self.active_room_label()), lines);
+                    self.last_action = String::from("Switched to previous room.");
+                }
+                Err(error) => {
+                    self.set_result_panel("Room switch failed", vec![error]);
+                    self.last_action = String::from("Room switch failed.");
+                }
+            },
+            "path" | "path save" | "path list" | "path show" | "path return" | "world save"
             | "world list" | "world show" | "world return" | "fork now" | "fork list"
             | "fork read" | "fork checkout" => {
+                let command = if command == "path" { "path list" } else { command };
                 self.handle_fork_command(command, args);
             }
             "ask" => {
@@ -482,7 +570,7 @@ impl App {
                     self.last_action = String::from("AI note edit needs a note target.");
                 }
             }
-            "note list" => {
+            "note" | "note list" => {
                 self.open_note_list_panel();
                 self.last_action = String::from("Listed notes. Use arrow keys to navigate.");
             }
@@ -709,7 +797,7 @@ impl App {
                 );
                 self.last_action = format!("Moved note to folder: {}", folder_name);
             }
-            "folder list" => {
+            "folder" | "folder list" => {
                 let lines = self.list_folders();
                 self.set_result_panel("Folders", lines);
                 self.last_action = String::from("Listed folders.");
@@ -804,7 +892,7 @@ impl App {
                     .notes
                     .iter()
                     .enumerate()
-                    .filter(|(_, note)| note.folder_id == folder_id)
+                    .filter(|(_, note)| note.folder_id == folder_id && self.room_matches_note(note))
                     .map(|(index, note)| {
                         format!(
                             "{:>2}. #{} {:<18} {}",
@@ -831,10 +919,11 @@ impl App {
                 self.set_result_panel("Folder tree", lines);
                 self.last_action = String::from("Displayed folder tree.");
             }
-            "memory list" => {
+            "memory" | "memory list" => {
                 let lines = self
                     .memories
                     .iter()
+                    .filter(|memory| self.room_matches_memory(memory))
                     .enumerate()
                     .map(|(index, memory)| format!("{:>2}. {}", index + 1, memory))
                     .collect::<Vec<_>>();
@@ -874,6 +963,7 @@ impl App {
                 let mut lines = self
                     .memories
                     .iter()
+                    .filter(|memory| self.room_matches_memory(memory))
                     .filter(|memory| query.is_empty() || memory.to_lowercase().contains(&query))
                     .cloned()
                     .collect::<Vec<_>>();
@@ -959,65 +1049,14 @@ impl App {
             self.ensure_cached_strix_notes_loaded();
         }
         self.rebuild_obsidian_folders_from_cached_notes();
-
-        if self.folders.is_empty() {
-            self.note_list_indices = (0..self.notes.len()).collect();
-            self.panel_lines = self
-                .note_list_indices
-                .iter()
-                .enumerate()
-                .map(|(list_index, &note_index)| self.note_list_line(list_index, note_index))
-                .collect();
-            self.note_list_selected = self
-                .note_list_selected
-                .min(self.note_list_indices.len().saturating_sub(1));
-            self.panel_mode = PanelMode::NoteList;
-            self.panel_title = String::from("Notes (Enter open, Delete delete)");
-            return;
-        }
-
-        // Build hierarchical tree structure
-        let mut tree_items: Vec<TreeItem> = Vec::new();
-
-        // Get root folders (no parent)
-        let root_folders: Vec<&Folder> = self
-            .folders
-            .iter()
-            .filter(|f| f.parent_id.is_none())
-            .collect();
-
-        // Add uncategorized notes first
-        let uncategorized_notes: Vec<usize> = self
-            .notes
-            .iter()
-            .enumerate()
-            .filter(|(_, note)| note.folder_id.is_none())
-            .map(|(index, _)| index)
-            .collect();
-
-        if !uncategorized_notes.is_empty() {
-            tree_items.push(TreeItem::Folder {
-                id: 0,
-                name: String::from("Uncategorized"),
-                depth: 0,
-                expanded: self.expanded_folders.contains(&0),
-                note_count: uncategorized_notes.len(),
-            });
-
-            if self.expanded_folders.contains(&0) {
-                for &note_index in &uncategorized_notes {
-                    tree_items.push(TreeItem::Note {
-                        index: note_index,
-                        depth: 1,
-                    });
-                }
+        let entering_note_list = self.panel_mode != PanelMode::NoteList;
+        let visible_note_indices = self.room_note_indices();
+        if entering_note_list && self.folders.is_empty() && !visible_note_indices.is_empty() {
+            if !self.expanded_folders.contains(&0) {
+                self.expanded_folders.push(0);
             }
         }
-
-        // Recursively add folders and their notes
-        for folder in &root_folders {
-            self.build_folder_tree_items(&mut tree_items, folder.id, 0);
-        }
+        let tree_items = self.note_list_tree_items(&visible_note_indices);
 
         // Convert tree items to display lines and indices
         self.note_list_indices.clear();
@@ -1055,6 +1094,45 @@ impl App {
         self.panel_title = String::from("Notes (Enter open, Space expand/collapse, Delete delete)");
     }
 
+    pub(super) fn note_list_tree_items(&self, visible_note_indices: &[usize]) -> Vec<TreeItem> {
+        let mut tree_items: Vec<TreeItem> = Vec::new();
+        let root_folders: Vec<&Folder> = self
+            .folders
+            .iter()
+            .filter(|f| f.parent_id.is_none())
+            .collect();
+        let uncategorized_notes: Vec<usize> = visible_note_indices
+            .iter()
+            .copied()
+            .filter(|&index| self.notes[index].folder_id.is_none())
+            .collect();
+
+        if !uncategorized_notes.is_empty() {
+            tree_items.push(TreeItem::Folder {
+                id: 0,
+                name: String::from("Uncategorized"),
+                depth: 0,
+                expanded: self.expanded_folders.contains(&0),
+                note_count: uncategorized_notes.len(),
+            });
+
+            if self.expanded_folders.contains(&0) {
+                for &note_index in &uncategorized_notes {
+                    tree_items.push(TreeItem::Note {
+                        index: note_index,
+                        depth: 1,
+                    });
+                }
+            }
+        }
+
+        for folder in &root_folders {
+            self.build_folder_tree_items(&mut tree_items, folder.id, 0);
+        }
+
+        tree_items
+    }
+
     pub(super) fn build_folder_tree_items(
         &self,
         tree_items: &mut Vec<TreeItem>,
@@ -1067,7 +1145,7 @@ impl App {
         let note_count = self
             .notes
             .iter()
-            .filter(|n| n.folder_id == Some(folder_id))
+            .filter(|n| n.folder_id == Some(folder_id) && self.room_matches_note(n))
             .count();
         let expanded = self.expanded_folders.contains(&folder_id);
 
@@ -1082,7 +1160,7 @@ impl App {
         if expanded {
             // Add notes in this folder
             for (note_index, note) in self.notes.iter().enumerate() {
-                if note.folder_id == Some(folder_id) {
+                if note.folder_id == Some(folder_id) && self.room_matches_note(note) {
                     tree_items.push(TreeItem::Note {
                         index: note_index,
                         depth: depth + 1,
