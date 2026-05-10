@@ -39,6 +39,13 @@ impl App {
         }
         if let Err(error) = self.persist_note(index) {
             self.last_action = format!("Note save failed: {}", error);
+        } else if let Some(note) = self.notes.get(index) {
+            let _ = self.append_trail_event(
+                "note",
+                format!("Saved note: {}.", note.title),
+                vec![note.id.to_string()],
+                TrailImportance::High,
+            );
         }
         self.save_shimmer_ticks = 4;
     }

@@ -215,13 +215,15 @@ impl App {
     pub fn run_cli_command(&mut self, args: &[String]) -> Result<Vec<String>, String> {
         if args.is_empty() {
             return Ok(vec![
-                String::from("Usage: aleph <notes|room|obsidian|sync> ..."),
+                String::from("Usage: aleph <notes|room|obsidian|trail|daemon|sync> ..."),
                 String::from("Examples:"),
                 String::from("  aleph notes search roadmap"),
                 String::from("  aleph notes read <id>"),
                 String::from("  aleph room list"),
                 String::from("  aleph room use <name>"),
                 String::from("  aleph room all"),
+                String::from("  aleph trail"),
+                String::from("  aleph daemon status"),
                 String::from("  aleph notes write <id> -   # content from stdin"),
             ]);
         }
@@ -241,9 +243,23 @@ impl App {
             return self.run_room_cli_command(&args[1..]);
         }
 
+        if area == "trail" {
+            return self.run_trail_cli_command(&args[1..]);
+        }
+
+        if area == "daemon" {
+            return self.run_daemon_cli_command(&args[1..]);
+        }
+
         if area != "notes" && area != "note" {
+            let _ = self.append_trail_event(
+                "command_failed",
+                format!("Unknown Aleph CLI area: {}.", area),
+                vec![area.to_string()],
+                TrailImportance::Normal,
+            );
             return Err(format!(
-                "Unknown Aleph CLI area '{}'. Try 'notes', 'room', or 'obsidian'.",
+                "Unknown Aleph CLI area '{}'. Try 'notes', 'room', 'obsidian', 'trail', or 'daemon'.",
                 area
             ));
         }
@@ -290,6 +306,12 @@ impl App {
                     .and_then(|index| self.notes.get(index).cloned())
                     .map(Ok)
                     .unwrap_or_else(|| self.load_strix_note(id, true))?;
+                let _ = self.append_trail_event(
+                    "note",
+                    format!("Read note from CLI: {}.", note.title),
+                    vec![note.id.to_string()],
+                    TrailImportance::Low,
+                );
                 Ok(vec![
                     format!("# {}", note.title),
                     Self::note_source_label(&note),
@@ -330,6 +352,12 @@ impl App {
                 if updated.remote_id.is_some() || local_index.is_none() {
                     self.upsert_synced_note(updated.clone());
                 }
+                let _ = self.append_trail_event(
+                    "note",
+                    format!("Updated note from CLI: {}.", updated.title),
+                    vec![updated.id.to_string()],
+                    TrailImportance::High,
+                );
                 Ok(vec![format!(
                     "Updated {} ({})",
                     updated.title,
@@ -372,6 +400,12 @@ impl App {
                 if updated.remote_id.is_some() || local_index.is_none() {
                     self.upsert_synced_note(updated.clone());
                 }
+                let _ = self.append_trail_event(
+                    "note",
+                    format!("Appended to note from CLI: {}.", updated.title),
+                    vec![updated.id.to_string()],
+                    TrailImportance::High,
+                );
                 Ok(vec![format!(
                     "Appended to {} ({})",
                     updated.title,
@@ -398,6 +432,12 @@ impl App {
                     note.obsidian_path = Some(path);
                 }
                 self.upsert_synced_note(note.clone());
+                let _ = self.append_trail_event(
+                    "note",
+                    format!("Created note from CLI: {}.", note.title),
+                    vec![note.id.to_string()],
+                    TrailImportance::High,
+                );
                 Ok(vec![format!(
                     "Created {} ({})",
                     note.title,
@@ -1372,9 +1412,7 @@ impl App {
             })
             .collect();
 
-        matches.sort_by_key(|(rank, command)| {
-            (*rank, std::cmp::Reverse(command.name.len()))
-        });
+        matches.sort_by_key(|(rank, command)| (*rank, std::cmp::Reverse(command.name.len())));
         matches.into_iter().map(|(_, command)| command).collect()
     }
 
@@ -1384,7 +1422,9 @@ impl App {
 
     pub(super) fn command_has_subcommands(command: &str) -> bool {
         let prefix = format!("{} ", command);
-        COMMANDS.iter().any(|candidate| candidate.name.starts_with(&prefix))
+        COMMANDS
+            .iter()
+            .any(|candidate| candidate.name.starts_with(&prefix))
     }
 
     pub fn command_subcommand_summary(command: &CommandSpec) -> Option<String> {

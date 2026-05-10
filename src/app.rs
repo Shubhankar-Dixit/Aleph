@@ -36,9 +36,11 @@ mod obsidian;
 mod rooms;
 mod strix;
 mod temporal_forks;
+mod trail;
 
 pub use commands::{COMMANDS, THINKING_FRAMES};
 pub use model::*;
+use trail::TrailImportance;
 
 const OPENROUTER_CHAT_MODEL: &str = "nvidia/nemotron-3-nano-30b-a3b:free";
 const OPENROUTER_SERVICE: &str = "Aleph";

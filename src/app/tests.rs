@@ -354,9 +354,15 @@ fn enter_on_command_family_drills_into_subcommands() {
     assert_eq!(app.prompt(), "/note ");
     let suggestions = app.visible_commands(16);
     assert!(!suggestions.is_empty());
-    assert!(suggestions.iter().all(|command| command.name.starts_with("note ")));
-    assert!(suggestions.iter().any(|command| command.name == "note list"));
-    assert!(suggestions.iter().any(|command| command.name == "note create"));
+    assert!(suggestions
+        .iter()
+        .all(|command| command.name.starts_with("note ")));
+    assert!(suggestions
+        .iter()
+        .any(|command| command.name == "note list"));
+    assert!(suggestions
+        .iter()
+        .any(|command| command.name == "note create"));
 }
 
 #[test]
@@ -369,7 +375,9 @@ fn typing_command_family_space_shows_subcommands_only() {
 
     let suggestions = app.visible_commands(16);
     assert!(!suggestions.is_empty());
-    assert!(suggestions.iter().all(|command| command.name.starts_with("note ")));
+    assert!(suggestions
+        .iter()
+        .all(|command| command.name.starts_with("note ")));
     assert!(!suggestions.iter().any(|command| command.name == "note"));
 }
 
@@ -1671,6 +1679,135 @@ fn memory_save_persists_to_local_cache() {
         App::load_local_memories().unwrap(),
         vec![String::from("tables should stay aligned")]
     );
+
+    if let Some(previous) = previous_config_dir {
+        std::env::set_var("ALEPH_CONFIG_DIR", previous);
+    } else {
+        std::env::remove_var("ALEPH_CONFIG_DIR");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn trail_event_persists_schema_workspace_signals_and_importance() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-trail-test-{}", App::now_millis()));
+    fs::create_dir_all(&root).unwrap();
+    let previous_config_dir = std::env::var_os("ALEPH_CONFIG_DIR");
+    std::env::set_var("ALEPH_CONFIG_DIR", &root);
+
+    let app = App::new();
+    app.append_trail_event(
+        "path",
+        "Saved decision point: before MCP Strix memory refactor.",
+        vec![String::from("fork-123")],
+        TrailImportance::High,
+    )
+    .unwrap();
+
+    let body = fs::read_to_string(App::trail_path()).unwrap();
+    let event: serde_json::Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+    assert_eq!(event["schema_version"], 1);
+    assert!(event["workspace_id"].as_str().unwrap().len() >= 12);
+    assert_eq!(event["kind"], "path");
+    assert_eq!(event["importance"], "high");
+    assert!(event["signals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|signal| signal == "mcp"));
+    assert!(event["signals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|signal| signal == "strix"));
+
+    if let Some(previous) = previous_config_dir {
+        std::env::set_var("ALEPH_CONFIG_DIR", previous);
+    } else {
+        std::env::remove_var("ALEPH_CONFIG_DIR");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn trail_panel_surfaces_recurring_signals() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-trail-panel-test-{}", App::now_millis()));
+    fs::create_dir_all(&root).unwrap();
+    let previous_config_dir = std::env::var_os("ALEPH_CONFIG_DIR");
+    std::env::set_var("ALEPH_CONFIG_DIR", &root);
+
+    let app = App::new();
+    app.append_trail_event(
+        "agent",
+        "Clarified MCP and Strix memory boundaries.",
+        Vec::new(),
+        TrailImportance::Normal,
+    )
+    .unwrap();
+    app.append_trail_event(
+        "path",
+        "Saved path for MCP and Darwin secrecy thinking.",
+        Vec::new(),
+        TrailImportance::High,
+    )
+    .unwrap();
+
+    let lines = app.trail_lines(None);
+    assert!(lines.iter().any(|line| line == "Recurring signals:"));
+    assert!(lines.iter().any(|line| line == "- mcp"));
+    assert!(lines.iter().any(|line| line.contains("Recent turns:")));
+
+    if let Some(previous) = previous_config_dir {
+        std::env::set_var("ALEPH_CONFIG_DIR", previous);
+    } else {
+        std::env::remove_var("ALEPH_CONFIG_DIR");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn trail_command_opens_panel_without_expanding_subcommands() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-trail-command-test-{}", App::now_millis()));
+    fs::create_dir_all(&root).unwrap();
+    let previous_config_dir = std::env::var_os("ALEPH_CONFIG_DIR");
+    std::env::set_var("ALEPH_CONFIG_DIR", &root);
+
+    let mut app = App::new();
+    for character in "/trail".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(app.panel_title(), "Trail");
+    assert_eq!(app.last_action(), "Opened Aleph Trail.");
+    assert_eq!(app.prompt(), "");
+
+    if let Some(previous) = previous_config_dir {
+        std::env::set_var("ALEPH_CONFIG_DIR", previous);
+    } else {
+        std::env::remove_var("ALEPH_CONFIG_DIR");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn daemon_status_reports_missing_state() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-daemon-status-test-{}", App::now_millis()));
+    fs::create_dir_all(&root).unwrap();
+    let previous_config_dir = std::env::var_os("ALEPH_CONFIG_DIR");
+    std::env::set_var("ALEPH_CONFIG_DIR", &root);
+
+    let app = App::new();
+    let lines = app.daemon_status_lines();
+
+    assert!(lines.iter().any(|line| line == "Daemon: not running"));
+    assert!(lines
+        .iter()
+        .any(|line| line == "Status detail: state file not found"));
 
     if let Some(previous) = previous_config_dir {
         std::env::set_var("ALEPH_CONFIG_DIR", previous);

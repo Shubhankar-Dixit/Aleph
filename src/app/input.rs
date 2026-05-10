@@ -574,6 +574,14 @@ impl App {
             return;
         }
 
+        if prompt == "trail" || prompt == "daemon" {
+            self.history.push(format!("/{}", prompt));
+            self.history_index = None;
+            self.execute_command(&prompt, "");
+            self.reset_prompt();
+            return;
+        }
+
         if Self::command_has_subcommands(&prompt) {
             self.prompt = format!("/{} ", prompt);
             self.cursor = self.prompt.len();
@@ -599,6 +607,12 @@ impl App {
         }
 
         let Some((command, args)) = Self::parse_command(prompt.as_str()) else {
+            let _ = self.append_trail_event(
+                "command_failed",
+                format!("Unknown command: /{}.", prompt),
+                vec![prompt.clone()],
+                TrailImportance::Normal,
+            );
             self.set_result_panel(
                 "Unknown command",
                 vec![
@@ -733,6 +747,7 @@ impl App {
                 | "folder notes"
                 | "memory save"
                 | "memory search"
+                | "trail search"
         )
     }
 

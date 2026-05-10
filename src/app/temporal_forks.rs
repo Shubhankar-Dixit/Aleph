@@ -17,6 +17,12 @@ impl App {
                 match self.create_temporal_fork(&label, "manual") {
                     Ok(id) => {
                         self.add_activity(format!("Saved decision point {}.", id));
+                        let _ = self.append_trail_event(
+                            "path",
+                            format!("Saved decision point: {}.", label),
+                            vec![id.clone()],
+                            TrailImportance::High,
+                        );
                         self.set_result_panel(
                             "Saved path",
                             vec![
@@ -67,6 +73,13 @@ impl App {
                 };
                 match self.checkout_temporal_fork(index) {
                     Ok(lines) => {
+                        let fork = self.temporal_forks[index].clone();
+                        let _ = self.append_trail_event(
+                            "path",
+                            format!("Returned to decision point: {}.", fork.label),
+                            vec![fork.id],
+                            TrailImportance::High,
+                        );
                         self.set_result_panel("Returned to path", lines);
                         self.last_action = String::from("Returned to saved path.");
                     }
@@ -497,7 +510,7 @@ impl App {
         }
     }
 
-    fn capture_repo_context() -> Option<RepoContext> {
+    pub(crate) fn capture_repo_context() -> Option<RepoContext> {
         let cwd = std::env::current_dir().ok()?;
         let cwd_label = cwd.display().to_string();
         let branch = Self::git_output(&["branch", "--show-current"]);
@@ -518,7 +531,7 @@ impl App {
         })
     }
 
-    fn git_output(args: &[&str]) -> Option<String> {
+    pub(crate) fn git_output(args: &[&str]) -> Option<String> {
         let output = Command::new("git").args(args).output().ok()?;
         if !output.status.success() {
             return None;

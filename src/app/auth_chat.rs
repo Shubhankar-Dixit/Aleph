@@ -762,6 +762,16 @@ impl App {
         self.add_activity(format!("User asked: {}", Self::preview_text(&query, 72)));
         self.add_activity("Reading selected note and recent messages.");
         self.add_activity(format!("Sending request to {}.", self.ai_provider_label()));
+        let _ = self.append_trail_event(
+            "agent",
+            format!(
+                "Asked {}: {}.",
+                self.ai_provider_label(),
+                Self::preview_text(&query, 96)
+            ),
+            Vec::new(),
+            TrailImportance::Normal,
+        );
 
         let (sender, receiver) = mpsc::channel();
         self.chat_stream_rx = Some(receiver);

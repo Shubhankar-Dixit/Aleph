@@ -770,6 +770,12 @@ impl App {
             self.memories.pop();
             return Err(error);
         }
+        let _ = self.append_trail_event(
+            "memory",
+            format!("Saved memory: {}.", Self::preview_text(memory, 80)),
+            Vec::new(),
+            TrailImportance::High,
+        );
         Ok(())
     }
 

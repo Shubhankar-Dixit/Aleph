@@ -34,8 +34,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Show recent note activity",
     },
     CommandSpec {
+        name: "trail",
+        description: "Open Aleph Trail: local cognitive telemetry for this workspace",
+    },
+    CommandSpec {
         name: "path",
         description: "List saved thinking paths",
+    },
+    CommandSpec {
+        name: "daemon",
+        description: "Control the local Aleph Trail daemon",
     },
     CommandSpec {
         name: "settings",
@@ -100,6 +108,22 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "room prev",
         description: "Cycle to the previous room",
+    },
+    CommandSpec {
+        name: "trail search",
+        description: "Search the local workspace trail",
+    },
+    CommandSpec {
+        name: "daemon start",
+        description: "Start the local Aleph Trail daemon for this workspace",
+    },
+    CommandSpec {
+        name: "daemon status",
+        description: "Show Aleph Trail daemon state and heartbeat",
+    },
+    CommandSpec {
+        name: "daemon stop",
+        description: "Request the Aleph Trail daemon to stop",
     },
     CommandSpec {
         name: "path save",

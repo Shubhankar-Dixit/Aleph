@@ -430,6 +430,41 @@ impl App {
                 self.set_result_panel("Recent activity", lines);
                 self.last_action = String::from("Showed room recent activity.");
             }
+            "trail" => {
+                self.set_result_panel("Trail", self.trail_lines(None));
+                self.last_action = String::from("Opened Aleph Trail.");
+            }
+            "trail search" => {
+                self.set_result_panel(
+                    format!("Trail search: {}", args.trim()),
+                    self.trail_lines(Some(args.trim())),
+                );
+                self.last_action = String::from("Searched Aleph Trail.");
+            }
+            "daemon" | "daemon status" => {
+                self.set_result_panel("Aleph Trail daemon", self.daemon_status_lines());
+                self.last_action = String::from("Checked Aleph Trail daemon.");
+            }
+            "daemon start" => match self.start_trail_daemon() {
+                Ok(lines) => {
+                    self.set_result_panel("Aleph Trail daemon", lines);
+                    self.last_action = String::from("Started Aleph Trail daemon.");
+                }
+                Err(error) => {
+                    self.set_result_panel("Aleph Trail daemon failed", vec![error]);
+                    self.last_action = String::from("Aleph Trail daemon failed.");
+                }
+            },
+            "daemon stop" => match self.stop_trail_daemon() {
+                Ok(lines) => {
+                    self.set_result_panel("Aleph Trail daemon", lines);
+                    self.last_action = String::from("Requested Aleph Trail daemon stop.");
+                }
+                Err(error) => {
+                    self.set_result_panel("Aleph Trail daemon failed", vec![error]);
+                    self.last_action = String::from("Aleph Trail daemon failed.");
+                }
+            },
             "room" => {
                 let target = args.trim();
                 if target.is_empty() {
@@ -523,7 +558,11 @@ impl App {
             "path" | "path save" | "path list" | "path show" | "path return" | "world save"
             | "world list" | "world show" | "world return" | "fork now" | "fork list"
             | "fork read" | "fork checkout" => {
-                let command = if command == "path" { "path list" } else { command };
+                let command = if command == "path" {
+                    "path list"
+                } else {
+                    command
+                };
                 self.handle_fork_command(command, args);
             }
             "ask" => {
@@ -619,6 +658,12 @@ impl App {
                 ];
                 lines.extend(note_content.lines().map(|line| line.to_string()));
                 self.set_result_panel(format!("Note: {}", note_title), lines);
+                let _ = self.append_trail_event(
+                    "note",
+                    format!("Opened note: {}.", note_title),
+                    vec![note_id.to_string()],
+                    TrailImportance::Low,
+                );
                 self.last_action = format!("Opened note: {}", note_title);
             }
             "note create" => {
@@ -631,6 +676,12 @@ impl App {
                 match self.create_note_from_content(&title, initial_content) {
                     Ok(index) => {
                         self.open_note_editor(index);
+                        let _ = self.append_trail_event(
+                            "note",
+                            format!("Created note: {}.", title),
+                            vec![self.notes[index].id.to_string()],
+                            TrailImportance::High,
+                        );
                         self.last_action = format!(
                             "Created note in {}: {}",
                             self.note_save_target_label(),
@@ -707,6 +758,12 @@ impl App {
                         String::new(),
                         note_content,
                     ],
+                );
+                let _ = self.append_trail_event(
+                    "note",
+                    format!("Appended to note: {}.", note_title),
+                    vec![self.notes[index].id.to_string()],
+                    TrailImportance::High,
                 );
                 self.last_action = format!("Appended to note: {}", note_title);
             }
@@ -988,6 +1045,12 @@ impl App {
                 self.last_action = String::from("Prepared MCP server output.");
             }
             _ => {
+                let _ = self.append_trail_event(
+                    "command_failed",
+                    format!("No local handler exists for /{}.", command),
+                    vec![command.to_string()],
+                    TrailImportance::Normal,
+                );
                 self.set_result_panel(
                     "Unknown command",
                     vec![format!("No local handler exists for /{}.", command)],
