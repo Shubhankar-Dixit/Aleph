@@ -38,6 +38,10 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Open Aleph Trail: local cognitive telemetry for this workspace",
     },
     CommandSpec {
+        name: "workspace",
+        description: "Inspect local computer context: room, repo, Trail, providers, notes, and memories",
+    },
+    CommandSpec {
         name: "path",
         description: "List saved thinking paths",
     },

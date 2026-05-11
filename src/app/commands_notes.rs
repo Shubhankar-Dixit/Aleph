@@ -342,6 +342,10 @@ impl App {
                 );
                 self.last_action = String::from("Refreshed provider status.");
             }
+            "workspace" => {
+                self.set_result_panel("Workspace", self.workspace_context_lines());
+                self.last_action = String::from("Inspected workspace context.");
+            }
             "sync" => match self.sync_strix_notes() {
                 Ok(count) => {
                     self.set_result_panel(

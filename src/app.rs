@@ -84,6 +84,8 @@ enum AgentAction {
     SaveMemory,
     ListMemories,
     SearchMemories,
+    WorkspaceStatus,
+    SearchTrail,
 }
 
 struct AgentDecision {

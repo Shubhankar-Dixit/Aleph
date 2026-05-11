@@ -100,6 +100,7 @@ impl App {
                         &base_url,
                         &access_token,
                         &strix_instruction,
+                        "",
                         &notes,
                         sender.clone(),
                     ) {

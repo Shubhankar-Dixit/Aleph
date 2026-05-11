@@ -723,6 +723,27 @@ impl App {
     }
 
     pub(super) fn start_chat_turn(&mut self, query: String) -> bool {
+        self.start_chat_turn_with_user_message(query, true)
+    }
+
+    pub(super) fn start_chat_turn_without_user_message(&mut self, query: String) -> bool {
+        self.start_chat_turn_with_user_message_and_context(query, false, None)
+    }
+
+    pub(super) fn start_chat_turn_with_user_message(
+        &mut self,
+        query: String,
+        push_user_message: bool,
+    ) -> bool {
+        self.start_chat_turn_with_user_message_and_context(query, push_user_message, None)
+    }
+
+    pub(super) fn start_chat_turn_with_user_message_and_context(
+        &mut self,
+        query: String,
+        push_user_message: bool,
+        extra_context: Option<String>,
+    ) -> bool {
         let query = query.trim().to_string();
         if query.is_empty() {
             return false;
@@ -737,16 +758,30 @@ impl App {
         let openrouter_api_key = self.openrouter_api_key.clone();
         let strix_access_token = self.strix_access_token.clone();
 
-        self.push_chat_message("user", query.clone());
+        if push_user_message {
+            self.push_chat_message("user", query.clone());
+        }
 
         let conversation = match provider {
-            AiProvider::OpenRouter => self.openrouter_conversation(&query),
+            AiProvider::OpenRouter => {
+                self.openrouter_conversation_with_context(&query, extra_context.as_deref())
+            }
             AiProvider::Strix => Vec::new(),
         };
         let strix_notes = if provider == AiProvider::Strix {
             self.notes.clone()
         } else {
             Vec::new()
+        };
+        let strix_context = if provider == AiProvider::Strix {
+            let mut context = self.agent_workspace_context_for_query(&query);
+            if let Some(extra_context) = extra_context.as_deref() {
+                context.push_str("\n\n");
+                context.push_str(extra_context);
+            }
+            context
+        } else {
+            String::new()
         };
 
         self.push_chat_message("assistant", String::new());
@@ -807,6 +842,7 @@ impl App {
                         &base_url,
                         &access_token,
                         &query,
+                        &strix_context,
                         &strix_notes,
                         sender.clone(),
                     ) {
@@ -820,15 +856,33 @@ impl App {
     }
 
     pub(super) fn openrouter_conversation(&self, query: &str) -> Vec<(String, String)> {
+        self.openrouter_conversation_with_context(query, None)
+    }
+
+    pub(super) fn openrouter_conversation_with_context(
+        &self,
+        query: &str,
+        extra_context: Option<&str>,
+    ) -> Vec<(String, String)> {
         let mut conversation = Vec::new();
         conversation.push((
             String::from("system"),
-            String::from("You are Aleph, a concise terminal assistant. Keep answers practical and grounded. Use the provided workspace context when it is relevant, and say when the local notes or memories do not contain enough evidence."),
+            String::from(
+                "You are Aleph, a fast local computer-use agent inside the user's terminal workspace. \
+                 You have an advantage over remote desktop agents because Aleph already sees local notes, memories, room scope, repo state, Trail activity, provider status, and file-backed workspace metadata. \
+                 Answer like an operator: state what local evidence says, propose the next concrete action, and avoid slow speculative planning when a direct local read is enough. \
+                 Separate read-only inspection from writes. Never claim you changed files, launched apps, clicked UI, or executed shell commands unless Aleph actually did so through an available command or approved tool path. \
+                 For risky or destructive computer actions, ask for explicit approval and prefer dry-run/status output first. \
+                 If the provided context lacks enough evidence, say exactly what is missing.",
+            ),
         ));
         conversation.push((
             String::from("system"),
             self.agent_workspace_context_for_query(query),
         ));
+        if let Some(extra_context) = extra_context {
+            conversation.push((String::from("system"), extra_context.to_string()));
+        }
 
         let mut recent_messages: Vec<_> =
             self.chat_messages.iter().rev().take(12).cloned().collect();
@@ -1272,6 +1326,7 @@ impl App {
         base_url: &str,
         token: &str,
         query: &str,
+        workspace_context: &str,
         notes: &[Note],
         sender: Sender<ChatStreamUpdate>,
     ) -> Result<(), String> {
@@ -1291,7 +1346,12 @@ impl App {
             })
             .collect();
         let payload = serde_json::json!({
-            "question": query,
+            "question": format!(
+                "Use this Aleph local computer/workspace context when relevant:\n{}\n\nUser question:\n{}",
+                workspace_context,
+                query
+            ),
+            "context": workspace_context,
             "notes": notes_payload,
         });
         let value =

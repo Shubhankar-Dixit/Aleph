@@ -11,6 +11,12 @@ pub(super) struct MemorySearchResult {
     score: usize,
 }
 
+struct AgentObservation {
+    step: String,
+    summary: String,
+    detail: String,
+}
+
 #[allow(dead_code)]
 impl App {
     pub(super) fn try_start_agent_action(&mut self, query: &str) -> bool {
@@ -24,11 +30,13 @@ impl App {
             | AgentAction::SearchNotes
             | AgentAction::SaveMemory
             | AgentAction::ListMemories
-            | AgentAction::SearchMemories => {
-                self.run_agent_context_action(query, decision);
+            | AgentAction::SearchMemories
+            | AgentAction::WorkspaceStatus
+            | AgentAction::SearchTrail => {
+                self.run_agent_loop(query, decision);
                 true
             }
-            AgentAction::Chat => false,
+            AgentAction::Chat => self.start_agent_model_loop(query),
         }
     }
 
@@ -81,7 +89,9 @@ impl App {
             | AgentAction::SearchNotes
             | AgentAction::SaveMemory
             | AgentAction::ListMemories
-            | AgentAction::SearchMemories => String::new(),
+            | AgentAction::SearchMemories
+            | AgentAction::WorkspaceStatus
+            | AgentAction::SearchTrail => String::new(),
             AgentAction::Chat => String::new(),
         }
     }
@@ -98,8 +108,10 @@ impl App {
             | AgentAction::SearchNotes
             | AgentAction::SaveMemory
             | AgentAction::ListMemories
-            | AgentAction::SearchMemories => {
-                self.run_agent_context_action(&query, decision);
+            | AgentAction::SearchMemories
+            | AgentAction::WorkspaceStatus
+            | AgentAction::SearchTrail => {
+                self.run_agent_loop(&query, decision);
                 true
             }
             AgentAction::Chat => false,
@@ -188,6 +200,24 @@ impl App {
                 rationale: String::from("search-memories"),
             };
         }
+        if Self::looks_like_workspace_status_request(query) {
+            return AgentDecision {
+                action: AgentAction::WorkspaceStatus,
+                note_index: None,
+                title: None,
+                search_query: None,
+                rationale: String::from("workspace-status"),
+            };
+        }
+        if Self::looks_like_trail_search_request(query) {
+            return AgentDecision {
+                action: AgentAction::SearchTrail,
+                note_index: None,
+                title: None,
+                search_query: Self::infer_agent_search_query(query),
+                rationale: String::from("search-trail"),
+            };
+        }
         if Self::looks_like_note_edit_request(query) || self.should_work_on_existing_note(query) {
             let rationale = if target_note.is_some() {
                 "edit-target"
@@ -246,15 +276,17 @@ impl App {
     pub(super) fn agent_planner_conversation(&self, query: &str) -> Vec<(String, String)> {
         let system = String::from(
             "You are Aleph's agent planner. Decide what Aleph should do with the user's chat input. \
-             You may choose exactly one action: chat, create_note, edit_note, read_note, search_notes, save_memory, list_memories, search_memories. \
+             You may choose exactly one action: chat, create_note, edit_note, read_note, search_notes, save_memory, list_memories, search_memories, workspace_status, search_trail. \
              Use read_note when the user asks to open, read, inspect, summarize, or answer from a specific note. \
              Use search_notes when the user asks to find notes, look across notes, or identify notes about a topic. \
              Use save_memory when the user explicitly asks Aleph to remember, save as memory, or keep a durable preference/fact. \
              Use list_memories or search_memories when the user asks what Aleph remembers or asks to go through memories. \
+             Use workspace_status when the user asks Aleph to inspect the current computer/workspace, repo state, files changed, daemon state, connections, or local runtime status. \
+             Use search_trail when the user asks for recent work, local activity, workspace trail, timeline, traces, or what happened before. \
              Use edit_note when the user asks to work on, continue, improve, rewrite, append to, organize, or otherwise change an existing/current note. \
              Use create_note when the user wants new durable writing and no existing note is the right target. \
              Use chat for questions, explanations, brainstorming without durable write intent, or when you need to ask a clarification. \
-             Return ONLY compact JSON with this schema: {\"action\":\"chat|create_note|edit_note|read_note|search_notes|save_memory|list_memories|search_memories\",\"note_id\":number|null,\"title\":string|null,\"query\":string|null,\"rationale\":string}. \
+             Return ONLY compact JSON with this schema: {\"action\":\"chat|create_note|edit_note|read_note|search_notes|save_memory|list_memories|search_memories|workspace_status|search_trail\",\"note_id\":number|null,\"title\":string|null,\"query\":string|null,\"rationale\":string}. \
              Do not write prose outside JSON.",
         );
 
@@ -307,6 +339,8 @@ impl App {
             "save_memory" => AgentAction::SaveMemory,
             "list_memories" => AgentAction::ListMemories,
             "search_memories" => AgentAction::SearchMemories,
+            "workspace_status" => AgentAction::WorkspaceStatus,
+            "search_trail" => AgentAction::SearchTrail,
             _ => return None,
         };
         let note_index = value
@@ -395,12 +429,293 @@ impl App {
             AgentAction::SaveMemory => self.agent_save_memory_response(&decision, query),
             AgentAction::ListMemories => self.agent_list_memories_response(),
             AgentAction::SearchMemories => self.agent_search_memories_response(&decision, query),
+            AgentAction::WorkspaceStatus => self.agent_workspace_status_response(),
+            AgentAction::SearchTrail => self.agent_search_trail_response(&decision, query),
             _ => String::from("That agent action is not available here."),
         };
 
         self.push_chat_message("assistant", response);
         self.last_action = format!("Agent: {}", decision.rationale);
         self.add_activity("Returned local context.");
+    }
+
+    fn run_agent_loop(&mut self, query: &str, decision: AgentDecision) {
+        self.panel_mode = PanelMode::AiChat;
+        self.chat_scroll_offset = 0;
+        self.push_chat_message("user", query.trim());
+        self.add_activity(format!("Started agent loop: {}.", decision.rationale));
+        self.last_action = format!("Agent loop: {}", decision.rationale);
+
+        let plan = self.agent_loop_plan(query, &decision);
+        self.push_chat_message(
+            "assistant",
+            format!(
+                "Thinking...\n- Goal: {}\n- Mode: agent loop\n- Plan:\n{}",
+                Self::preview_text(query.trim(), 140),
+                plan.iter()
+                    .enumerate()
+                    .map(|(index, item)| format!("  {}. {}", index + 1, item))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        );
+
+        let mut observations = Vec::new();
+        for (step_index, step) in plan.iter().enumerate() {
+            self.add_activity(format!("Agent step {}: {}.", step_index + 1, step));
+            let observation = self.run_agent_loop_step(step, query, &decision);
+            self.push_chat_message(
+                "assistant",
+                format!(
+                    "{} {}: {}",
+                    Self::agent_loop_step_marker(step_index),
+                    step,
+                    observation.summary
+                ),
+            );
+            observations.push(observation);
+        }
+
+        if self.agent_loop_should_synthesize(&decision, query)
+            && (self.is_openrouter_connected() || self.is_strix_connected())
+        {
+            self.push_chat_message(
+                "assistant",
+                "Thinking... synthesizing the observations into an answer.",
+            );
+            let context = self.agent_observations_context(&observations);
+            if self.start_chat_turn_with_user_message_and_context(
+                query.trim().to_string(),
+                false,
+                Some(context),
+            ) {
+                self.add_activity("Agent loop handed observations to provider synthesis.");
+                return;
+            }
+        }
+
+        let final_answer = self.agent_loop_final_answer(query, &decision, &observations);
+        self.push_chat_message("assistant", final_answer);
+        self.add_activity("Agent loop finished.");
+    }
+
+    fn agent_loop_plan(&self, query: &str, decision: &AgentDecision) -> Vec<String> {
+        let mut plan = Vec::new();
+        match decision.action {
+            AgentAction::WorkspaceStatus => {
+                plan.push(String::from("Inspect local workspace and repo state"));
+                plan.push(String::from("Check Trail daemon status"));
+            }
+            AgentAction::SearchTrail => {
+                plan.push(String::from("Search the local Trail"));
+                plan.push(String::from("Inspect workspace state for context"));
+            }
+            AgentAction::SearchNotes => {
+                plan.push(String::from("Search notes"));
+                if Self::agent_query_wants_broad_context(query) {
+                    plan.push(String::from("Search memories"));
+                    plan.push(String::from("Search the local Trail"));
+                }
+            }
+            AgentAction::ReadNote => {
+                plan.push(String::from("Resolve and read the target note"));
+                if Self::agent_query_wants_broad_context(query) {
+                    plan.push(String::from("Search memories"));
+                }
+            }
+            AgentAction::ListMemories => {
+                plan.push(String::from("List saved memories"));
+            }
+            AgentAction::SearchMemories => {
+                plan.push(String::from("Search memories"));
+                if Self::agent_query_wants_broad_context(query) {
+                    plan.push(String::from("Search notes"));
+                }
+            }
+            AgentAction::SaveMemory => {
+                plan.push(String::from("Normalize memory"));
+                plan.push(String::from("Save memory locally"));
+            }
+            AgentAction::CreateNote | AgentAction::EditNote | AgentAction::Chat => {
+                plan.push(String::from("Decide next action"));
+            }
+        }
+
+        plan
+    }
+
+    fn run_agent_loop_step(
+        &mut self,
+        step: &str,
+        query: &str,
+        decision: &AgentDecision,
+    ) -> AgentObservation {
+        let detail = match step {
+            "Inspect local workspace and repo state" => self.workspace_context_lines().join("\n"),
+            "Check Trail daemon status" => self.daemon_status_lines().join("\n"),
+            "Search the local Trail" => self.agent_search_trail_response(decision, query),
+            "Search notes" => self.agent_search_notes_response(decision, query),
+            "Resolve and read the target note" => self.agent_read_note_response(decision),
+            "List saved memories" => self.agent_list_memories_response(),
+            "Search memories" => self.agent_search_memories_response(decision, query),
+            "Normalize memory" => decision
+                .search_query
+                .as_deref()
+                .and_then(Self::normalize_memory_text)
+                .map(|memory| format!("Memory candidate: {}", memory))
+                .unwrap_or_else(|| String::from("No durable memory text found.")),
+            "Save memory locally" => self.agent_save_memory_response(decision, query),
+            _ => String::from("No local step was available."),
+        };
+        AgentObservation {
+            step: step.to_string(),
+            summary: Self::agent_observation_summary(step, &detail),
+            detail,
+        }
+    }
+
+    fn agent_loop_final_answer(
+        &self,
+        query: &str,
+        decision: &AgentDecision,
+        observations: &[AgentObservation],
+    ) -> String {
+        let mut lines = vec![
+            String::from("Done."),
+            format!("- Request: {}", Self::preview_text(query.trim(), 140)),
+            format!("- Route: {}", decision.rationale),
+            format!("- Steps run: {}", observations.len()),
+        ];
+
+        if let Some(last_observation) = observations.last() {
+            lines.push(format!("- Last step: {}", last_observation.step));
+            let summary = Self::preview_text(&last_observation.detail, 700);
+            if !summary.trim().is_empty() {
+                lines.push(String::new());
+                lines.push(summary);
+            }
+        }
+
+        match decision.action {
+            AgentAction::CreateNote | AgentAction::EditNote => {
+                lines.push(String::from(
+                    "Write actions still require explicit approval before Aleph changes notes.",
+                ));
+            }
+            AgentAction::WorkspaceStatus | AgentAction::SearchTrail => {
+                lines.push(String::from(
+                    "Next useful move: ask Aleph to act on one of these findings, or narrow the target.",
+                ));
+            }
+            _ => {}
+        }
+
+        lines.join("\n")
+    }
+
+    fn agent_loop_should_synthesize(&self, decision: &AgentDecision, query: &str) -> bool {
+        matches!(
+            decision.action,
+            AgentAction::ReadNote
+                | AgentAction::SearchNotes
+                | AgentAction::SearchMemories
+                | AgentAction::SearchTrail
+        ) || Self::agent_query_wants_broad_context(query)
+    }
+
+    fn agent_loop_step_marker(index: usize) -> &'static str {
+        match index {
+            0 => "Acted",
+            1 => "Observed",
+            _ => "Continued",
+        }
+    }
+
+    fn agent_observation_summary(step: &str, detail: &str) -> String {
+        let non_empty = detail
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        if detail.contains("I did not find") || detail.contains("No ") {
+            return String::from("nothing relevant found.");
+        }
+        if step == "Search notes" {
+            return Self::first_count_phrase(detail, "Found")
+                .unwrap_or_else(|| format!("reviewed {} note lines.", non_empty));
+        }
+        if step == "Search memories" {
+            return Self::first_count_phrase(detail, "Found")
+                .unwrap_or_else(|| format!("reviewed {} memory lines.", non_empty));
+        }
+        if step == "Search the local Trail" {
+            return format!("reviewed {} Trail lines.", non_empty);
+        }
+        if step == "Inspect local workspace and repo state" {
+            return format!("captured {} workspace facts.", non_empty);
+        }
+        if step == "Check Trail daemon status" {
+            return format!("captured {} daemon facts.", non_empty);
+        }
+        Self::preview_text(detail, 120)
+    }
+
+    fn first_count_phrase(detail: &str, prefix: &str) -> Option<String> {
+        detail
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with(prefix))
+            .map(|line| line.trim_end_matches(':').to_string())
+    }
+
+    fn agent_observations_context(&self, observations: &[AgentObservation]) -> String {
+        let mut lines = vec![String::from(
+            "Agent observations from local tools. Use these as evidence, synthesize directly, and do not repeat raw dumps unless needed.",
+        )];
+        for (index, observation) in observations.iter().enumerate() {
+            lines.push(format!(
+                "\nStep {}: {}\nSummary: {}\nObservation:\n{}",
+                index + 1,
+                observation.step,
+                observation.summary,
+                Self::preview_text(&observation.detail, 2800)
+            ));
+        }
+        lines.join("\n")
+    }
+
+    pub(super) fn agent_query_wants_broad_context(query: &str) -> bool {
+        let lower = query.to_lowercase();
+        [
+            "everything",
+            "all",
+            "go through",
+            "look through",
+            "review",
+            "what do you know",
+            "what happened",
+            "recent",
+            "context",
+            "workspace",
+            "computer",
+            "project",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    }
+
+    pub(super) fn start_agent_model_loop(&mut self, query: &str) -> bool {
+        self.panel_mode = PanelMode::AiChat;
+        self.chat_scroll_offset = 0;
+        self.push_chat_message("user", query.trim());
+        self.push_chat_message(
+            "assistant",
+            format!(
+                "Thinking...\n- Goal: {}\n- Local step: assemble workspace context\n- Next step: ask the selected provider to synthesize from that context",
+                Self::preview_text(query.trim(), 140)
+            ),
+        );
+        self.add_activity("Agent loop handed off to provider synthesis.");
+        self.start_chat_turn_without_user_message(query.trim().to_string())
     }
 
     pub(super) fn agent_workspace_context(&self) -> String {
@@ -476,10 +791,19 @@ impl App {
                 .collect::<Vec<_>>()
         };
 
+        let workspace_lines = self.workspace_context_lines();
+        let trail_matches = self.trail_lines(Some(query));
+        let trail = trail_matches
+            .into_iter()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join("\n");
+
         format!(
-            "Workspace context for query: `{}`\n{}\n\nRelevant notes:\n{}\n\nRelevant memories:\n{}",
+            "Workspace context for query: `{}`\n{}\n\nComputer/workspace:\n{}\n\nRelevant notes:\n{}\n\nRelevant memories:\n{}\n\nRelevant trail:\n{}",
             query.trim(),
             selected,
+            workspace_lines.join("\n"),
             if notes.is_empty() {
                 String::from("- none")
             } else {
@@ -489,8 +813,72 @@ impl App {
                 String::from("- none")
             } else {
                 memories.join("\n")
-            }
+            },
+            if trail.trim().is_empty() {
+                String::from("- none")
+            } else {
+                trail
+            },
         )
+    }
+
+    pub(super) fn workspace_context_lines(&self) -> Vec<String> {
+        let cwd = std::env::current_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| String::from("unknown"));
+        let mut lines = vec![
+            format!("- cwd: {}", cwd),
+            format!("- room: {}", self.active_room_label()),
+            format!("- room scope: {}", self.room_scope_summary()),
+            format!("- notes: {}", self.notes.len()),
+            format!("- memories: {}", self.memories.len()),
+            format!("- canvases: {}", self.canvases.len()),
+            format!("- obsidian: {}", self.obsidian_status_label()),
+            format!("- note save target: {}", self.note_save_target_label()),
+            format!("- trail: {}", Self::trail_path().display()),
+        ];
+
+        lines.push(format!(
+            "- OpenRouter: {}",
+            if self.is_openrouter_connected() {
+                "connected"
+            } else {
+                "offline"
+            }
+        ));
+        lines.push(format!(
+            "- Strix: {}",
+            if self.is_strix_connected() {
+                "connected"
+            } else {
+                "offline"
+            }
+        ));
+
+        if let Some(repo) = Self::capture_repo_context() {
+            lines.push(format!("- git cwd: {}", repo.cwd));
+            if let Some(branch) = repo.branch {
+                lines.push(format!("- git branch: {}", branch));
+            }
+            if let Some(head) = repo.head {
+                lines.push(format!("- git head: {}", head));
+            }
+            if repo.dirty_files.is_empty() {
+                lines.push(String::from("- git dirty files: none"));
+            } else {
+                lines.push(format!("- git dirty files: {}", repo.dirty_files.len()));
+                lines.extend(
+                    repo.dirty_files
+                        .iter()
+                        .take(8)
+                        .map(|file| format!("  - {}", file)),
+                );
+            }
+        } else {
+            lines.push(String::from("- git: unavailable"));
+        }
+
+        lines
     }
 
     pub(super) fn ranked_note_matches(&self, query: &str, limit: usize) -> Vec<NoteSearchResult> {
@@ -751,6 +1139,44 @@ impl App {
         lines.join("\n")
     }
 
+    pub(super) fn agent_workspace_status_response(&self) -> String {
+        let mut lines = vec![String::from("Workspace status:")];
+        lines.extend(self.workspace_context_lines());
+        lines.push(String::new());
+        lines.push(String::from("Daemon:"));
+        lines.extend(
+            self.daemon_status_lines()
+                .into_iter()
+                .take(8)
+                .map(|line| format!("- {}", line)),
+        );
+        lines.join("\n")
+    }
+
+    pub(super) fn agent_search_trail_response(
+        &self,
+        decision: &AgentDecision,
+        original_query: &str,
+    ) -> String {
+        let query = decision
+            .search_query
+            .as_deref()
+            .unwrap_or(original_query)
+            .trim()
+            .to_string();
+        let lines = self.trail_lines(Some(&query));
+        if lines
+            .iter()
+            .any(|line| line == "No trail events match that search.")
+        {
+            return format!("I did not find trail events matching `{}`.", query);
+        }
+
+        let mut output = vec![format!("Trail search for `{}`:", query)];
+        output.extend(lines.into_iter().take(16));
+        output.join("\n")
+    }
+
     pub(super) fn save_memory_text(&mut self, memory: &str) -> Result<(), String> {
         let memory = memory.trim();
         if memory.is_empty() {
@@ -992,6 +1418,81 @@ impl App {
         .any(|needle| lower.contains(needle));
 
         mentions_memories && wants_search
+    }
+
+    pub(super) fn looks_like_workspace_status_request(query: &str) -> bool {
+        let lower = query.to_lowercase();
+        if Self::looks_like_how_to_question(&lower) {
+            return false;
+        }
+
+        let mentions_workspace = [
+            "workspace",
+            "computer",
+            "machine",
+            "repo",
+            "repository",
+            "git",
+            "files",
+            "folder",
+            "directory",
+            "runtime",
+            "daemon",
+            "status",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+        let asks_inspect = [
+            "status",
+            "inspect",
+            "what is open",
+            "what am i working on",
+            "where am i",
+            "current",
+            "changed",
+            "dirty",
+            "health",
+            "diagnose",
+            "diagnostic",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+        mentions_workspace && asks_inspect
+    }
+
+    pub(super) fn looks_like_trail_search_request(query: &str) -> bool {
+        let lower = query.to_lowercase();
+        if Self::looks_like_how_to_question(&lower) {
+            return false;
+        }
+
+        let mentions_trail = [
+            "trail",
+            "timeline",
+            "recent work",
+            "recent activity",
+            "activity",
+            "what happened",
+            "last time",
+            "before",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+        let wants_search = [
+            "search",
+            "find",
+            "show",
+            "review",
+            "go through",
+            "what",
+            "recent",
+            "history",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+        mentions_trail && wants_search
     }
 
     pub(super) fn infer_agent_search_query(query: &str) -> Option<String> {
