@@ -1612,10 +1612,27 @@ fn chat_markdown_tables_are_padded_as_blocks() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(text[0], "| Name         | Count |");
-    assert_eq!(text[1], "| ------------ | ----- |");
-    assert_eq!(text[2], "| Alpha        | 2     |");
-    assert_eq!(text[3], "| Beta project | 14    |");
+    assert_eq!(text[0], "## Name");
+    assert_eq!(text[1], "Alpha");
+    assert_eq!(text[2], "## Count");
+    assert_eq!(text[3], "2");
+    assert_eq!(text[4], "");
+    assert_eq!(text[5], "## Name");
+    assert_eq!(text[6], "Beta project");
+    assert_eq!(text[7], "## Count");
+    assert_eq!(text[8], "14");
+}
+
+#[test]
+fn smalltalk_routes_directly_to_chat() {
+    let app = App::new();
+    let decision = app.plan_agent_action_locally("How are you?");
+
+    if let AgentAction::Chat = decision.action {
+    } else {
+        panic!("smalltalk should route to chat");
+    }
+    assert_eq!(decision.rationale, "smalltalk");
 }
 
 #[test]

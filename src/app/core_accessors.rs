@@ -1100,6 +1100,25 @@ impl App {
         self.model_provider_label()
     }
 
+    pub fn current_repo_context(&self) -> Option<&RepoContext> {
+        if let Some(current_fork_id) = self.current_fork_id.as_deref() {
+            if let Some(fork) = self
+                .temporal_forks
+                .iter()
+                .find(|fork| fork.id.as_str() == current_fork_id)
+            {
+                if fork.repo_context.is_some() {
+                    return fork.repo_context.as_ref();
+                }
+            }
+        }
+
+        self.temporal_forks
+            .iter()
+            .rev()
+            .find_map(|fork| fork.repo_context.as_ref())
+    }
+
     pub fn model_provider_label(&self) -> &'static str {
         match self.ai_provider {
             AiProvider::OpenRouter => "OpenRouter",

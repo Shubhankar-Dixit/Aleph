@@ -144,6 +144,16 @@ impl App {
     }
 
     pub(super) fn plan_agent_action_locally(&self, query: &str) -> AgentDecision {
+        if Self::looks_like_direct_smalltalk(query) {
+            return AgentDecision {
+                action: AgentAction::Chat,
+                note_index: None,
+                title: None,
+                search_query: None,
+                rationale: String::from("smalltalk"),
+            };
+        }
+
         if Self::looks_like_how_to_question(&query.to_lowercase()) {
             return AgentDecision {
                 action: AgentAction::Chat,
@@ -421,7 +431,7 @@ impl App {
         self.panel_mode = PanelMode::AiChat;
         self.chat_scroll_offset = 0;
         self.push_chat_message("user", query.trim());
-        self.add_activity(format!("Reading context for {}.", decision.rationale));
+        self.add_activity("Reading local context.");
 
         let response = match decision.action {
             AgentAction::ReadNote => self.agent_read_note_response(&decision),
@@ -435,7 +445,7 @@ impl App {
         };
 
         self.push_chat_message("assistant", response);
-        self.last_action = format!("Agent: {}", decision.rationale);
+        self.last_action = format!("Agent: {}", Self::agent_action_label(decision.action));
         self.add_activity("Returned local context.");
     }
 
@@ -443,46 +453,23 @@ impl App {
         self.panel_mode = PanelMode::AiChat;
         self.chat_scroll_offset = 0;
         self.push_chat_message("user", query.trim());
-        self.add_activity(format!("Started agent loop: {}.", decision.rationale));
-        self.last_action = format!("Agent loop: {}", decision.rationale);
+        self.add_activity("Starting a local agent loop.");
+        self.last_action = format!("Agent loop: {}", Self::agent_action_label(decision.action));
 
         let plan = self.agent_loop_plan(query, &decision);
-        self.push_chat_message(
-            "assistant",
-            format!(
-                "Thinking...\n- Goal: {}\n- Mode: agent loop\n- Plan:\n{}",
-                Self::preview_text(query.trim(), 140),
-                plan.iter()
-                    .enumerate()
-                    .map(|(index, item)| format!("  {}. {}", index + 1, item))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ),
-        );
+        self.add_activity("Inspecting the workspace.");
 
         let mut observations = Vec::new();
         for (step_index, step) in plan.iter().enumerate() {
-            self.add_activity(format!("Agent step {}: {}.", step_index + 1, step));
+            self.add_activity(format!("Running step {}: {}.", step_index + 1, step));
             let observation = self.run_agent_loop_step(step, query, &decision);
-            self.push_chat_message(
-                "assistant",
-                format!(
-                    "{} {}: {}",
-                    Self::agent_loop_step_marker(step_index),
-                    step,
-                    observation.summary
-                ),
-            );
             observations.push(observation);
         }
 
         if self.agent_loop_should_synthesize(&decision, query)
             && (self.is_openrouter_connected() || self.is_strix_connected())
         {
-            self.push_chat_message(
-                "assistant",
-                "Thinking... synthesizing the observations into an answer.",
-            );
+            self.add_activity("Synthesizing the findings into an answer.");
             let context = self.agent_observations_context(&observations);
             if self.start_chat_turn_with_user_message_and_context(
                 query.trim().to_string(),
@@ -497,6 +484,21 @@ impl App {
         let final_answer = self.agent_loop_final_answer(query, &decision, &observations);
         self.push_chat_message("assistant", final_answer);
         self.add_activity("Agent loop finished.");
+    }
+
+    fn agent_action_label(action: AgentAction) -> &'static str {
+        match action {
+            AgentAction::Chat => "chat",
+            AgentAction::CreateNote => "create note",
+            AgentAction::EditNote => "edit note",
+            AgentAction::ReadNote => "read note",
+            AgentAction::SearchNotes => "search notes",
+            AgentAction::SaveMemory => "save memory",
+            AgentAction::ListMemories => "list memories",
+            AgentAction::SearchMemories => "search memories",
+            AgentAction::WorkspaceStatus => "workspace status",
+            AgentAction::SearchTrail => "trail search",
+        }
     }
 
     fn agent_loop_plan(&self, query: &str, decision: &AgentDecision) -> Vec<String> {
@@ -581,9 +583,9 @@ impl App {
         observations: &[AgentObservation],
     ) -> String {
         let mut lines = vec![
-            String::from("Done."),
+            String::from("Result."),
             format!("- Request: {}", Self::preview_text(query.trim(), 140)),
-            format!("- Route: {}", decision.rationale),
+            format!("- Path: {}", Self::agent_action_label(decision.action)),
             format!("- Steps run: {}", observations.len()),
         ];
 
@@ -707,14 +709,7 @@ impl App {
         self.panel_mode = PanelMode::AiChat;
         self.chat_scroll_offset = 0;
         self.push_chat_message("user", query.trim());
-        self.push_chat_message(
-            "assistant",
-            format!(
-                "Thinking...\n- Goal: {}\n- Local step: assemble workspace context\n- Next step: ask the selected provider to synthesize from that context",
-                Self::preview_text(query.trim(), 140)
-            ),
-        );
-        self.add_activity("Agent loop handed off to provider synthesis.");
+        self.add_activity("Handing chat off to the selected provider.");
         self.start_chat_turn_without_user_message(query.trim().to_string())
     }
 
@@ -1589,6 +1584,12 @@ impl App {
             }
         }
 
+        for prefix in ["on ", "about ", "for ", "of "] {
+            if lower.starts_with(prefix) {
+                return cleaned[prefix.len()..].trim().to_string();
+            }
+        }
+
         cleaned.trim().to_string()
     }
 
@@ -1819,6 +1820,30 @@ impl App {
         ]
         .iter()
         .any(|prefix| trimmed.starts_with(prefix))
+    }
+
+    pub(super) fn looks_like_direct_smalltalk(query: &str) -> bool {
+        let lower = query
+            .trim()
+            .trim_matches(|character: char| matches!(character, '?' | '!' | '.' | ','))
+            .to_lowercase();
+        [
+            "hi",
+            "hello",
+            "hey",
+            "how are you",
+            "how's it going",
+            "whats up",
+            "what's up",
+            "who are you",
+            "what can you do",
+            "tell me about yourself",
+            "good morning",
+            "good afternoon",
+            "good evening",
+        ]
+        .iter()
+        .any(|needle| lower == *needle || lower.starts_with(&format!("{} ", needle)))
     }
 
     pub(super) fn resolve_agent_note_target(&self, query: &str) -> Option<usize> {

@@ -21,16 +21,31 @@ fn settings_panel_sections(inner: Rect) -> std::rc::Rc<[Rect]> {
 
 pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let show_activity = area.width >= 108;
-    let max_width = if show_activity { 112 } else { 88 };
-    let center_width = area.width.saturating_sub(8).min(max_width);
+    let max_width = if show_activity { 88 } else { 84 };
+    let center_width = area.width.saturating_sub(6).min(max_width);
     let left_padding = area.width.saturating_sub(center_width) / 2;
     let room_accent = app.room_accent();
     let room_accent_soft = app.room_accent_soft();
+    let current_mode = chat_console_mode(app);
+    let repo_context = app.current_repo_context();
+    let git_status = repo_context
+        .map(|repo| {
+            if repo.dirty_files.is_empty() {
+                String::from("git clean")
+            } else {
+                format!("git dirty: {}", repo.dirty_files.len())
+            }
+        })
+        .unwrap_or_else(|| String::from("git unknown"));
+    let workspace_status = repo_context
+        .and_then(|repo| repo.branch.as_ref().map(|branch| branch.as_str()))
+        .map(|branch| format!("workspace {}", branch))
+        .unwrap_or_else(|| String::from("workspace awake"));
 
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Top meta
+            Constraint::Length(3), // Top meta
             Constraint::Length(1), // Spacer
             Constraint::Min(0),    // Chat messages
             Constraint::Length(1), // Spacer
@@ -70,67 +85,54 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let input_area = top_h_chunks.split(v_chunks[4])[1];
     let hints_area = top_h_chunks.split(v_chunks[5])[1];
 
-    let meta_style = if app.is_thinking() {
-        Style::default()
-            .fg(room_accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(room_accent_soft)
-    };
-
-    let mode_label = if app.is_agent_mode_enabled() {
-        "Agent"
-    } else {
-        "Chat"
-    };
     let provider_connected = match app.ai_provider() {
         AiProvider::OpenRouter => app.is_openrouter_connected(),
         AiProvider::Strix => app.is_strix_connected(),
     };
-    let provider_status = if provider_connected {
-        "connected"
+    let provider_status = if provider_connected { "connected" } else { "offline" };
+    let pulse_label = if app.is_streaming() || app.is_thinking() {
+        app.thinking_status()
     } else {
-        "offline"
+        "ready"
     };
 
-    let title = if app.is_streaming() {
-        format!(
-            "Aleph {} {} {}",
-            mode_label,
-            app.thinking_frame(),
-            app.activity_headline()
-        )
-    } else if app.is_thinking() {
-        format!(
-            "Aleph {} {} {}",
-            mode_label,
-            app.thinking_frame(),
-            app.activity_headline()
-        )
-    } else {
-        format!(
-            "Aleph {} · {} · {} {}",
-            mode_label,
-            app.active_room_label(),
-            app.ai_provider_label(),
-            provider_status
-        )
-    };
-
-    let top_meta = Paragraph::new(Line::from(vec![Span::styled(title, meta_style)]))
-        .alignment(Alignment::Left);
+    let top_meta = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                "ALEPH / OPERATOR",
+                Style::default().fg(room_accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(app.ai_provider_label(), Style::default().fg(room_accent_soft)),
+            Span::raw(" · "),
+            Span::styled(
+                provider_status,
+                Style::default().fg(if provider_connected { room_accent } else { MUTED }),
+            ),
+            Span::raw(" · "),
+            Span::styled(workspace_status, Style::default().fg(TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!("[{}]", current_mode),
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(format!("[{}]", git_status), Style::default().fg(room_accent_soft)),
+            Span::raw(" "),
+            Span::styled(format!("[{}]", pulse_label), Style::default().fg(MUTED)),
+            Span::raw(" "),
+            Span::styled(
+                format!("[room {}]", app.active_room_label()),
+                Style::default().fg(room_accent_soft),
+            ),
+        ]),
+    ])
+    .alignment(Alignment::Left)
+    .style(Style::default().fg(TEXT));
     frame.render_widget(top_meta, meta_area);
 
-    let mut lines: Vec<Line<'static>> = app.chat_render_lines().to_vec();
-    if app.is_streaming() || app.is_thinking() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![Span::styled(
-            format!("{} {}", app.thinking_frame(), app.activity_headline()),
-            Style::default()
-                .fg(room_accent)
-                .add_modifier(Modifier::BOLD),
-        )]));
-    }
+    let lines: Vec<Line<'static>> = app.chat_render_lines().to_vec();
 
     let lines = wrap_lines_to_width(lines, chat_area.width as usize);
     let visible_lines = chat_area.height as usize;
@@ -142,7 +144,7 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let messages_widget = Paragraph::new(lines).scroll((scroll_y, 0));
     frame.render_widget(messages_widget, chat_area);
     if show_activity {
-        render_activity_panel(frame, app, content_chunks[2]);
+        render_run_map_panel(frame, app, content_chunks[2]);
     }
 
     let input_buffer = app.chat_input_buffer();
@@ -181,10 +183,10 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(bottom_hints, hints_area);
 }
 
-fn render_activity_panel(frame: &mut Frame, app: &App, area: Rect) {
+fn render_run_map_panel(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
-            "Activity",
+            "Run Map",
             Style::default()
                 .fg(ACCENT_SOFT)
                 .add_modifier(Modifier::BOLD),
@@ -194,29 +196,70 @@ fn render_activity_panel(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let entries = app.recent_activity(inner.height.saturating_sub(1) as usize);
-    let lines = if entries.is_empty() {
-        vec![Line::from(vec![Span::styled(
-            "No activity yet.",
-            Style::default().fg(MUTED),
-        )])]
+    let repo_context = app.current_repo_context();
+    let current_state = if app.is_streaming() || app.is_thinking() {
+        app.thinking_status().to_string()
     } else {
-        entries
-            .into_iter()
-            .rev()
-            .map(|entry| {
-                Line::from(vec![
-                    Span::styled(format!("{} ", entry.timestamp), Style::default().fg(MUTED)),
-                    Span::styled(entry.label, Style::default().fg(TEXT)),
-                ])
-            })
-            .collect()
+        app.activity_headline()
+    };
+    let workspace_state = repo_context
+        .and_then(|repo| repo.branch.as_ref().map(|branch| (branch.as_str(), repo.dirty_files.len())))
+        .map(|(branch, dirty)| {
+            if dirty == 0 {
+                format!("{} · clean", branch)
+            } else {
+                format!("{} · {} dirty", branch, dirty)
+            }
+        })
+        .unwrap_or_else(|| String::from("workspace idle"));
+    let provider_state = if matches!(app.ai_provider(), AiProvider::OpenRouter) {
+        if app.is_openrouter_connected() {
+            String::from("OpenRouter connected")
+        } else {
+            String::from("OpenRouter offline")
+        }
+    } else if app.is_strix_connected() {
+        String::from("Strix connected")
+    } else {
+        String::from("Strix offline")
+    };
+    let next_state = if app.has_pending_ai_edit() {
+        String::from("awaiting approval")
+    } else if app.is_streaming() || app.is_thinking() {
+        String::from("synthesizing")
+    } else {
+        String::from("awaiting input")
     };
 
-    frame.render_widget(
-        Paragraph::new(wrap_lines_to_width(lines, inner.width as usize)),
-        inner,
-    );
+    let lines = vec![
+        Line::from(vec![Span::styled("Current", Style::default().fg(MUTED))]),
+        Line::from(vec![
+            Span::styled("● ", Style::default().fg(ACCENT)),
+            Span::styled(current_state, Style::default().fg(TEXT)),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled("Context", Style::default().fg(MUTED))]),
+        Line::from(vec![
+            Span::styled("✓ ", Style::default().fg(ACCENT_SOFT)),
+            Span::styled(format!("room {}", app.active_room_label()), Style::default().fg(TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled("✓ ", Style::default().fg(ACCENT_SOFT)),
+            Span::styled(provider_state, Style::default().fg(TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled("✓ ", Style::default().fg(ACCENT_SOFT)),
+            Span::styled(workspace_state, Style::default().fg(TEXT)),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled("Next", Style::default().fg(MUTED))]),
+        Line::from(vec![
+            Span::styled("○ ", Style::default().fg(MUTED)),
+            Span::styled(next_state, Style::default().fg(TEXT)),
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(wrap_lines_to_width(lines, inner.width as usize)), inner);
 }
 
 fn wrap_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
@@ -234,32 +277,37 @@ fn wrap_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'sta
 
         for span in line.spans {
             let style = span.style;
-            let mut segment = String::new();
-
-            for ch in span.content.chars() {
-                if ch == '\n' {
-                    if !segment.is_empty() {
-                        current_spans.push(Span::styled(std::mem::take(&mut segment), style));
-                    }
-                    wrapped.push(Line::from(std::mem::take(&mut current_spans)));
-                    current_width = 0;
-                    continue;
+            if span.content.trim().is_empty() {
+                if !current_spans.is_empty() {
+                    current_spans.push(Span::styled(" ", style));
+                    current_width = current_width.saturating_add(1);
                 }
-
-                if current_width >= width {
-                    if !segment.is_empty() {
-                        current_spans.push(Span::styled(std::mem::take(&mut segment), style));
-                    }
-                    wrapped.push(Line::from(std::mem::take(&mut current_spans)));
-                    current_width = 0;
-                }
-
-                segment.push(ch);
-                current_width += 1;
+                continue;
             }
 
-            if !segment.is_empty() {
-                current_spans.push(Span::styled(segment, style));
+            let mut words = span.content.split_whitespace().peekable();
+            while let Some(word) = words.next() {
+                let word_width = word.chars().count();
+                let needs_space = !current_spans.is_empty() && current_width > 0;
+                let projected = current_width + word_width + usize::from(needs_space);
+
+                if projected > width && !current_spans.is_empty() {
+                    wrapped.push(Line::from(std::mem::take(&mut current_spans)));
+                    current_width = 0;
+                }
+
+                if current_width > 0 {
+                    current_spans.push(Span::styled(" ", style));
+                    current_width += 1;
+                }
+
+                current_spans.push(Span::styled(word.to_string(), style));
+                current_width += word_width;
+
+                if words.peek().is_some() && current_width < width {
+                    current_spans.push(Span::styled(" ", style));
+                    current_width += 1;
+                }
             }
         }
 
@@ -279,6 +327,18 @@ fn line_is_table_row(line: &Line<'static>) -> bool {
     trimmed.starts_with('|')
         && trimmed.ends_with('|')
         && trimmed.chars().filter(|&c| c == '|').count() >= 2
+}
+
+fn chat_console_mode(app: &App) -> &'static str {
+    if app.has_pending_ai_edit() {
+        "Ship"
+    } else if app.is_streaming() || app.is_thinking() {
+        "Inspect"
+    } else if app.is_agent_mode_enabled() {
+        "Plan"
+    } else {
+        "Ask"
+    }
 }
 
 pub(super) fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {

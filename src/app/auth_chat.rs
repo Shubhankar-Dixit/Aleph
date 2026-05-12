@@ -671,42 +671,57 @@ impl App {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
-        if columns == 0 {
+        if rows.is_empty() {
             return lines.iter().map(|line| (*line).to_string()).collect();
         }
 
-        let mut widths = vec![0usize; columns];
-        for row in &rows {
-            if Self::is_chat_table_separator_cells(row) {
-                continue;
+        let has_header = rows.len() > 1 && Self::is_chat_table_separator_cells(&rows[1]);
+        if has_header {
+            let headers = rows.first().cloned().unwrap_or_default();
+            let mut rendered = Vec::new();
+
+            for (row_index, row) in rows
+                .iter()
+                .skip(2)
+                .filter(|row| !Self::is_chat_table_separator_cells(row))
+                .enumerate()
+            {
+                if row_index > 0 {
+                    rendered.push(String::new());
+                }
+
+                for (column, header) in headers.iter().enumerate() {
+                    let header = if header.trim().is_empty() {
+                        format!("Column {}", column + 1)
+                    } else {
+                        header.clone()
+                    };
+                    let value = row.get(column).cloned().unwrap_or_default();
+                    rendered.push(format!("## {}", header));
+                    rendered.push(value);
+                }
             }
-            for (column, cell) in row.iter().enumerate() {
-                widths[column] = widths[column].max(cell.chars().count());
+
+            if !rendered.is_empty() {
+                return rendered;
             }
-        }
-        for width in &mut widths {
-            *width = (*width).max(3);
         }
 
         rows.into_iter()
-            .map(|row| {
-                if Self::is_chat_table_separator_cells(&row) {
-                    let cells = widths
-                        .iter()
-                        .map(|width| "-".repeat(*width))
-                        .collect::<Vec<_>>();
-                    return format!("| {} |", cells.join(" | "));
+            .filter(|row| !Self::is_chat_table_separator_cells(row))
+            .flat_map(|row| {
+                let mut rendered = Vec::new();
+                for (column, cell) in row.iter().enumerate() {
+                    if cell.trim().is_empty() {
+                        continue;
+                    }
+                    rendered.push(format!("## Column {}", column + 1));
+                    rendered.push(cell.clone());
                 }
-
-                let cells = (0..columns)
-                    .map(|column| {
-                        let cell = row.get(column).map(String::as_str).unwrap_or("");
-                        let padding = widths[column].saturating_sub(cell.chars().count());
-                        format!("{}{}", cell, " ".repeat(padding))
-                    })
-                    .collect::<Vec<_>>();
-                format!("| {} |", cells.join(" | "))
+                if rendered.is_empty() {
+                    rendered.push(String::new());
+                }
+                rendered
             })
             .collect()
     }
@@ -762,6 +777,8 @@ impl App {
             self.push_chat_message("user", query.clone());
         }
 
+        let direct_smalltalk = Self::looks_like_direct_smalltalk(&query) && extra_context.is_none();
+
         let conversation = match provider {
             AiProvider::OpenRouter => {
                 self.openrouter_conversation_with_context(&query, extra_context.as_deref())
@@ -788,15 +805,23 @@ impl App {
 
         self.panel_mode = PanelMode::AiChat;
         self.thinking = true;
-        self.thinking_status = String::from("Reading workspace context...");
+        self.thinking_status = if direct_smalltalk {
+            format!("answering directly with {}", self.ai_provider_label())
+        } else {
+            String::from("reading workspace context")
+        };
         self.thinking_ticks_remaining = 20;
         self.chat_scroll_offset = 0;
         self.streaming_buffer.clear();
         self.streaming_active = true;
         self.last_action = format!("AI Chat: {}", query);
         self.add_activity(format!("User asked: {}", Self::preview_text(&query, 72)));
-        self.add_activity("Reading selected note and recent messages.");
-        self.add_activity(format!("Sending request to {}.", self.ai_provider_label()));
+        self.add_activity(if direct_smalltalk {
+            "Answering directly."
+        } else {
+            "Reading workspace context."
+        });
+        self.add_activity(format!("Asking {}.", self.ai_provider_label()));
         let _ = self.append_trail_event(
             "agent",
             format!(
@@ -876,10 +901,12 @@ impl App {
                  If the provided context lacks enough evidence, say exactly what is missing.",
             ),
         ));
-        conversation.push((
-            String::from("system"),
-            self.agent_workspace_context_for_query(query),
-        ));
+        if !Self::looks_like_direct_smalltalk(query) {
+            conversation.push((
+                String::from("system"),
+                self.agent_workspace_context_for_query(query),
+            ));
+        }
         if let Some(extra_context) = extra_context {
             conversation.push((String::from("system"), extra_context.to_string()));
         }
@@ -899,10 +926,10 @@ impl App {
     }
 
     pub(super) fn rebuild_chat_render_cache(&mut self) {
-        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut lines = Vec::<Line<'static>>::new();
 
         if self.chat_messages.is_empty() {
-            lines.push(Line::from(""));
+            lines.push(Line::from(String::new()));
             lines.push(Line::from(vec![Span::styled(
                 if self.is_openrouter_connected() || self.is_strix_connected() {
                     "Welcome to Aleph AI chat. Type a message below to start."
@@ -930,16 +957,29 @@ impl App {
                 CHAT_ACCENT
             };
 
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{} ", prefix),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("({})", message.timestamp),
-                    Style::default().fg(CHAT_MUTED),
-                ),
-            ]));
+            let is_live_assistant = !is_user
+                && index == msg_count - 1
+                && message.content.trim().is_empty()
+                && (self.is_streaming() || self.is_thinking());
+
+            if is_live_assistant {
+                let live_status = self.thinking_status().to_string();
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", prefix),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("· "),
+                    Span::styled(live_status, Style::default().fg(CHAT_MUTED)),
+                ]));
+                self.chat_cache_stable_len = lines.len();
+                continue;
+            }
+
+            lines.push(Line::from(vec![Span::styled(
+                prefix,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )]));
 
             // Mark stable length right after the last message's header
             if index == msg_count - 1 {
