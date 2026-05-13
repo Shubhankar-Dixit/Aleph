@@ -1,5 +1,5 @@
-use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
 use super::*;
+use crate::app::model::TemporalFork;
 
 pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
     let has_status = !app.panel_lines().is_empty();
@@ -875,151 +875,132 @@ pub(super) fn render_path_list_panel(frame: &mut Frame, app: &App, area: Rect) {
             .alignment(Alignment::Center);
         frame.render_widget(empty_p, sections[0]);
     } else {
-        let palette = [
-            Color::Rgb(255, 183, 197), // Sakura Pink
-            Color::Rgb(0, 255, 255),   // Cyber Blue
-            Color::Rgb(176, 38, 255),  // Neon Purple
-            Color::Rgb(152, 255, 152), // Mint Green
-            Color::Rgb(253, 253, 150), // Pastel Yellow
-            Color::Rgb(255, 160, 122), // Light Salmon
-        ];
-
-        let mut tracks: Vec<Option<String>> = Vec::new();
-        let mut fork_tracks: Vec<usize> = Vec::new();
-
-        for fork in forks {
+        // Build a tree structure from forks
+        let mut tree_lines: Vec<Line<'static>> = Vec::new();
+        let selected_idx = app.path_list_selected().min(forks.len().saturating_sub(1));
+        
+        // Create a map of parent -> children
+        let mut children_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        let mut root_indices: Vec<usize> = Vec::new();
+        
+        for (i, fork) in forks.iter().enumerate() {
             if let Some(pid) = &fork.parent_id {
-                if let Some(pos) = tracks.iter().position(|t| t.as_deref() == Some(pid.as_str())) {
-                    tracks[pos] = Some(fork.id.clone());
-                    fork_tracks.push(pos);
-                } else {
-                    let pos = tracks.len();
-                    tracks.push(Some(fork.id.clone()));
-                    fork_tracks.push(pos);
-                }
+                children_map.entry(pid.clone()).or_default().push(i);
             } else {
-                let pos = tracks.len();
-                tracks.push(Some(fork.id.clone()));
-                fork_tracks.push(pos);
+                root_indices.push(i);
             }
         }
-
-        let selected_idx = app
-            .path_list_selected()
-            .min(forks.len().saturating_sub(1));
-
-        let spacing_x = 40.0;
-        let spacing_y = 15.0;
-
-        let selected_x = selected_idx as f64 * spacing_x;
-        // canvas coordinates: y increases upwards. We want track 0 to be at top, so large y.
-        let base_y = 100.0; 
-
-        // Center on selected node
-        let x_bounds = [(selected_x - 40.0).max(0.0), (selected_x + 120.0).max(160.0)];
-        let y_bounds = [0.0, 120.0];
-
-        let mut canvas = Canvas::default()
-            .marker(ratatui::symbols::Marker::Braille)
-            .x_bounds(x_bounds)
-            .y_bounds(y_bounds);
-
-        canvas = canvas.paint(move |ctx| {
-            // Draw connections
-            for (i, fork) in forks.iter().enumerate() {
-                if let Some(pid) = &fork.parent_id {
-                    if let Some(p_idx) = forks.iter().position(|f| f.id == *pid) {
-                        let p_x = p_idx as f64 * spacing_x;
-                        let p_y = base_y - (fork_tracks[p_idx] as f64 * spacing_y);
-                        
-                        let c_x = i as f64 * spacing_x;
-                        let c_y = base_y - (fork_tracks[i] as f64 * spacing_y);
-                        
-                        let color = palette[fork_tracks[i] % palette.len()];
-
-                        // Diagonal elbow connecting parent to child like a metro map
-                        let mid_x = p_x + spacing_x / 2.0;
-
-                        ctx.draw(&CanvasLine {
-                            x1: p_x,
-                            y1: p_y,
-                            x2: mid_x,
-                            y2: p_y,
-                            color,
-                        });
-                        ctx.draw(&CanvasLine {
-                            x1: mid_x,
-                            y1: p_y,
-                            x2: c_x - 5.0,
-                            y2: c_y,
-                            color,
-                        });
-                        ctx.draw(&CanvasLine {
-                            x1: c_x - 5.0,
-                            y1: c_y,
-                            x2: c_x,
-                            y2: c_y,
-                            color,
-                        });
-                    }
-                }
-            }
-
-            // Draw nodes and labels
-            for (i, fork) in forks.iter().enumerate() {
-                let x = i as f64 * spacing_x;
-                let y = base_y - (fork_tracks[i] as f64 * spacing_y);
-                let color = palette[fork_tracks[i] % palette.len()];
-                let is_current = app.current_fork_id() == Some(fork.id.as_str());
-                let is_selected = i == selected_idx;
-
-                let node_style = if is_selected {
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD | Modifier::REVERSED)
-                } else if is_current {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        
+        // Recursive function to render tree
+        fn render_tree(
+            forks: &[TemporalFork],
+            idx: usize,
+            depth: usize,
+            prefix: &str,
+            is_last: bool,
+            selected_idx: usize,
+            current_fork_id: Option<&str>,
+            lines: &mut Vec<Line<'static>>,
+        ) {
+            let fork = &forks[idx];
+            let is_selected = idx == selected_idx;
+            let is_current = current_fork_id == Some(fork.id.as_str());
+            
+            // Build the tree connector
+            let connector = if depth == 0 {
+                String::new()
+            } else {
+                let connector = if is_last { "└── " } else { "├── " };
+                format!("{}{}", prefix, connector)
+            };
+            
+            // Style for the node
+            let node_style = if is_selected {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(ACCENT)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_current {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(TEXT)
+            };
+            
+            // Node marker
+            let marker = if is_selected { "●" } else if is_current { "★" } else { "○" };
+            
+            // Build the line with owned strings
+            let mut spans = vec![
+                Span::styled(connector.clone(), Style::default().fg(MUTED)),
+                Span::styled(marker.to_string(), node_style),
+                Span::raw(" "),
+                Span::styled(fork.label.clone(), node_style),
+            ];
+            
+            // Add metadata
+            let meta = format!(
+                " [{} notes]",
+                fork.notes.len()
+            );
+            spans.push(Span::styled(meta, Style::default().fg(MUTED)));
+            
+            lines.push(Line::from(spans));
+            
+            // Render children
+            let children: Vec<_> = children_map_for_forks(forks, idx);
+            for (child_idx, child_i) in children.iter().enumerate() {
+                let child_is_last = child_idx == children.len() - 1;
+                let new_prefix = if depth == 0 {
+                    String::new()
                 } else {
-                    Style::default().fg(color)
+                    let ext = if is_last { "    " } else { "│   " };
+                    format!("{}{}", prefix, ext)
                 };
-
-                let node_char = if is_selected { "●" } else if is_current { "★" } else { "◉" };
-                ctx.print(x, y, Span::styled(node_char, node_style));
-
-                // Date & ID
-                ctx.print(
-                    x, 
-                    y - 3.0, 
-                    Span::styled(format!("{} {}", fork.created_at.split(' ').next().unwrap_or(""), fork.id), Style::default().fg(Color::DarkGray))
-                );
-                
-                // Label
-                let label_style = if is_selected {
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(TEXT)
-                };
-                ctx.print(
-                    x, 
-                    y - 6.0, 
-                    Span::styled(fork.label.clone(), label_style)
-                );
-
-                // Meta (notes count, branch)
-                let repo_text = fork
-                    .repo_context
-                    .as_ref()
-                    .and_then(|r| r.branch.as_ref().or(r.head.as_ref()))
-                    .map(|b| format!("[{}]", b))
-                    .unwrap_or_default();
-                    
-                ctx.print(
-                    x, 
-                    y - 9.0, 
-                    Span::styled(format!("notes:{} {}", fork.notes.len(), repo_text), Style::default().fg(MUTED))
+                render_tree(
+                    forks,
+                    *child_i,
+                    depth + 1,
+                    &new_prefix,
+                    child_is_last,
+                    selected_idx,
+                    current_fork_id,
+                    lines,
                 );
             }
-        });
-
-        frame.render_widget(canvas, sections[0]);
+        }
+        
+        fn children_map_for_forks(forks: &[TemporalFork], parent_idx: usize) -> Vec<usize> {
+            let parent_id = &forks[parent_idx].id;
+            forks.iter()
+                .enumerate()
+                .filter(|(_, f)| f.parent_id.as_deref() == Some(parent_id))
+                .map(|(i, _)| i)
+                .collect()
+        }
+        
+        // Render all root nodes
+        for (i, root_idx) in root_indices.iter().enumerate() {
+            let is_last = i == root_indices.len() - 1;
+            render_tree(
+                forks,
+                *root_idx,
+                0,
+                "",
+                is_last,
+                selected_idx,
+                app.current_fork_id(),
+                &mut tree_lines,
+            );
+        }
+        
+        // Render the tree
+        let tree_para = Paragraph::new(tree_lines)
+            .wrap(Wrap { trim: false })
+            .scroll((app.path_list_selected() as u16, 0));
+        frame.render_widget(tree_para, sections[0]);
     }
 
     let footer = if app.path_list_delete_is_pending() {
@@ -1035,8 +1016,10 @@ pub(super) fn render_path_list_panel(frame: &mut Frame, app: &App, area: Rect) {
         ])
     } else {
         Line::from(vec![
+            Span::styled("↑/↓", Style::default().fg(ACCENT)),
+            Span::raw(" navigate · "),
             Span::styled("Enter", Style::default().fg(ACCENT)),
-            Span::raw(" inspect · "),
+            Span::raw(" return · "),
             Span::styled("Delete", Style::default().fg(ACCENT_SOFT)),
             Span::raw(" delete · "),
             Span::styled("Esc", Style::default().fg(MUTED)),
