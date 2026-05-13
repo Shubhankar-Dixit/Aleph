@@ -74,8 +74,15 @@ impl App {
         #[cfg(not(test))]
         let agent_mode_enabled = Self::load_agent_mode_enabled().unwrap_or(true);
 
+        #[cfg(test)]
+        let (temporal_forks, current_fork_id) = (Vec::new(), None);
+        #[cfg(not(test))]
         let (temporal_forks, current_fork_id) =
             Self::load_temporal_fork_state().unwrap_or_else(|_| (Vec::new(), None));
+
+        #[cfg(test)]
+        let (rooms, active_room_index) = Self::default_room_state();
+        #[cfg(not(test))]
         let (rooms, active_room_index) =
             Self::load_room_state().unwrap_or_else(|_| Self::default_room_state());
 
@@ -1083,6 +1090,14 @@ impl App {
 
     pub fn room_note_count(&self) -> usize {
         self.room_note_indices().len()
+    }
+
+    pub fn temporal_forks(&self) -> &[crate::app::model::TemporalFork] {
+        &self.temporal_forks
+    }
+
+    pub fn current_fork_id(&self) -> Option<&str> {
+        self.current_fork_id.as_deref()
     }
 
     pub fn room_recent_session_count(&self) -> usize {

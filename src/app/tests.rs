@@ -33,7 +33,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn test_note(id: usize, remote_id: Option<&str>, title: &str, content: &str) -> Note {

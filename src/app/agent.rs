@@ -582,9 +582,16 @@ impl App {
         decision: &AgentDecision,
         observations: &[AgentObservation],
     ) -> String {
+        let request = match decision.action {
+            AgentAction::ReadNote
+            | AgentAction::SearchNotes
+            | AgentAction::SearchMemories
+            | AgentAction::SearchTrail => decision.search_query.as_deref().unwrap_or(query),
+            _ => query,
+        };
         let mut lines = vec![
             String::from("Result."),
-            format!("- Request: {}", Self::preview_text(query.trim(), 140)),
+            format!("- Request: {}", Self::preview_text(request.trim(), 140)),
             format!("- Path: {}", Self::agent_action_label(decision.action)),
             format!("- Steps run: {}", observations.len()),
         ];
@@ -1567,30 +1574,36 @@ impl App {
             words.drain(0..drop_count.min(words.len()));
         }
 
-        let cleaned = words.join(" ");
-        let lower = cleaned.to_lowercase();
-        for prefix in [
-            "a note that i have ",
-            "the note that i have ",
-            "notes that i have ",
-            "a note ",
-            "the note ",
-            "notes ",
-            "that i have ",
-            "i have ",
-        ] {
-            if lower.starts_with(prefix) {
-                return cleaned[prefix.len()..].trim().to_string();
+        let mut cleaned = words.join(" ").trim().to_string();
+        loop {
+            let lower = cleaned.to_lowercase();
+            let mut changed = false;
+            for prefix in [
+                "a note that i have ",
+                "the note that i have ",
+                "notes that i have ",
+                "a note ",
+                "the note ",
+                "notes ",
+                "that i have ",
+                "i have ",
+                "on ",
+                "about ",
+                "for ",
+                "of ",
+            ] {
+                if lower.starts_with(prefix) {
+                    cleaned = cleaned[prefix.len()..].trim().to_string();
+                    changed = true;
+                    break;
+                }
+            }
+            if !changed {
+                break;
             }
         }
 
-        for prefix in ["on ", "about ", "for ", "of "] {
-            if lower.starts_with(prefix) {
-                return cleaned[prefix.len()..].trim().to_string();
-            }
-        }
-
-        cleaned.trim().to_string()
+        cleaned
     }
 
     pub(super) fn agent_search_terms(query: &str) -> Vec<String> {

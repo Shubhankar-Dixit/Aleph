@@ -21,7 +21,7 @@ fn settings_panel_sections(inner: Rect) -> std::rc::Rc<[Rect]> {
 
 pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let show_activity = area.width >= 108;
-    let max_width = if show_activity { 88 } else { 84 };
+    let max_width = if show_activity { 140 } else { 120 };
     let center_width = area.width.saturating_sub(6).min(max_width);
     let left_padding = area.width.saturating_sub(center_width) / 2;
     let room_accent = app.room_accent();
@@ -31,16 +31,16 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let git_status = repo_context
         .map(|repo| {
             if repo.dirty_files.is_empty() {
-                String::from("git clean")
+                String::from("clean")
             } else {
-                format!("git dirty: {}", repo.dirty_files.len())
+                format!("{} dirty", repo.dirty_files.len())
             }
         })
-        .unwrap_or_else(|| String::from("git unknown"));
+        .unwrap_or_else(|| String::from("unknown"));
     let workspace_status = repo_context
         .and_then(|repo| repo.branch.as_ref().map(|branch| branch.as_str()))
-        .map(|branch| format!("workspace {}", branch))
-        .unwrap_or_else(|| String::from("workspace awake"));
+        .map(|branch| branch.to_string())
+        .unwrap_or_else(|| String::from("awake"));
 
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -89,7 +89,11 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         AiProvider::OpenRouter => app.is_openrouter_connected(),
         AiProvider::Strix => app.is_strix_connected(),
     };
-    let provider_status = if provider_connected { "connected" } else { "offline" };
+    let provider_status = if provider_connected {
+        "online"
+    } else {
+        "offline"
+    };
     let pulse_label = if app.is_streaming() || app.is_thinking() {
         app.thinking_status()
     } else {
@@ -99,32 +103,35 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let top_meta = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(
-                "ALEPH / OPERATOR",
-                Style::default().fg(room_accent).add_modifier(Modifier::BOLD),
+                "Aleph",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("  "),
-            Span::styled(app.ai_provider_label(), Style::default().fg(room_accent_soft)),
-            Span::raw(" · "),
+            Span::styled("  ·  ", Style::default().fg(MUTED)),
             Span::styled(
-                provider_status,
-                Style::default().fg(if provider_connected { room_accent } else { MUTED }),
+                current_mode,
+                Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" · "),
-            Span::styled(workspace_status, Style::default().fg(TEXT)),
+            Span::styled("  ·  ", Style::default().fg(MUTED)),
+            Span::styled(
+                format!("room {}", app.active_room_label()),
+                Style::default().fg(MUTED),
+            ),
         ]),
         Line::from(vec![
             Span::styled(
-                format!("[{}]", current_mode),
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(format!("[{}]", git_status), Style::default().fg(room_accent_soft)),
-            Span::raw(" "),
-            Span::styled(format!("[{}]", pulse_label), Style::default().fg(MUTED)),
-            Span::raw(" "),
-            Span::styled(
-                format!("[room {}]", app.active_room_label()),
+                format!("{} {}", app.ai_provider_label(), provider_status),
                 Style::default().fg(room_accent_soft),
+            ),
+            Span::styled("  ·  ", Style::default().fg(MUTED)),
+            Span::styled(workspace_status, Style::default().fg(MUTED)),
+            Span::styled(" · ", Style::default().fg(MUTED)),
+            Span::styled(git_status, Style::default().fg(MUTED)),
+            Span::styled("  ·  ", Style::default().fg(MUTED)),
+            Span::styled(
+                pulse_label,
+                Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
             ),
         ]),
     ])
@@ -141,7 +148,9 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         .saturating_sub(app.chat_scroll_offset().min(max_scroll))
         .min(u16::MAX as usize) as u16;
 
-    let messages_widget = Paragraph::new(lines).scroll((scroll_y, 0));
+    let messages_widget = Paragraph::new(lines)
+        .scroll((scroll_y, 0))
+        .style(Style::default().fg(MUTED));
     frame.render_widget(messages_widget, chat_area);
     if show_activity {
         render_run_map_panel(frame, app, content_chunks[2]);
@@ -203,7 +212,11 @@ fn render_run_map_panel(frame: &mut Frame, app: &App, area: Rect) {
         app.activity_headline()
     };
     let workspace_state = repo_context
-        .and_then(|repo| repo.branch.as_ref().map(|branch| (branch.as_str(), repo.dirty_files.len())))
+        .and_then(|repo| {
+            repo.branch
+                .as_ref()
+                .map(|branch| (branch.as_str(), repo.dirty_files.len()))
+        })
         .map(|(branch, dirty)| {
             if dirty == 0 {
                 format!("{} · clean", branch)
@@ -241,7 +254,10 @@ fn render_run_map_panel(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![Span::styled("Context", Style::default().fg(MUTED))]),
         Line::from(vec![
             Span::styled("✓ ", Style::default().fg(ACCENT_SOFT)),
-            Span::styled(format!("room {}", app.active_room_label()), Style::default().fg(TEXT)),
+            Span::styled(
+                format!("room {}", app.active_room_label()),
+                Style::default().fg(TEXT),
+            ),
         ]),
         Line::from(vec![
             Span::styled("✓ ", Style::default().fg(ACCENT_SOFT)),
@@ -259,7 +275,10 @@ fn render_run_map_panel(frame: &mut Frame, app: &App, area: Rect) {
         ]),
     ];
 
-    frame.render_widget(Paragraph::new(wrap_lines_to_width(lines, inner.width as usize)), inner);
+    frame.render_widget(
+        Paragraph::new(wrap_lines_to_width(lines, inner.width as usize)),
+        inner,
+    );
 }
 
 fn wrap_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {

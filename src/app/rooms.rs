@@ -40,16 +40,15 @@ impl App {
         rooms.retain(|room| !Self::is_global_room(room));
         rooms.insert(0, Self::global_room());
 
-        let active_room_index = if selected_name.is_empty()
-            || selected_name.eq_ignore_ascii_case(GLOBAL_ROOM_NAME)
-        {
-            0
-        } else {
-            rooms
-                .iter()
-                .position(|room| room.name.eq_ignore_ascii_case(&selected_name))
-                .unwrap_or(0)
-        };
+        let active_room_index =
+            if selected_name.is_empty() || selected_name.eq_ignore_ascii_case(GLOBAL_ROOM_NAME) {
+                0
+            } else {
+                rooms
+                    .iter()
+                    .position(|room| room.name.eq_ignore_ascii_case(&selected_name))
+                    .unwrap_or(0)
+            };
 
         (rooms, active_room_index)
     }
@@ -262,10 +261,7 @@ impl App {
         lines
     }
 
-    pub(super) fn room_detail_lines(
-        &self,
-        index: usize,
-    ) -> Result<(String, Vec<String>), String> {
+    pub(super) fn room_detail_lines(&self, index: usize) -> Result<(String, Vec<String>), String> {
         let Some(room) = self.rooms.get(index) else {
             return Err(String::from("Room not found."));
         };
@@ -313,11 +309,7 @@ impl App {
 
         let lower = trimmed.to_lowercase();
         if matches!(lower.as_str(), "all" | "none" | "clear" | "global") {
-            return self
-                .rooms
-                .iter()
-                .position(Self::is_global_room)
-                .or(Some(0));
+            return self.rooms.iter().position(Self::is_global_room).or(Some(0));
         }
 
         self.rooms.iter().enumerate().find_map(|(index, room)| {
@@ -389,7 +381,9 @@ impl App {
 
     pub(super) fn delete_room_at_index(&mut self, index: usize) -> Result<String, String> {
         if self.rooms.get(index).is_some_and(Self::is_global_room) {
-            return Err(String::from("All is the default scope and cannot be deleted."));
+            return Err(String::from(
+                "All is the default scope and cannot be deleted.",
+            ));
         }
 
         if self.rooms.len() <= 1 {

@@ -1,3 +1,4 @@
+use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
 use super::*;
 
 pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
@@ -867,30 +868,159 @@ pub(super) fn render_path_list_panel(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(inner);
 
-    let selected = app
-        .path_list_selected()
-        .min(app.panel_lines().len().saturating_sub(1));
-    let rows = app
-        .panel_lines()
-        .iter()
-        .map(|line| {
-            Row::new(vec![Cell::from(Span::styled(
-                line,
-                Style::default().fg(MUTED),
-            ))])
-        })
-        .collect::<Vec<_>>();
+    let forks = app.temporal_forks();
+    if forks.is_empty() {
+        let empty_p = Paragraph::new("No paths saved yet. Use /path save <name> at a decision point.")
+            .style(Style::default().fg(MUTED))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty_p, sections[0]);
+    } else {
+        let palette = [
+            Color::Rgb(255, 183, 197), // Sakura Pink
+            Color::Rgb(0, 255, 255),   // Cyber Blue
+            Color::Rgb(176, 38, 255),  // Neon Purple
+            Color::Rgb(152, 255, 152), // Mint Green
+            Color::Rgb(253, 253, 150), // Pastel Yellow
+            Color::Rgb(255, 160, 122), // Light Salmon
+        ];
 
-    let table = Table::new(rows, [Constraint::Min(0)])
-        .row_highlight_style(Style::default().fg(TEXT).add_modifier(Modifier::BOLD))
-        .highlight_symbol("▶ ")
-        .column_spacing(0);
+        let mut tracks: Vec<Option<String>> = Vec::new();
+        let mut fork_tracks: Vec<usize> = Vec::new();
 
-    let mut table_state = ratatui::widgets::TableState::default();
-    if !app.panel_lines().is_empty() {
-        table_state.select(Some(selected));
+        for fork in forks {
+            if let Some(pid) = &fork.parent_id {
+                if let Some(pos) = tracks.iter().position(|t| t.as_deref() == Some(pid.as_str())) {
+                    tracks[pos] = Some(fork.id.clone());
+                    fork_tracks.push(pos);
+                } else {
+                    let pos = tracks.len();
+                    tracks.push(Some(fork.id.clone()));
+                    fork_tracks.push(pos);
+                }
+            } else {
+                let pos = tracks.len();
+                tracks.push(Some(fork.id.clone()));
+                fork_tracks.push(pos);
+            }
+        }
+
+        let selected_idx = app
+            .path_list_selected()
+            .min(forks.len().saturating_sub(1));
+
+        let spacing_x = 40.0;
+        let spacing_y = 15.0;
+
+        let selected_x = selected_idx as f64 * spacing_x;
+        // canvas coordinates: y increases upwards. We want track 0 to be at top, so large y.
+        let base_y = 100.0; 
+
+        // Center on selected node
+        let x_bounds = [(selected_x - 40.0).max(0.0), (selected_x + 120.0).max(160.0)];
+        let y_bounds = [0.0, 120.0];
+
+        let mut canvas = Canvas::default()
+            .marker(ratatui::symbols::Marker::Braille)
+            .x_bounds(x_bounds)
+            .y_bounds(y_bounds);
+
+        canvas = canvas.paint(move |ctx| {
+            // Draw connections
+            for (i, fork) in forks.iter().enumerate() {
+                if let Some(pid) = &fork.parent_id {
+                    if let Some(p_idx) = forks.iter().position(|f| f.id == *pid) {
+                        let p_x = p_idx as f64 * spacing_x;
+                        let p_y = base_y - (fork_tracks[p_idx] as f64 * spacing_y);
+                        
+                        let c_x = i as f64 * spacing_x;
+                        let c_y = base_y - (fork_tracks[i] as f64 * spacing_y);
+                        
+                        let color = palette[fork_tracks[i] % palette.len()];
+
+                        // Diagonal elbow connecting parent to child like a metro map
+                        let mid_x = p_x + spacing_x / 2.0;
+
+                        ctx.draw(&CanvasLine {
+                            x1: p_x,
+                            y1: p_y,
+                            x2: mid_x,
+                            y2: p_y,
+                            color,
+                        });
+                        ctx.draw(&CanvasLine {
+                            x1: mid_x,
+                            y1: p_y,
+                            x2: c_x - 5.0,
+                            y2: c_y,
+                            color,
+                        });
+                        ctx.draw(&CanvasLine {
+                            x1: c_x - 5.0,
+                            y1: c_y,
+                            x2: c_x,
+                            y2: c_y,
+                            color,
+                        });
+                    }
+                }
+            }
+
+            // Draw nodes and labels
+            for (i, fork) in forks.iter().enumerate() {
+                let x = i as f64 * spacing_x;
+                let y = base_y - (fork_tracks[i] as f64 * spacing_y);
+                let color = palette[fork_tracks[i] % palette.len()];
+                let is_current = app.current_fork_id() == Some(fork.id.as_str());
+                let is_selected = i == selected_idx;
+
+                let node_style = if is_selected {
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                } else if is_current {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(color)
+                };
+
+                let node_char = if is_selected { "●" } else if is_current { "★" } else { "◉" };
+                ctx.print(x, y, Span::styled(node_char, node_style));
+
+                // Date & ID
+                ctx.print(
+                    x, 
+                    y - 3.0, 
+                    Span::styled(format!("{} {}", fork.created_at.split(' ').next().unwrap_or(""), fork.id), Style::default().fg(Color::DarkGray))
+                );
+                
+                // Label
+                let label_style = if is_selected {
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(TEXT)
+                };
+                ctx.print(
+                    x, 
+                    y - 6.0, 
+                    Span::styled(fork.label.clone(), label_style)
+                );
+
+                // Meta (notes count, branch)
+                let repo_text = fork
+                    .repo_context
+                    .as_ref()
+                    .and_then(|r| r.branch.as_ref().or(r.head.as_ref()))
+                    .map(|b| format!("[{}]", b))
+                    .unwrap_or_default();
+                    
+                ctx.print(
+                    x, 
+                    y - 9.0, 
+                    Span::styled(format!("notes:{} {}", fork.notes.len(), repo_text), Style::default().fg(MUTED))
+                );
+            }
+        });
+
+        frame.render_widget(canvas, sections[0]);
     }
-    frame.render_stateful_widget(table, sections[0], &mut table_state);
 
     let footer = if app.path_list_delete_is_pending() {
         Line::from(vec![

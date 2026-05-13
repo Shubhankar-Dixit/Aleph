@@ -1157,6 +1157,20 @@ impl App {
         self.note_list_selected = self
             .note_list_selected
             .min(self.panel_lines.len().saturating_sub(1));
+        if entering_note_list
+            && self
+                .note_list_indices
+                .get(self.note_list_selected)
+                .is_some_and(|index| *index == usize::MAX)
+        {
+            if let Some(first_note) = self
+                .note_list_indices
+                .iter()
+                .position(|index| *index != usize::MAX)
+            {
+                self.note_list_selected = first_note;
+            }
+        }
         self.panel_mode = PanelMode::NoteList;
         self.panel_title = String::from("Notes (Enter open, Space expand/collapse, Delete delete)");
     }
