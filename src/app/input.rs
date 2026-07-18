@@ -1,11 +1,14 @@
 use super::*;
-use ratatui::prelude::Rect;
+use ratatui::prelude::{Position, Rect};
 
 #[allow(dead_code)]
 impl App {
     pub fn handle_paste(&mut self, text: &str) {
         if self.is_full_editor() && !self.ai_overlay_visible {
             self.insert_editor_text(text);
+        } else if self.is_ai_chat() {
+            self.chat_composer.insert_text(text);
+            self.keep_chat_cursor_visible();
         }
     }
 
@@ -106,11 +109,33 @@ impl App {
 
         if self.is_ai_chat() {
             match mouse_event.kind {
-                MouseEventKind::ScrollUp => self.scroll_chat_up(1),
-                MouseEventKind::ScrollDown => self.scroll_chat_down(1),
+                MouseEventKind::ScrollUp => {
+                    self.scroll_chat_up(1);
+                    self.chat_composer
+                        .set_interaction(ComposerInteraction::Transcript);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_chat_down(1);
+                    if matches!(
+                        self.transcript_viewport.mode,
+                        TranscriptViewportMode::FollowTail
+                    ) {
+                        self.chat_composer
+                            .set_interaction(if self.has_pending_agent_approval() {
+                                ComposerInteraction::Approval
+                            } else {
+                                ComposerInteraction::Editing
+                            });
+                    }
+                }
                 MouseEventKind::Moved => {
-                    if let Ok((_, height)) = crossterm::terminal::size() {
-                        self.chat_input_hovered = mouse_event.row == height.saturating_sub(3);
+                    if let Ok((width, height)) = crossterm::terminal::size() {
+                        let hovered = crate::ui::chat_composer_hit_test(
+                            self,
+                            Rect::new(0, 0, width, height),
+                            Position::new(mouse_event.column, mouse_event.row),
+                        );
+                        self.chat_composer.set_hovered(hovered);
                     }
                 }
                 _ => {}
@@ -430,124 +455,208 @@ impl App {
     }
 
     pub(super) fn handle_chat_key(&mut self, key_event: KeyEvent) {
+        let is_press = key_event.kind == KeyEventKind::Press;
+        let is_press_or_repeat =
+            matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat);
+        let content_width = self.chat_composer_content_width();
+        let returns_to_composer = matches!(
+            key_event.code,
+            KeyCode::Char(_)
+                | KeyCode::Backspace
+                | KeyCode::Delete
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Home
+        ) || (key_event.code == KeyCode::Enter
+            && key_event
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT));
+        if self.chat_composer.interaction() == ComposerInteraction::Transcript
+            && returns_to_composer
+        {
+            self.chat_composer
+                .set_interaction(if self.has_pending_agent_approval() {
+                    ComposerInteraction::Approval
+                } else {
+                    ComposerInteraction::Editing
+                });
+        }
+
         match key_event.code {
-            KeyCode::Esc if key_event.kind == KeyEventKind::Press => {
-                if self.has_pending_agent_approval() {
+            KeyCode::Esc if is_press => {
+                if self.chat_composer.interaction() == ComposerInteraction::Approval
+                    && self.has_pending_agent_approval()
+                {
                     self.cancel_pending_agent_action();
                     return;
                 }
+                if self.chat_composer.interaction() == ComposerInteraction::Transcript {
+                    let interaction = if self.has_pending_agent_approval() {
+                        ComposerInteraction::Approval
+                    } else {
+                        ComposerInteraction::Editing
+                    };
+                    self.chat_composer.set_interaction(interaction);
+                    self.chat_composer.clear_notice();
+                    return;
+                }
                 // Exit chat mode and return to commands
+                self.cancel_foreground_run("The user left agent chat before completion.");
                 self.panel_mode = PanelMode::Commands;
                 self.panel_title = String::from("Commands");
                 self.panel_lines.clear();
                 self.last_action = String::from("Exited AI chat.");
             }
             KeyCode::Char('c')
-                if key_event.kind == KeyEventKind::Press
-                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                if is_press && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                self.request_quit();
+                if self.chat_composer.buffer().is_empty() {
+                    self.request_quit();
+                } else {
+                    self.chat_composer.clear();
+                }
             }
             KeyCode::Char('g')
-                if key_event.kind == KeyEventKind::Press
-                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                if is_press && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.toggle_agent_mode();
             }
-            KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
-                // Send chat message
-                let msg = self.chat_input_buffer.trim().to_string();
+            KeyCode::Enter
+                if is_press
+                    && key_event
+                        .modifiers
+                        .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+            {
+                self.chat_composer.insert_char('\n');
+            }
+            KeyCode::Enter if is_press => {
+                if self.chat_composer.interaction() == ComposerInteraction::Transcript {
+                    self.chat_composer
+                        .set_interaction(if self.has_pending_agent_approval() {
+                            ComposerInteraction::Approval
+                        } else {
+                            ComposerInteraction::Editing
+                        });
+                    return;
+                }
+
+                let msg = self.chat_composer.buffer().trim().to_string();
                 if self.has_pending_agent_approval() {
                     if msg.is_empty() || Self::is_affirmative_agent_permission(&msg) {
                         if self.confirm_pending_agent_action() {
-                            self.chat_input_buffer.clear();
-                            self.chat_input_cursor = 0;
+                            self.chat_composer.clear();
                         }
                         return;
                     }
 
                     if Self::is_negative_agent_permission(&msg) {
                         self.cancel_pending_agent_action();
-                        self.chat_input_buffer.clear();
-                        self.chat_input_cursor = 0;
+                        self.chat_composer.clear();
                         return;
                     }
+                    self.chat_composer.set_notice(
+                        "Approval is waiting. Enter approve/yes or reject/no; your draft is preserved.",
+                    );
+                    return;
+                }
 
-                    self.cancel_pending_agent_action();
+                if self
+                    .active_agent_run()
+                    .is_some_and(|run| !run.phase.is_terminal())
+                {
+                    self.chat_composer
+                        .set_notice("Aleph is still working. Your next instruction is preserved.");
+                    return;
                 }
 
                 if !msg.is_empty() {
                     if (self.agent_mode_enabled && self.try_start_agent_action(&msg))
                         || self.start_chat_turn(msg)
                     {
-                        self.chat_input_buffer.clear();
-                        self.chat_input_cursor = 0;
+                        self.chat_composer.clear();
+                    } else {
+                        self.chat_composer.set_notice(
+                            "Aleph could not start that instruction; the draft is preserved.",
+                        );
                     }
                 }
             }
-            KeyCode::PageUp if key_event.kind == KeyEventKind::Press => self.scroll_chat_up(10),
-            KeyCode::PageDown if key_event.kind == KeyEventKind::Press => self.scroll_chat_down(10),
-            KeyCode::Backspace if key_event.kind == KeyEventKind::Press => {
-                if self.chat_input_cursor > 0 {
-                    let prev = self.chat_input_buffer[..self.chat_input_cursor]
-                        .chars()
-                        .next_back()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
-                    self.chat_input_buffer
-                        .drain(self.chat_input_cursor - prev..self.chat_input_cursor);
-                    self.chat_input_cursor -= prev;
-                }
-            }
-            KeyCode::Delete if key_event.kind == KeyEventKind::Press => {
-                if self.chat_input_cursor < self.chat_input_buffer.len() {
-                    let next = self.chat_input_buffer[self.chat_input_cursor..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
-                    self.chat_input_buffer
-                        .drain(self.chat_input_cursor..self.chat_input_cursor + next);
-                }
-            }
-            KeyCode::Left
-                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            KeyCode::End
+                if is_press
+                    && self.chat_composer.interaction() == ComposerInteraction::Transcript =>
             {
-                if self.chat_input_cursor > 0 {
-                    let prev = self.chat_input_buffer[..self.chat_input_cursor]
-                        .chars()
-                        .next_back()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
-                    self.chat_input_cursor -= prev;
+                self.follow_chat_tail();
+                self.chat_composer
+                    .set_interaction(if self.has_pending_agent_approval() {
+                        ComposerInteraction::Approval
+                    } else {
+                        ComposerInteraction::Editing
+                    });
+            }
+            KeyCode::PageUp if is_press => {
+                self.scroll_chat_up(10);
+                self.chat_composer
+                    .set_interaction(ComposerInteraction::Transcript);
+            }
+            KeyCode::PageDown if is_press => {
+                self.scroll_chat_down(10);
+                if matches!(
+                    self.transcript_viewport.mode,
+                    TranscriptViewportMode::FollowTail
+                ) {
+                    self.chat_composer
+                        .set_interaction(if self.has_pending_agent_approval() {
+                            ComposerInteraction::Approval
+                        } else {
+                            ComposerInteraction::Editing
+                        });
                 }
             }
-            KeyCode::Right
-                if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
-            {
-                if self.chat_input_cursor < self.chat_input_buffer.len() {
-                    let next = self.chat_input_buffer[self.chat_input_cursor..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
-                    self.chat_input_cursor += next;
-                }
+            KeyCode::Backspace if is_press => self.chat_composer.backspace(),
+            KeyCode::Delete if is_press => self.chat_composer.delete(),
+            KeyCode::Left if is_press_or_repeat => self.chat_composer.move_left(),
+            KeyCode::Right if is_press_or_repeat => self.chat_composer.move_right(),
+            KeyCode::Up if is_press_or_repeat => {
+                self.chat_composer.move_vertical(-1, content_width)
             }
-            KeyCode::Home if key_event.kind == KeyEventKind::Press => self.chat_input_cursor = 0,
-            KeyCode::End if key_event.kind == KeyEventKind::Press => {
-                self.chat_input_cursor = self.chat_input_buffer.len()
+            KeyCode::Down if is_press_or_repeat => {
+                self.chat_composer.move_vertical(1, content_width)
             }
+            KeyCode::Home if is_press => self.chat_composer.move_home(content_width),
+            KeyCode::End if is_press => self.chat_composer.move_end(content_width),
             KeyCode::Char(character)
-                if key_event.kind == KeyEventKind::Press
+                if is_press
                     && !key_event.modifiers.contains(KeyModifiers::CONTROL)
                     && !key_event.modifiers.contains(KeyModifiers::ALT) =>
             {
-                self.chat_input_buffer
-                    .insert(self.chat_input_cursor, character);
-                self.chat_input_cursor += character.len_utf8();
+                self.chat_composer.insert_char(character);
             }
             _ => {}
+        }
+        self.keep_chat_cursor_visible();
+    }
+
+    fn chat_composer_content_width(&self) -> usize {
+        crossterm::terminal::size()
+            .map(|(width, height)| {
+                crate::ui::chat_composer_geometry(self, Rect::new(0, 0, width, height))
+                    .content_width
+            })
+            .unwrap_or(76)
+            .max(1)
+    }
+
+    fn keep_chat_cursor_visible(&mut self) {
+        let geometry = crossterm::terminal::size()
+            .map(|(width, height)| {
+                crate::ui::chat_composer_geometry(self, Rect::new(0, 0, width, height))
+            })
+            .ok();
+        if let Some(geometry) = geometry {
+            self.chat_composer
+                .ensure_cursor_visible(geometry.content_width, geometry.area.height as usize);
         }
     }
 

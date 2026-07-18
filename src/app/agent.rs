@@ -11,62 +11,16 @@ pub(super) struct MemorySearchResult {
     score: usize,
 }
 
-struct AgentObservation {
-    step: AgentLoopStep,
-    summary: String,
-    progress: String,
-    detail: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AgentLoopStep {
-    InspectWorkspace,
-    CheckDaemon,
-    SearchTrail,
-    SearchNotes,
-    ReadNote,
-    ListMemories,
-    SearchMemories,
-    NormalizeMemory,
-    SaveMemory,
-    DecideNextAction,
-}
-
-impl AgentLoopStep {
-    fn label(self) -> &'static str {
-        match self {
-            AgentLoopStep::InspectWorkspace => "workspace context",
-            AgentLoopStep::CheckDaemon => "Trail daemon status",
-            AgentLoopStep::SearchTrail => "Trail search",
-            AgentLoopStep::SearchNotes => "note search",
-            AgentLoopStep::ReadNote => "note read",
-            AgentLoopStep::ListMemories => "memory list",
-            AgentLoopStep::SearchMemories => "memory search",
-            AgentLoopStep::NormalizeMemory => "memory cleanup",
-            AgentLoopStep::SaveMemory => "local memory save",
-            AgentLoopStep::DecideNextAction => "next action",
-        }
-    }
-
-    fn progress_line(self) -> &'static str {
-        match self {
-            AgentLoopStep::InspectWorkspace => "Checking the workspace and relevant local context.",
-            AgentLoopStep::CheckDaemon => "Checking the Trail daemon status.",
-            AgentLoopStep::SearchTrail => "Looking through the local Trail.",
-            AgentLoopStep::SearchNotes => "Searching your notes for the relevant thread.",
-            AgentLoopStep::ReadNote => "Reading the target note.",
-            AgentLoopStep::ListMemories => "Reviewing saved memories.",
-            AgentLoopStep::SearchMemories => "Searching saved memories.",
-            AgentLoopStep::NormalizeMemory => "Cleaning up the memory text before saving.",
-            AgentLoopStep::SaveMemory => "Saving the memory locally.",
-            AgentLoopStep::DecideNextAction => "Choosing the next local action.",
-        }
-    }
-}
-
 #[allow(dead_code)]
 impl App {
     pub(super) fn try_start_agent_action(&mut self, query: &str) -> bool {
+        if self
+            .active_agent_run()
+            .is_some_and(|run| !run.phase.is_terminal())
+        {
+            self.last_action = String::from("Aleph is still working on the previous request.");
+            return false;
+        }
         if self.chat_stream_rx.is_some() {
             self.last_action = String::from("Aleph is still answering the previous message.");
             return false;
@@ -105,6 +59,13 @@ impl App {
     /// Spawn the provider-backed planner in the background. Returns false when
     /// no provider is connected (caller falls back to a plain chat turn).
     pub(super) fn start_agent_model_plan(&mut self, query: &str) -> bool {
+        if self
+            .active_agent_run()
+            .is_some_and(|run| !run.phase.is_terminal() && run.request != query.trim())
+        {
+            self.last_action = String::from("Aleph is still working on the previous request.");
+            return false;
+        }
         if self.chat_stream_rx.is_some() {
             self.last_action = String::from("Aleph is still answering the previous message.");
             return false;
@@ -125,7 +86,7 @@ impl App {
         };
 
         self.panel_mode = PanelMode::AiChat;
-        self.chat_scroll_offset = 0;
+        self.follow_chat_tail();
         self.push_chat_message("user", query.trim());
         self.thinking = true;
         self.thinking_status = String::from("choosing the next action");
@@ -238,7 +199,7 @@ impl App {
         push_user_message: bool,
     ) {
         self.panel_mode = PanelMode::AiChat;
-        self.chat_scroll_offset = 0;
+        self.follow_chat_tail();
         if push_user_message {
             self.push_chat_message("user", query.trim());
         }
@@ -770,7 +731,7 @@ impl App {
 
     pub(super) fn run_agent_context_action(&mut self, query: &str, decision: AgentDecision) {
         self.panel_mode = PanelMode::AiChat;
-        self.chat_scroll_offset = 0;
+        self.follow_chat_tail();
         self.push_chat_message("user", query.trim());
         self.add_activity("Reading local context.");
 
@@ -809,54 +770,262 @@ impl App {
         push_user_message: bool,
     ) {
         self.panel_mode = PanelMode::AiChat;
-        self.chat_scroll_offset = 0;
+        self.follow_chat_tail();
         if push_user_message {
             self.push_chat_message("user", query.trim());
         }
-        self.add_activity("Reading local context before answering.");
-        let _ = self.transition_run(RunPhase::Acting);
+        self.add_activity("Preparing local context steps.");
         self.last_action = format!("Aleph agent: {}", Self::agent_action_label(decision.action));
 
         let plan = self.agent_loop_plan(query, &decision);
-
-        let mut observations = Vec::new();
-        for step in plan {
-            self.add_activity(step.progress_line());
-            let run_step = self
-                .start_step(step.progress_line(), Some(step.label().to_string()))
-                .ok();
-            let observation = self.run_agent_loop_step(step, query, &decision);
-            self.add_activity(observation.summary.clone());
-            if let Some(run_step) = run_step {
-                let _ = self.complete_step(run_step, observation.summary.clone());
-            }
-            observations.push(observation);
+        let queued = plan.iter().map(|step| {
+            (
+                step.progress_line().to_string(),
+                Some(step.label().to_string()),
+            )
+        });
+        if let Err(error) = self.queue_run_steps(queued) {
+            let _ = self.fail_run(error);
+            return;
         }
 
-        if self.agent_loop_should_synthesize(&decision, query)
-            && (self.is_openrouter_connected() || self.is_strix_connected())
+        self.agent_execution_generation = self.agent_execution_generation.wrapping_add(1);
+        let generation = self.agent_execution_generation;
+        let run_id = self.active_run_id.unwrap_or_default();
+        let pending_provider = self.agent_loop_should_synthesize(&decision, query)
+            && (self.is_openrouter_connected() || self.is_strix_connected());
+        self.pending_agent_execution = Some(PendingAgentExecution {
+            run_id,
+            generation,
+            query: query.trim().to_string(),
+            decision,
+            steps: plan,
+            current_step: 0,
+            phase: AgentExecutionPhase::StartStep,
+            observations: Vec::new(),
+            pending_provider,
+        });
+    }
+
+    /// Advances at most one visible local-agent transition. The terminal loop
+    /// calls this once per application iteration, independently of animation
+    /// ticks, so Pending, Running, and terminal step states can each render.
+    pub(super) fn process_agent_execution(&mut self) {
+        let Some(mut execution) = self.pending_agent_execution.take() else {
+            self.discard_stale_agent_worker_results();
+            return;
+        };
+
+        let run_is_current = self.active_run_id == Some(execution.run_id)
+            && self
+                .agent_run(execution.run_id)
+                .is_some_and(|run| !run.phase.is_terminal());
+        if !run_is_current || execution.generation != self.agent_execution_generation {
+            self.discard_stale_agent_worker_results();
+            return;
+        }
+        if self
+            .agent_run(execution.run_id)
+            .is_some_and(|run| run.phase == RunPhase::WaitingApproval)
         {
+            self.pending_agent_execution = Some(execution);
+            return;
+        }
+
+        match execution.phase {
+            AgentExecutionPhase::StartStep => {
+                if execution.current_step >= execution.steps.len() {
+                    execution.phase = AgentExecutionPhase::Finish;
+                } else if let Err(error) = self.start_queued_step(execution.current_step) {
+                    let _ = self.fail_run(error);
+                    return;
+                } else {
+                    let step = execution.steps[execution.current_step];
+                    self.add_activity(step.progress_line());
+                    execution.phase = AgentExecutionPhase::ExecuteStep;
+                }
+                self.pending_agent_execution = Some(execution);
+            }
+            AgentExecutionPhase::ExecuteStep => {
+                let step = execution.steps[execution.current_step];
+                if step == AgentLoopStep::InspectWorkspace {
+                    let sender = self.agent_worker_tx.clone();
+                    let run_id = execution.run_id;
+                    let generation = execution.generation;
+                    let step_index = execution.current_step;
+                    thread::spawn(move || {
+                        #[cfg(test)]
+                        let result = Ok(None);
+                        #[cfg(not(test))]
+                        let result = std::panic::catch_unwind(Self::capture_repo_context)
+                            .map_err(|_| String::from("repository inspection worker panicked"));
+                        let _ = sender.send(AgentWorkerResult {
+                            run_id,
+                            generation,
+                            step_index,
+                            result,
+                        });
+                    });
+                    execution.phase = AgentExecutionPhase::WaitingWorker;
+                    self.pending_agent_execution = Some(execution);
+                    return;
+                }
+
+                let observation =
+                    self.run_agent_loop_step(step, &execution.query, &execution.decision);
+                if let Some(error) = Self::agent_observation_error(&observation) {
+                    let _ = self.fail_step(execution.current_step, error);
+                    return;
+                }
+                self.finish_progressive_agent_step(&mut execution, observation);
+                self.pending_agent_execution = Some(execution);
+            }
+            AgentExecutionPhase::WaitingWorker => match self.agent_worker_rx.try_recv() {
+                Ok(result)
+                    if result.run_id == execution.run_id
+                        && result.generation == execution.generation
+                        && result.step_index == execution.current_step =>
+                {
+                    match result.result {
+                        Ok(repo) => {
+                            let observation = self.agent_workspace_worker_observation(
+                                &execution.query,
+                                repo.as_ref(),
+                            );
+                            self.finish_progressive_agent_step(&mut execution, observation);
+                            self.pending_agent_execution = Some(execution);
+                        }
+                        Err(error) => {
+                            let _ = self.fail_step(execution.current_step, error);
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // A cancelled or replaced run can finish after a newer one
+                    // starts. Its typed result is intentionally ignored.
+                    self.pending_agent_execution = Some(execution);
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_agent_execution = Some(execution);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    let _ = self.fail_step(
+                        execution.current_step,
+                        "The local inspection worker disconnected.",
+                    );
+                }
+            },
+            AgentExecutionPhase::Finish => self.finish_progressive_agent_execution(execution),
+        }
+    }
+
+    fn finish_progressive_agent_step(
+        &mut self,
+        execution: &mut PendingAgentExecution,
+        observation: AgentObservation,
+    ) {
+        self.add_activity(observation.summary.clone());
+        if self
+            .complete_step(execution.current_step, observation.summary.clone())
+            .is_err()
+        {
+            return;
+        }
+        execution.observations.push(observation);
+        execution.current_step += 1;
+        execution.phase = if execution.current_step < execution.steps.len() {
+            AgentExecutionPhase::StartStep
+        } else {
+            AgentExecutionPhase::Finish
+        };
+    }
+
+    fn finish_progressive_agent_execution(&mut self, execution: PendingAgentExecution) {
+        if execution.pending_provider {
             self.add_activity("Writing an answer from the local findings.");
-            let context = self.agent_observations_context(&observations);
+            let context = self.agent_observations_context(&execution.observations);
             if self.start_chat_turn_with_user_message_and_context(
-                query.trim().to_string(),
+                execution.query.clone(),
                 false,
                 Some(context),
             ) {
                 self.add_activity("Local findings are in the provider context.");
                 return;
             }
+            let _ = self.fail_run("Aleph could not start provider synthesis.");
+            return;
         }
 
-        let final_answer = self.agent_loop_final_answer(query, &decision, &observations);
+        let final_answer = self.agent_loop_final_answer(
+            &execution.query,
+            &execution.decision,
+            &execution.observations,
+        );
         self.push_chat_message("assistant", final_answer);
         self.add_activity("Answered from local context.");
-        if decision.action == AgentAction::SaveMemory {
+        if execution.decision.action == AgentAction::SaveMemory {
             let _ = self.mark_proposed_changes(ChangeStatus::Applied);
             let _ = self.complete_run("Saved the approved memory change.");
         } else {
             let _ = self.complete_run("Completed from local context. No changes were made.");
         }
+    }
+
+    fn agent_observation_error(observation: &AgentObservation) -> Option<String> {
+        observation
+            .detail
+            .strip_prefix("Memory save failed:")
+            .map(|error| error.trim().to_string())
+    }
+
+    fn agent_workspace_worker_observation(
+        &self,
+        query: &str,
+        repo: Option<&RepoContext>,
+    ) -> AgentObservation {
+        let mut detail = vec![
+            format!("Workspace context for query: `{}`", query.trim()),
+            format!("- agent context: {}", self.agent_context_scope_label()),
+            format!("- room: {}", self.active_room_label()),
+            format!("- notes: {}", self.notes.len()),
+            format!("- memories: {}", self.memories.len()),
+        ];
+        Self::push_repo_context_lines(&mut detail, repo.cloned());
+        let detail = detail.join("\n");
+        AgentObservation {
+            step: AgentLoopStep::InspectWorkspace,
+            summary: Self::agent_observation_summary(AgentLoopStep::InspectWorkspace, &detail),
+            progress: AgentLoopStep::InspectWorkspace.progress_line().to_string(),
+            detail,
+        }
+    }
+
+    pub(super) fn terminate_pending_execution(&mut self) {
+        if self.pending_agent_execution.take().is_some() {
+            self.agent_execution_generation = self.agent_execution_generation.wrapping_add(1);
+        }
+    }
+
+    pub(super) fn cancel_foreground_run(&mut self, reason: &str) {
+        let has_active_run = self
+            .active_agent_run()
+            .is_some_and(|run| !run.phase.is_terminal());
+        if !has_active_run {
+            return;
+        }
+        self.chat_stream_rx = None;
+        self.agent_plan_rx = None;
+        self.agent_plan_query = None;
+        self.streaming_buffer.clear();
+        self.streaming_active = false;
+        self.thinking = false;
+        self.thinking_status.clear();
+        self.thinking_ticks_remaining = 0;
+        let _ = self.cancel_run(reason);
+    }
+
+    fn discard_stale_agent_worker_results(&mut self) {
+        while self.agent_worker_rx.try_recv().is_ok() {}
     }
 
     fn agent_action_label(action: AgentAction) -> &'static str {
@@ -1098,7 +1267,7 @@ impl App {
     pub(super) fn start_agent_model_loop(&mut self, query: &str) -> bool {
         self.begin_run(query, RunPhase::Planning);
         self.panel_mode = PanelMode::AiChat;
-        self.chat_scroll_offset = 0;
+        self.follow_chat_tail();
         self.push_chat_message("user", query.trim());
         self.add_activity("Handing chat off to the selected provider.");
         self.start_chat_turn_without_user_message(query.trim().to_string())

@@ -190,6 +190,7 @@ impl App {
                 }
             }
             "logout" => {
+                self.cancel_foreground_run("Provider sign-out interrupted the active run.");
                 self.openrouter_api_key = None;
                 self.strix_access_token = None;
                 if self.note_save_target == NoteSaveTarget::Strix {
@@ -216,8 +217,7 @@ impl App {
                 self.clear_strix_access_token();
                 self.refresh_connection_state();
                 self.chat_messages.clear();
-                self.chat_input_buffer.clear();
-                self.chat_input_cursor = 0;
+                self.chat_composer.clear();
                 self.rebuild_chat_render_cache();
                 self.panel_mode = PanelMode::Commands;
                 self.panel_title = String::from("Commands");
@@ -1405,6 +1405,7 @@ impl App {
         content: impl Into<String>,
     ) {
         self.chat_messages.push(ChatMessage {
+            id: self.next_chat_message_id,
             role: role.into(),
             content: content.into(),
             timestamp: Self::clock_time_label(),
@@ -1412,21 +1413,23 @@ impl App {
             turn_seconds: None,
             run_id: self.active_run_id,
         });
+        self.next_chat_message_id = self.next_chat_message_id.saturating_add(1);
 
         if self.chat_messages.len() > MAX_CHAT_MESSAGES {
             let overflow = self.chat_messages.len() - MAX_CHAT_MESSAGES;
             self.chat_messages.drain(0..overflow);
         }
 
+        self.note_transcript_activity();
         self.rebuild_chat_render_cache();
     }
 
     pub(super) fn scroll_chat_up(&mut self, lines: usize) {
-        self.chat_scroll_offset = self.chat_scroll_offset.saturating_add(lines);
+        self.scroll_chat_by(-(lines.min(isize::MAX as usize) as isize));
     }
 
     pub(super) fn scroll_chat_down(&mut self, lines: usize) {
-        self.chat_scroll_offset = self.chat_scroll_offset.saturating_sub(lines);
+        self.scroll_chat_by(lines.min(isize::MAX as usize) as isize);
     }
 
     pub(super) fn clock_time_label() -> String {

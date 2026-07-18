@@ -821,6 +821,14 @@ impl App {
             return false;
         }
 
+        if self
+            .active_agent_run()
+            .is_some_and(|run| !run.phase.is_terminal() && run.request != query)
+        {
+            self.last_action = String::from("Aleph is still working on the previous request.");
+            return false;
+        }
+
         if self.chat_stream_rx.is_some() {
             self.last_action = String::from("Aleph is still answering the previous message.");
             return false;
@@ -872,7 +880,7 @@ impl App {
             String::from("reading workspace context")
         };
         self.thinking_ticks_remaining = 20;
-        self.chat_scroll_offset = 0;
+        self.follow_chat_tail();
         self.streaming_buffer.clear();
         self.streaming_active = true;
         let _ = self.transition_run(RunPhase::Streaming);
@@ -1158,7 +1166,6 @@ impl App {
     /// Used during streaming so we don't re-parse every previous message's
     /// markdown on each token from the model.
     pub(super) fn rebuild_chat_render_cache_streaming(&mut self) {
-        let old_len = self.chat_render_cache.len();
         self.chat_render_cache.truncate(self.chat_cache_stable_len);
 
         if let Some(last_msg) = self.chat_messages.last() {
@@ -1168,10 +1175,7 @@ impl App {
             }
         }
 
-        if self.chat_scroll_offset > 0 {
-            let delta = self.chat_render_cache.len().saturating_sub(old_len);
-            self.chat_scroll_offset = self.chat_scroll_offset.saturating_add(delta);
-        }
+        self.note_transcript_activity();
     }
 
     pub(super) fn send_openrouter_chat_streaming(

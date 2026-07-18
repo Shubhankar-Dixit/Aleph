@@ -229,6 +229,16 @@ impl App {
         self.current_fork_id = Some(fork.id.clone());
         self.activity_log = fork.activity_context.iter().cloned().collect();
         self.chat_messages = fork.chat_context.clone();
+        for message in &mut self.chat_messages {
+            if message.id == 0 {
+                message.id = self.next_chat_message_id;
+                self.next_chat_message_id = self.next_chat_message_id.saturating_add(1);
+            }
+        }
+        if let Some(max_id) = self.chat_messages.iter().map(|message| message.id).max() {
+            self.next_chat_message_id = self.next_chat_message_id.max(max_id.saturating_add(1));
+        }
+        self.follow_chat_tail();
         self.rebuild_chat_render_cache();
         self.editor_note_index = None;
         self.editor_buffer.clear();
@@ -777,6 +787,7 @@ impl App {
 
     fn chat_to_fork_value(message: &ChatMessage) -> serde_json::Value {
         serde_json::json!({
+            "id": message.id,
             "role": message.role,
             "content": message.content,
             "timestamp": message.timestamp,
@@ -785,6 +796,7 @@ impl App {
 
     fn chat_from_fork_value(value: &serde_json::Value) -> Option<ChatMessage> {
         Some(ChatMessage {
+            id: value.get("id").and_then(|id| id.as_u64()).unwrap_or(0),
             role: value.get("role")?.as_str()?.to_string(),
             content: value.get("content")?.as_str()?.to_string(),
             timestamp: value.get("timestamp")?.as_str()?.to_string(),

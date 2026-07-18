@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -26,6 +27,7 @@ mod agent;
 mod agent_run;
 mod ai_edit;
 mod auth_chat;
+mod chat_composer;
 mod commands;
 mod commands_notes;
 mod core_accessors;
@@ -38,6 +40,7 @@ mod rooms;
 mod strix;
 mod temporal_forks;
 mod trail;
+mod transcript;
 
 pub use commands::{COMMANDS, THINKING_FRAMES};
 pub use model::*;
@@ -81,7 +84,7 @@ enum ChatStreamUpdate {
     Notice(String),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AgentAction {
     Chat,
     CreateNote,
@@ -95,12 +98,98 @@ enum AgentAction {
     SearchTrail,
 }
 
+#[derive(Clone, Debug)]
 struct AgentDecision {
     action: AgentAction,
     note_index: Option<usize>,
     title: Option<String>,
     search_query: Option<String>,
     rationale: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentExecutionPhase {
+    StartStep,
+    ExecuteStep,
+    WaitingWorker,
+    Finish,
+}
+
+struct PendingAgentExecution {
+    run_id: u64,
+    generation: u64,
+    query: String,
+    decision: AgentDecision,
+    steps: Vec<AgentLoopStep>,
+    current_step: usize,
+    phase: AgentExecutionPhase,
+    observations: Vec<AgentObservation>,
+    pending_provider: bool,
+}
+
+struct AgentWorkerResult {
+    run_id: u64,
+    generation: u64,
+    step_index: usize,
+    result: Result<Option<RepoContext>, String>,
+}
+
+struct CachedTranscriptMessage {
+    fingerprint: u64,
+    lines: Vec<Line<'static>>,
+}
+
+struct AgentObservation {
+    step: AgentLoopStep,
+    summary: String,
+    progress: String,
+    detail: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentLoopStep {
+    InspectWorkspace,
+    CheckDaemon,
+    SearchTrail,
+    SearchNotes,
+    ReadNote,
+    ListMemories,
+    SearchMemories,
+    NormalizeMemory,
+    SaveMemory,
+    DecideNextAction,
+}
+
+impl AgentLoopStep {
+    fn label(self) -> &'static str {
+        match self {
+            AgentLoopStep::InspectWorkspace => "workspace context",
+            AgentLoopStep::CheckDaemon => "Trail daemon status",
+            AgentLoopStep::SearchTrail => "Trail search",
+            AgentLoopStep::SearchNotes => "note search",
+            AgentLoopStep::ReadNote => "note read",
+            AgentLoopStep::ListMemories => "memory list",
+            AgentLoopStep::SearchMemories => "memory search",
+            AgentLoopStep::NormalizeMemory => "memory cleanup",
+            AgentLoopStep::SaveMemory => "local memory save",
+            AgentLoopStep::DecideNextAction => "next action",
+        }
+    }
+
+    fn progress_line(self) -> &'static str {
+        match self {
+            AgentLoopStep::InspectWorkspace => "Checking the workspace and relevant local context.",
+            AgentLoopStep::CheckDaemon => "Checking the Trail daemon status.",
+            AgentLoopStep::SearchTrail => "Looking through the local Trail.",
+            AgentLoopStep::SearchNotes => "Searching your notes for the relevant thread.",
+            AgentLoopStep::ReadNote => "Reading the target note.",
+            AgentLoopStep::ListMemories => "Reviewing saved memories.",
+            AgentLoopStep::SearchMemories => "Searching saved memories.",
+            AgentLoopStep::NormalizeMemory => "Cleaning up the memory text before saving.",
+            AgentLoopStep::SaveMemory => "Saving the memory locally.",
+            AgentLoopStep::DecideNextAction => "Choosing the next local action.",
+        }
+    }
 }
 
 struct NoteSyncUpdate {
@@ -154,13 +243,13 @@ pub struct App {
     redo_stack: VecDeque<EditorState>,
     search_state: SearchState,
     chat_messages: Vec<ChatMessage>,
+    next_chat_message_id: u64,
     agent_runs: Vec<AgentRun>,
     active_run_id: Option<u64>,
     next_run_id: u64,
     activity_log: VecDeque<ActivityEntry>,
-    chat_input_buffer: String,
-    chat_input_cursor: usize,
-    chat_scroll_offset: usize,
+    chat_composer: ChatComposerState,
+    transcript_viewport: TranscriptViewportState,
     openrouter_api_key: Option<String>,
     strix_access_token: Option<String>,
     chat_stream_rx: Option<Receiver<ChatStreamUpdate>>,
@@ -182,6 +271,7 @@ pub struct App {
     streaming_active: bool,
     thinking_status: String,
     chat_render_cache: Vec<Line<'static>>,
+    transcript_message_cache: RefCell<HashMap<u64, CachedTranscriptMessage>>,
     chat_render_dirty: bool,
     chat_cache_stable_len: usize,
     agent_mode_enabled: bool,
@@ -195,8 +285,11 @@ pub struct App {
     pending_agent_decision: Option<AgentDecision>,
     agent_plan_rx: Option<Receiver<Result<String, String>>>,
     agent_plan_query: Option<String>,
+    pending_agent_execution: Option<PendingAgentExecution>,
+    agent_execution_generation: u64,
+    agent_worker_tx: Sender<AgentWorkerResult>,
+    agent_worker_rx: Receiver<AgentWorkerResult>,
     chat_turn_started_at: Option<Instant>,
-    chat_input_hovered: bool,
     ghost_stream_rx: Option<Receiver<ChatStreamUpdate>>,
     ghost_streaming: bool,
     ghost_result: Option<String>,

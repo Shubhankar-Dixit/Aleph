@@ -94,6 +94,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
 
     loop {
         terminal.draw(|frame| ui::draw(frame, &app))?;
+        // Semantic agent progress happens after the current state has had a
+        // render opportunity. Input submitted later in this iteration remains
+        // visibly Pending until the next pass.
+        app.on_iteration();
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())

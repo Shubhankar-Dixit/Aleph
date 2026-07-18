@@ -966,6 +966,7 @@ impl App {
     }
 
     pub(super) fn reset_and_clear_all(&mut self) {
+        self.cancel_foreground_run("Reset interrupted the active run.");
         // Clear API keys from keyring
         self.clear_openrouter_api_key();
         self.clear_strix_access_token();
@@ -996,9 +997,8 @@ impl App {
 
         // Clear chat and notes data
         self.chat_messages.clear();
-        self.chat_input_buffer.clear();
-        self.chat_input_cursor = 0;
-        self.chat_scroll_offset = 0;
+        self.chat_composer.clear();
+        self.follow_chat_tail();
         self.chat_render_cache.clear();
         self.chat_render_dirty = true;
         self.chat_cache_stable_len = 0;

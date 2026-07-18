@@ -16,10 +16,13 @@ use self::panels::{
     render_obsidian_vault_picker_panel, render_path_list_panel, render_room_list_panel,
 };
 use crate::app::{
-    AgentRun, App, ChangeStatus, ChatMessage, EditorSaveStatus, PanelMode, RepositoryContextSource,
-    RunOutcome, RunPhase, StepStatus,
+    AgentRun, App, ChangeStatus, ChatMessage, ComposerInteraction, EditorSaveStatus, PanelMode,
+    RepositoryContextSource, RunOutcome, RunPhase, StepStatus, TranscriptBlockId,
+    TranscriptLayoutBlock, TranscriptLayoutSnapshot, TranscriptRunBlockKind,
 };
-pub(crate) use chat_settings::settings_items_area;
+pub(crate) use chat_settings::{
+    chat_composer_geometry, chat_composer_hit_test, chat_transcript_layout, settings_items_area,
+};
 use chat_settings::{render_full_chat, render_obsidian_sync_confirm_panel, render_settings_panel};
 pub(crate) use editor::editor_position_at;
 use editor::render_full_editor;

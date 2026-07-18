@@ -1,4 +1,6 @@
 use super::*;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub(crate) fn settings_items_area(area: Rect) -> Rect {
     let inner = area.inner(Margin {
@@ -23,47 +25,118 @@ fn settings_panel_sections(inner: Rect) -> std::rc::Rc<[Rect]> {
 pub(super) struct ChatLayout {
     pub meta: Rect,
     pub transcript: Rect,
-    pub input: Rect,
+    pub composer: Rect,
+    pub composer_context: Rect,
     pub hints: Rect,
 }
 
-pub(super) fn chat_layout(area: Rect) -> ChatLayout {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ChatComposerGeometry {
+    pub area: Rect,
+    pub content_width: usize,
+}
+
+pub(crate) fn chat_composer_geometry(app: &App, area: Rect) -> ChatComposerGeometry {
+    let layout = chat_layout(app, area);
+    ChatComposerGeometry {
+        area: layout.composer,
+        content_width: layout.composer.width.saturating_sub(2).max(1) as usize,
+    }
+}
+
+pub(crate) fn chat_composer_hit_test(app: &App, area: Rect, position: Position) -> bool {
+    chat_composer_geometry(app, area).area.contains(position)
+}
+
+struct RenderedTranscriptBlock {
+    id: TranscriptBlockId,
+    lines: Vec<Line<'static>>,
+}
+
+fn laid_out_transcript(app: &App, area: Rect) -> (Vec<Line<'static>>, TranscriptLayoutSnapshot) {
+    let transcript = chat_layout(app, area).transcript;
+    let mut lines = Vec::new();
+    let mut blocks = Vec::new();
+    for block in render_chat_workspace_blocks(app) {
+        let wrapped = wrap_lines_to_width(block.lines, transcript.width as usize);
+        let start_row = lines.len();
+        let row_count = wrapped.len();
+        lines.extend(wrapped);
+        blocks.push(TranscriptLayoutBlock {
+            id: block.id,
+            start_row,
+            row_count,
+        });
+    }
+    let snapshot = TranscriptLayoutSnapshot {
+        total_rows: lines.len(),
+        viewport_rows: transcript.height as usize,
+        blocks,
+    };
+    (lines, snapshot)
+}
+
+pub(crate) fn chat_transcript_layout(app: &App, area: Rect) -> TranscriptLayoutSnapshot {
+    laid_out_transcript(app, area).1
+}
+
+pub(super) fn chat_layout(app: &App, area: Rect) -> ChatLayout {
     let max_width = 120;
     let center_width = area.width.saturating_sub(4).min(max_width);
     let left_padding = area.width.saturating_sub(center_width) / 2;
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .margin(1)
-        .split(area);
-    let column = |row| {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(left_padding),
-                Constraint::Length(center_width),
-                Constraint::Min(0),
-            ])
-            .split(row)[1]
-    };
+    let x = area.x.saturating_add(left_padding);
+    let vertical_margin = u16::from(area.height >= 3);
+    let y = area.y.saturating_add(vertical_margin);
+    let height = area
+        .height
+        .saturating_sub(vertical_margin.saturating_mul(2));
+    let row = |y, height| Rect::new(x, y, center_width, height);
+
+    // Keep the composer usable first, then progressively restore metadata,
+    // context, shortcuts, and transcript space as terminal height permits.
+    let meta_height = if height >= 4 { 2 } else { 0 };
+    let context_height = u16::from(height >= 5);
+    let hints_height = u16::from(height >= 7);
+    let top_gap = u16::from(height >= 8);
+    let composer_gap = u16::from(height >= 8);
+    let fixed_height = meta_height + context_height + hints_height + top_gap + composer_gap;
+    let flexible_height = height.saturating_sub(fixed_height);
+
+    let content_width = center_width.saturating_sub(2).max(1) as usize;
+    let desired_composer_height = app
+        .chat_composer()
+        .visual_lines(content_width)
+        .len()
+        .clamp(2, 6) as u16;
+    let composer_height = desired_composer_height
+        .min(flexible_height.saturating_sub(1).max(1))
+        .min(flexible_height);
+    let transcript_height = flexible_height.saturating_sub(composer_height);
+
+    let meta = row(y, meta_height);
+    let transcript_y = y.saturating_add(meta_height).saturating_add(top_gap);
+    let transcript = row(transcript_y, transcript_height);
+    let composer_y = transcript_y
+        .saturating_add(transcript_height)
+        .saturating_add(composer_gap);
+    let composer = row(composer_y, composer_height);
+    let composer_context = row(composer_y.saturating_add(composer_height), context_height);
+    let hints = row(
+        composer_context.y.saturating_add(context_height),
+        hints_height,
+    );
 
     ChatLayout {
-        meta: column(rows[0]),
-        transcript: column(rows[2]),
-        input: column(rows[4]),
-        hints: column(rows[5]),
+        meta,
+        transcript,
+        composer,
+        composer_context,
+        hints,
     }
 }
 
 pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
-    let layout = chat_layout(area);
+    let layout = chat_layout(app, area);
     let room_accent = app.room_accent();
     let current_mode = chat_console_mode(app);
     let chat_area = layout.transcript;
@@ -97,13 +170,9 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     .style(Style::default().fg(TEXT));
     frame.render_widget(top_meta, layout.meta);
 
-    let lines = render_chat_workspace_lines(app);
-
-    let lines = wrap_lines_to_width(lines, chat_area.width as usize);
-    let visible_lines = chat_area.height as usize;
-    let max_scroll = lines.len().saturating_sub(visible_lines);
-    let scroll_y = max_scroll
-        .saturating_sub(app.chat_scroll_offset().min(max_scroll))
+    let (lines, transcript_layout) = laid_out_transcript(app, area);
+    let scroll_y = app
+        .transcript_top_row(&transcript_layout)
         .min(u16::MAX as usize) as u16;
 
     let messages_widget = Paragraph::new(lines)
@@ -111,12 +180,31 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(MUTED));
     frame.render_widget(messages_widget, chat_area);
 
-    let input_buffer = app.chat_input_buffer();
-    let cursor = app.chat_input_cursor().min(input_buffer.len());
-    let before_cursor = &input_buffer[..cursor];
-    let after_cursor = &input_buffer[cursor..];
+    if app.transcript_viewport().has_new_activity() && chat_area.height > 0 {
+        let indicator = Paragraph::new(Line::from(Span::styled(
+            "↓ new activity · End to follow",
+            Style::default()
+                .fg(Color::White)
+                .bg(ACCENT_SOFT)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Right);
+        let width = chat_area.width.min(29);
+        let indicator_area = Rect::new(
+            chat_area.right().saturating_sub(width),
+            chat_area.bottom().saturating_sub(1),
+            width,
+            1,
+        );
+        frame.render_widget(indicator, indicator_area);
+    }
 
-    let input_hovered = app.chat_input_hovered();
+    render_chat_composer(frame, app, layout, room_accent);
+}
+
+fn render_chat_composer(frame: &mut Frame, app: &App, layout: ChatLayout, room_accent: Color) {
+    let composer = app.chat_composer();
+    let input_hovered = composer.hovered();
     let prompt_style = if input_hovered {
         Style::default()
             .fg(Color::White)
@@ -131,13 +219,85 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         Style::default().fg(TEXT)
     };
-    let input_line = Paragraph::new(Line::from(vec![
-        Span::styled("❯ ", prompt_style),
-        Span::styled(before_cursor, input_text_style),
-        Span::styled(CURSOR, Style::default().fg(MUTED)),
-        Span::styled(after_cursor, input_text_style),
-    ]));
-    frame.render_widget(input_line, layout.input);
+    let content_width = layout.composer.width.saturating_sub(2).max(1) as usize;
+    let visual_lines = composer.visual_lines(content_width);
+    let visible_rows = layout.composer.height.max(1) as usize;
+    let (cursor_row, cursor_column) = composer.cursor_visual_position(content_width);
+    let max_viewport = visual_lines.len().saturating_sub(visible_rows);
+    let mut viewport = composer.viewport_row().min(max_viewport);
+    if cursor_row < viewport {
+        viewport = cursor_row;
+    } else if cursor_row >= viewport + visible_rows {
+        viewport = cursor_row + 1 - visible_rows;
+    }
+
+    let mut rendered = Vec::with_capacity(visible_rows);
+    if composer.buffer().is_empty() {
+        let placeholder = if app
+            .active_agent_run()
+            .is_some_and(|run| !run.phase.is_terminal())
+        {
+            "Prepare the next instruction…"
+        } else {
+            "Ask Aleph to inspect, plan, or change something…"
+        };
+        rendered.push(Line::from(vec![
+            Span::styled("❯ ", prompt_style),
+            Span::styled(
+                placeholder,
+                Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+    } else {
+        for (row_index, visual) in visual_lines
+            .iter()
+            .enumerate()
+            .skip(viewport)
+            .take(visible_rows)
+        {
+            let prefix = if row_index == 0 { "❯ " } else { "  " };
+            rendered.push(Line::from(vec![
+                Span::styled(prefix, prompt_style),
+                Span::styled(
+                    composer.buffer()[visual.start..visual.end].to_string(),
+                    input_text_style,
+                ),
+            ]));
+        }
+    }
+    frame.render_widget(Paragraph::new(rendered), layout.composer);
+
+    let active_label = app
+        .active_agent_run()
+        .filter(|run| !run.phase.is_terminal())
+        .map(|run| format!("run {:?}", run.phase).to_lowercase())
+        .unwrap_or_else(|| String::from("idle"));
+    let context_reference = app
+        .active_agent_run()
+        .filter(|run| !run.phase.is_terminal())
+        .and_then(|run| run.context.selected_note.as_deref())
+        .map(|note| format!(" · note {}", note))
+        .unwrap_or_default();
+    let context = format!(
+        "{} · {} · {} · {}{}",
+        composer_mode_label(app),
+        app.agent_context_scope_label(),
+        app.agent_approval_policy().label(),
+        active_label,
+        context_reference,
+    );
+    let context = if let Some(notice) = composer.notice() {
+        format!("{}  ·  {}", notice, context)
+    } else {
+        context
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            context,
+            Style::default().fg(MUTED),
+        ))),
+        layout.composer_context,
+    );
 
     let hint_key = |label: &'static str| {
         Span::styled(
@@ -148,47 +308,93 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         )
     };
     let hint_label = |label: &'static str| Span::styled(label, Style::default().fg(MUTED));
-    let hints_spans = vec![
-        hint_key("Enter"),
-        hint_label(":send"),
-        hint_label("   |   "),
-        hint_key("PgUp/PgDn"),
-        hint_label(":scroll"),
-        hint_label("   |   "),
-        hint_key("Ctrl+G"),
-        hint_label(":mode"),
-        hint_label("   |   "),
-        hint_key("Esc"),
-        hint_label(":exit"),
-        hint_label("   |   "),
-        hint_key("Ctrl+C"),
-        hint_label(":quit"),
-    ];
+    let hints_spans = if layout.hints.width < 72 {
+        vec![
+            hint_key("Enter"),
+            hint_label(":send  "),
+            hint_key("Alt+Enter"),
+            hint_label(":newline  "),
+            hint_key("Esc"),
+            hint_label(":back"),
+        ]
+    } else {
+        vec![
+            hint_key("Enter"),
+            hint_label(":send"),
+            hint_label("   |   "),
+            hint_key("Alt+Enter"),
+            hint_label(":newline"),
+            hint_label("   |   "),
+            hint_key("PgUp/PgDn"),
+            hint_label(":scroll"),
+            hint_label("   |   "),
+            hint_key("Ctrl+G"),
+            hint_label(":mode"),
+            hint_label("   |   "),
+            hint_key("Esc"),
+            hint_label(":exit"),
+            hint_label("   |   "),
+            hint_key("Ctrl+C"),
+            hint_label(":clear/quit"),
+        ]
+    };
     let bottom_hints = Paragraph::new(Line::from(hints_spans))
         .alignment(Alignment::Left)
         .style(Style::default().fg(MUTED));
     frame.render_widget(bottom_hints, layout.hints);
+
+    if matches!(
+        composer.interaction(),
+        ComposerInteraction::Editing | ComposerInteraction::Approval
+    ) && layout.composer.width > 2
+        && layout.composer.height > 0
+    {
+        let screen_row = cursor_row.saturating_sub(viewport).min(visible_rows - 1) as u16;
+        let x = layout
+            .composer
+            .x
+            .saturating_add(2)
+            .saturating_add(cursor_column.min(content_width.saturating_sub(1)) as u16)
+            .min(layout.composer.right().saturating_sub(1));
+        let y = layout
+            .composer
+            .y
+            .saturating_add(screen_row)
+            .min(layout.composer.bottom().saturating_sub(1));
+        frame.set_cursor_position((x, y));
+    }
 }
 
-pub(super) fn render_chat_workspace_lines(app: &App) -> Vec<Line<'static>> {
+fn render_chat_workspace_blocks(app: &App) -> Vec<RenderedTranscriptBlock> {
     if app.chat_messages().is_empty() {
-        return vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "Ask Aleph to inspect local notes, memories, Trail, or workspace context.",
-                Style::default().fg(MUTED),
-            )),
-        ];
+        return vec![RenderedTranscriptBlock {
+            id: TranscriptBlockId::Empty,
+            lines: vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Ask Aleph to inspect local notes, memories, Trail, or workspace context.",
+                    Style::default().fg(MUTED),
+                )),
+            ],
+        }];
     }
 
     let messages = app.chat_messages();
-    let mut lines = Vec::new();
+    let mut blocks = Vec::new();
     let mut rendered_runs = Vec::new();
     for (index, message) in messages.iter().enumerate() {
-        if !lines.is_empty() {
-            lines.push(Line::from(""));
+        let mut message_lines = app.cached_transcript_message_lines(message, || {
+            let mut lines = Vec::new();
+            render_chat_message(&mut lines, message, app);
+            lines
+        });
+        if !blocks.is_empty() {
+            message_lines.insert(0, Line::from(""));
         }
-        render_chat_message(&mut lines, message, app);
+        blocks.push(RenderedTranscriptBlock {
+            id: TranscriptBlockId::Message(message.id),
+            lines: message_lines,
+        });
 
         let Some(run_id) = message.run_id else {
             continue;
@@ -199,20 +405,63 @@ pub(super) fn render_chat_workspace_lines(app: &App) -> Vec<Line<'static>> {
 
         if message.role == "user" && !rendered_runs.contains(&run_id) {
             rendered_runs.push(run_id);
-            render_run_context(&mut lines, run);
-            render_run_timeline(&mut lines, run);
-            render_run_approval(&mut lines, run);
-            render_run_changes(&mut lines, run);
+            push_run_block(
+                &mut blocks,
+                run_id,
+                TranscriptRunBlockKind::Context,
+                |lines| render_run_context(lines, run),
+            );
+            push_run_block(
+                &mut blocks,
+                run_id,
+                TranscriptRunBlockKind::Timeline,
+                |lines| render_run_timeline(lines, run),
+            );
+            if run.approval.is_some() {
+                push_run_block(
+                    &mut blocks,
+                    run_id,
+                    TranscriptRunBlockKind::Approval,
+                    |lines| render_run_approval(lines, run),
+                );
+            }
+            if !run.changes.is_empty() {
+                push_run_block(
+                    &mut blocks,
+                    run_id,
+                    TranscriptRunBlockKind::Changes,
+                    |lines| render_run_changes(lines, run),
+                );
+            }
         }
 
         let has_later_assistant = messages[index + 1..]
             .iter()
             .any(|later| later.run_id == Some(run_id) && later.role == "assistant");
-        if message.role == "assistant" && !has_later_assistant {
-            render_run_outcome(&mut lines, run);
+        if message.role == "assistant" && !has_later_assistant && run.outcome.is_some() {
+            push_run_block(
+                &mut blocks,
+                run_id,
+                TranscriptRunBlockKind::Outcome,
+                |lines| render_run_outcome(lines, run),
+            );
         }
     }
-    lines
+    blocks
+}
+
+fn push_run_block(
+    blocks: &mut Vec<RenderedTranscriptBlock>,
+    run_id: u64,
+    kind: TranscriptRunBlockKind,
+    render: impl FnOnce(&mut Vec<Line<'static>>),
+) {
+    let mut lines = Vec::new();
+    render(&mut lines);
+    blocks.push(RenderedTranscriptBlock {
+        id: TranscriptBlockId::Run { run_id, kind },
+        lines,
+    });
 }
 
 fn render_chat_message(lines: &mut Vec<Line<'static>>, message: &ChatMessage, app: &App) {
@@ -454,11 +703,6 @@ fn wrap_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'sta
     let mut wrapped = Vec::new();
 
     for line in lines {
-        if line_is_table_row(&line) {
-            wrapped.push(line);
-            continue;
-        }
-
         let mut current_spans = Vec::new();
         let mut current_width = 0usize;
 
@@ -474,7 +718,7 @@ fn wrap_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'sta
 
             let mut words = span.content.split_whitespace().peekable();
             while let Some(word) = words.next() {
-                let word_width = word.chars().count();
+                let word_width = UnicodeWidthStr::width(word);
                 let needs_space = !current_spans.is_empty() && current_width > 0;
                 let projected = current_width + word_width + usize::from(needs_space);
 
@@ -488,8 +732,20 @@ fn wrap_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'sta
                     current_width += 1;
                 }
 
-                current_spans.push(Span::styled(word.to_string(), style));
-                current_width += word_width;
+                if word_width <= width {
+                    current_spans.push(Span::styled(word.to_string(), style));
+                    current_width += word_width;
+                } else {
+                    for grapheme in word.graphemes(true) {
+                        let grapheme_width = UnicodeWidthStr::width(grapheme).max(1);
+                        if current_width + grapheme_width > width && !current_spans.is_empty() {
+                            wrapped.push(Line::from(std::mem::take(&mut current_spans)));
+                            current_width = 0;
+                        }
+                        current_spans.push(Span::styled(grapheme.to_string(), style));
+                        current_width += grapheme_width;
+                    }
+                }
 
                 if words.peek().is_some() && current_width < width {
                     current_spans.push(Span::styled(" ", style));
@@ -502,18 +758,6 @@ fn wrap_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'sta
     }
 
     wrapped
-}
-
-fn line_is_table_row(line: &Line<'static>) -> bool {
-    let text = line
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>();
-    let trimmed = text.trim();
-    trimmed.starts_with('|')
-        && trimmed.ends_with('|')
-        && trimmed.chars().filter(|&c| c == '|').count() >= 2
 }
 
 fn chat_console_mode(app: &App) -> &'static str {
@@ -530,6 +774,25 @@ fn chat_console_mode(app: &App) -> &'static str {
     }
     if app.is_agent_mode_enabled() {
         "Agent"
+    } else {
+        "Chat"
+    }
+}
+
+fn composer_mode_label(app: &App) -> &'static str {
+    if let Some(run) = app
+        .active_agent_run()
+        .filter(|run| !run.phase.is_terminal())
+    {
+        return match run.phase {
+            RunPhase::Planning => "Plan",
+            RunPhase::Acting | RunPhase::Streaming => "Act",
+            RunPhase::WaitingApproval => "Approval",
+            RunPhase::Completed | RunPhase::Failed | RunPhase::Cancelled => unreachable!(),
+        };
+    }
+    if app.is_agent_mode_enabled() {
+        "Ask"
     } else {
         "Chat"
     }

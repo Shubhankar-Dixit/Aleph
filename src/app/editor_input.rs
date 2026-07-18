@@ -487,6 +487,7 @@ impl App {
                     7 => {
                         // Sign out / Logout
                         self.openrouter_api_key = None;
+                        self.cancel_foreground_run("Provider sign-out interrupted the active run.");
                         self.strix_access_token = None;
                         if self.note_save_target == NoteSaveTarget::Strix {
                             self.note_save_target = NoteSaveTarget::Local;
@@ -511,8 +512,7 @@ impl App {
                         self.clear_strix_access_token();
                         self.refresh_connection_state();
                         self.chat_messages.clear();
-                        self.chat_input_buffer.clear();
-                        self.chat_input_cursor = 0;
+                        self.chat_composer.clear();
                         self.rebuild_chat_render_cache();
                         self.panel_mode = PanelMode::Commands;
                         self.panel_title = String::from("Commands");

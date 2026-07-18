@@ -28,6 +28,15 @@ fn ctrl(code: KeyCode) -> KeyEvent {
     }
 }
 
+fn modified(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
+}
+
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     ENV_LOCK
@@ -1514,10 +1523,11 @@ fn chat_note_create_request_opens_ai_draft_instead_of_chatting() {
     app.strix_access_token = None;
     app.refresh_connection_state();
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("write a note about launch planning");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer
+        .set_text("write a note about launch planning");
 
     app.handle_chat_key(press(KeyCode::Enter));
+    advance_execution(&mut app, 20);
 
     assert!(app.is_ai_chat());
     assert!(app.pending_agent_decision.is_some());
@@ -1540,10 +1550,11 @@ fn agent_mode_does_not_route_general_write_prompt_to_note_draft() {
     app.strix_access_token = None;
     app.refresh_connection_state();
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("write an outline about moat strategy");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer
+        .set_text("write an outline about moat strategy");
 
     app.handle_chat_key(press(KeyCode::Enter));
+    advance_execution(&mut app, 20);
 
     assert!(app.is_ai_chat());
     assert!(app.pending_agent_decision.is_none());
@@ -1560,10 +1571,10 @@ fn agent_mode_routes_current_note_edit_without_note_keyword() {
     app.refresh_connection_state();
     app.selected_note = 1;
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("make this more concise");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer.set_text("make this more concise");
 
     app.handle_chat_key(press(KeyCode::Enter));
+    advance_execution(&mut app, 20);
 
     assert!(app.is_ai_chat());
     assert!(app.pending_agent_decision.is_some());
@@ -1585,8 +1596,8 @@ fn agent_mode_can_decide_to_work_on_existing_selected_note() {
     app.refresh_connection_state();
     app.selected_note = 2;
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("work on the existing note and make progress");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer
+        .set_text("work on the existing note and make progress");
 
     app.handle_chat_key(press(KeyCode::Enter));
 
@@ -1609,8 +1620,8 @@ fn agent_mode_can_choose_existing_note_by_title() {
     app.strix_access_token = None;
     app.refresh_connection_state();
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("work on Feature ideas and make it sharper");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer
+        .set_text("work on Feature ideas and make it sharper");
 
     app.handle_chat_key(press(KeyCode::Enter));
 
@@ -1633,10 +1644,10 @@ fn agent_mode_can_read_named_note_without_provider() {
     app.strix_access_token = None;
     app.refresh_connection_state();
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("read Feature ideas");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer.set_text("read Feature ideas");
 
     app.handle_chat_key(press(KeyCode::Enter));
+    advance_execution(&mut app, 20);
 
     assert!(app.is_ai_chat());
     assert!(app.pending_agent_decision.is_none());
@@ -1653,10 +1664,10 @@ fn agent_mode_can_search_notes_without_provider() {
     app.strix_access_token = None;
     app.refresh_connection_state();
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("find notes about gateway");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer.set_text("find notes about gateway");
 
     app.handle_chat_key(press(KeyCode::Enter));
+    advance_execution(&mut app, 20);
 
     assert!(app.is_ai_chat());
     assert!(app.pending_agent_decision.is_none());
@@ -1679,10 +1690,10 @@ fn agent_mode_followup_search_uses_recent_chat_context() {
     app.refresh_connection_state();
     app.panel_mode = PanelMode::AiChat;
     app.push_chat_message("user", "I was looking for notes about gateway");
-    app.chat_input_buffer = String::from("find that");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer.set_text("find that");
 
     app.handle_chat_key(press(KeyCode::Enter));
+    advance_execution(&mut app, 20);
 
     assert!(app.is_ai_chat());
     assert!(app.pending_agent_decision.is_none());
@@ -1710,10 +1721,11 @@ fn workspace_request_uses_local_agent_steps_without_provider() {
     app.strix_access_token = None;
     app.refresh_connection_state();
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("inspect the current workspace status");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer
+        .set_text("inspect the current workspace status");
 
     app.handle_chat_key(press(KeyCode::Enter));
+    advance_execution(&mut app, 30);
 
     let answer = &app.chat_messages().last().unwrap().content;
     assert!(answer.contains("- agent context: Current folder"));
@@ -1729,8 +1741,8 @@ fn note_write_permission_prompt_stays_explicit_but_natural() {
     app.strix_access_token = None;
     app.refresh_connection_state();
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("write a note about launch planning");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer
+        .set_text("write a note about launch planning");
 
     app.handle_chat_key(press(KeyCode::Enter));
 
@@ -1768,11 +1780,11 @@ fn agent_search_extracts_subject_from_find_note_request() {
     app.strix_access_token = None;
     app.refresh_connection_state();
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer =
-        String::from("find a note that I have on advice from steve jobs and peter thiel");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer
+        .set_text("find a note that I have on advice from steve jobs and peter thiel");
 
     app.handle_chat_key(press(KeyCode::Enter));
+    advance_execution(&mut app, 20);
 
     assert!(app.is_ai_chat());
     assert!(app.pending_agent_decision.is_none());
@@ -1794,10 +1806,10 @@ fn agent_mode_can_go_through_memories_without_provider() {
     ];
     app.refresh_connection_state();
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("go through memories");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer.set_text("go through memories");
 
     app.handle_chat_key(press(KeyCode::Enter));
+    advance_execution(&mut app, 20);
 
     assert!(app.is_ai_chat());
     assert!(app.pending_agent_decision.is_none());
@@ -1815,8 +1827,8 @@ fn agent_mode_keeps_how_to_writing_questions_as_chat() {
     app.strix_access_token = None;
     app.refresh_connection_state();
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("how do I write a note about launch planning?");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer
+        .set_text("how do I write a note about launch planning?");
 
     app.handle_chat_key(press(KeyCode::Enter));
 
@@ -1833,8 +1845,8 @@ fn chat_mode_keeps_note_requests_as_chat() {
     app.refresh_connection_state();
     app.agent_mode_enabled = false;
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("write a note about launch planning");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer
+        .set_text("write a note about launch planning");
 
     app.handle_chat_key(press(KeyCode::Enter));
 
@@ -2338,8 +2350,8 @@ fn agent_memory_write_waits_for_explicit_approval() {
     app.strix_access_token = None;
     app.refresh_connection_state();
     app.panel_mode = PanelMode::AiChat;
-    app.chat_input_buffer = String::from("remember that command families should stay compact");
-    app.chat_input_cursor = app.chat_input_buffer.len();
+    app.chat_composer
+        .set_text("remember that command families should stay compact");
 
     app.handle_chat_key(press(KeyCode::Enter));
 
@@ -2501,6 +2513,166 @@ fn rendered_chat(app: &App, width: u16) -> String {
         .join("\n")
 }
 
+fn fill_scrollable_transcript(app: &mut App) {
+    app.panel_mode = PanelMode::AiChat;
+    for index in 0..18 {
+        app.push_chat_message(
+            if index % 2 == 0 { "user" } else { "assistant" },
+            format!(
+                "message {index} with enough wrapped content to occupy several visual rows in a narrow transcript"
+            ),
+        );
+    }
+}
+
+#[test]
+fn follow_tail_tracks_progressive_updates_and_anchored_browsing_does_not_move() {
+    use ratatui::prelude::Rect;
+
+    let mut app = App::new();
+    fill_scrollable_transcript(&mut app);
+    app.begin_run("inspect", RunPhase::Planning);
+    app.push_chat_message("user", "inspect");
+    app.queue_run_steps([
+        (String::from("First pending step"), None),
+        (String::from("Second pending step"), None),
+    ])
+    .unwrap();
+    assert_eq!(
+        app.transcript_viewport().mode(),
+        TranscriptViewportMode::FollowTail
+    );
+    app.start_queued_step(0).unwrap();
+    app.complete_step(0, "done").unwrap();
+    assert_eq!(
+        app.transcript_viewport().mode(),
+        TranscriptViewportMode::FollowTail
+    );
+
+    let area = Rect::new(0, 0, 60, 20);
+    app.scroll_chat_by_in_area(-8, area);
+    let anchored = app.transcript_viewport().mode();
+    let TranscriptViewportMode::Anchored(anchor) = anchored else {
+        panic!("scrolling upward should establish a semantic anchor");
+    };
+    app.start_queued_step(1).unwrap();
+    app.complete_step(1, "another completed step").unwrap();
+    app.push_chat_message("assistant", "stream start");
+    app.chat_messages
+        .last_mut()
+        .unwrap()
+        .content
+        .push_str(" and more streamed output");
+    app.note_transcript_activity();
+    app.chat_composer
+        .set_text("one\ntwo\nthree\nfour\nfive\nsix");
+
+    assert_eq!(app.transcript_viewport().mode(), anchored);
+    assert!(app.transcript_viewport().has_new_activity());
+    let narrow = crate::ui::chat_transcript_layout(&app, area);
+    let wide = crate::ui::chat_transcript_layout(&app, Rect::new(0, 0, 100, 28));
+    assert_eq!(
+        narrow.anchor_at(narrow.resolve_anchor(anchor)).block,
+        anchor.block
+    );
+    assert_eq!(
+        wide.anchor_at(wide.resolve_anchor(anchor)).block,
+        anchor.block
+    );
+}
+
+#[test]
+fn end_and_page_down_return_to_follow_tail_and_clear_new_activity() {
+    use ratatui::prelude::Rect;
+
+    let mut app = App::new();
+    fill_scrollable_transcript(&mut app);
+    let area = Rect::new(0, 0, 60, 20);
+    app.scroll_chat_by_in_area(-12, area);
+    app.note_transcript_activity();
+    assert!(app.transcript_viewport().has_new_activity());
+
+    app.chat_composer
+        .set_interaction(ComposerInteraction::Transcript);
+    app.handle_chat_key(press(KeyCode::End));
+    assert_eq!(
+        app.transcript_viewport().mode(),
+        TranscriptViewportMode::FollowTail
+    );
+    assert!(!app.transcript_viewport().has_new_activity());
+
+    app.scroll_chat_by_in_area(-12, area);
+    for _ in 0..100 {
+        app.scroll_chat_by_in_area(10, area);
+        if matches!(
+            app.transcript_viewport().mode(),
+            TranscriptViewportMode::FollowTail
+        ) {
+            break;
+        }
+    }
+    assert_eq!(
+        app.transcript_viewport().mode(),
+        TranscriptViewportMode::FollowTail
+    );
+}
+
+#[test]
+fn anchored_transcript_renders_new_activity_and_tiny_layouts_do_not_panic() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut app = App::new();
+    fill_scrollable_transcript(&mut app);
+    app.scroll_chat_by_in_area(-5, ratatui::prelude::Rect::new(0, 0, 40, 12));
+    app.push_chat_message("assistant", "new tail output");
+
+    let screen = rendered_chat(&app, 60);
+    assert!(screen.contains("new activity"), "{screen}");
+    for (width, height) in [(1, 1), (10, 2), (20, 3), (30, 6)] {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| crate::ui::draw(frame, &app)).unwrap();
+    }
+}
+
+#[test]
+fn mouse_and_keyboard_scrolling_choose_consistent_viewport_modes() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    let mut keyboard = App::new();
+    fill_scrollable_transcript(&mut keyboard);
+    let mut mouse = App::new();
+    fill_scrollable_transcript(&mut mouse);
+
+    keyboard.scroll_chat_up(1);
+    mouse.handle_mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(matches!(
+        keyboard.transcript_viewport().mode(),
+        TranscriptViewportMode::Anchored(_)
+    ));
+    assert!(matches!(
+        mouse.transcript_viewport().mode(),
+        TranscriptViewportMode::Anchored(_)
+    ));
+
+    keyboard.scroll_chat_down(usize::MAX);
+    mouse.handle_mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(
+        keyboard.transcript_viewport().mode(),
+        TranscriptViewportMode::FollowTail
+    );
+}
+
 #[test]
 fn run_phase_transitions_are_guarded() {
     assert!(RunPhase::Planning.can_transition_to(RunPhase::Acting));
@@ -2516,7 +2688,7 @@ fn run_phase_transitions_are_guarded() {
 }
 
 #[test]
-fn one_agent_request_owns_one_run_id_and_completes_read_only() {
+fn one_agent_request_owns_one_run_id_and_schedules_read_only_progressively() {
     let mut app = App::new();
     app.openrouter_api_key = None;
     app.strix_access_token = None;
@@ -2526,13 +2698,228 @@ fn one_agent_request_owns_one_run_id_and_completes_read_only() {
 
     assert_eq!(app.agent_runs.len(), 1);
     let run = &app.agent_runs[0];
-    assert_eq!(run.phase, RunPhase::Completed);
+    assert_eq!(run.phase, RunPhase::Planning);
     assert!(run.changes.is_empty());
     assert!(!run.steps.is_empty());
+    assert!(run
+        .steps
+        .iter()
+        .all(|step| step.status == StepStatus::Pending));
     assert!(app
         .chat_messages
         .iter()
         .all(|message| message.run_id == Some(run.id)));
+}
+
+fn advance_execution(app: &mut App, iterations: usize) {
+    for _ in 0..iterations {
+        app.on_iteration();
+        if app.pending_agent_execution.is_none() {
+            break;
+        }
+        if app
+            .pending_agent_execution
+            .as_ref()
+            .is_some_and(|execution| execution.phase == AgentExecutionPhase::WaitingWorker)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        } else {
+            std::thread::yield_now();
+        }
+    }
+}
+
+#[test]
+fn local_steps_expose_pending_running_and_completed_across_iterations() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+
+    assert!(app.try_start_agent_action("show workspace status"));
+    assert!(app
+        .active_agent_run()
+        .unwrap()
+        .steps
+        .iter()
+        .all(|step| step.status == StepStatus::Pending));
+
+    app.on_iteration();
+    assert_eq!(
+        app.active_agent_run().unwrap().steps[0].status,
+        StepStatus::Running
+    );
+    assert_eq!(
+        app.pending_agent_execution.as_ref().unwrap().phase,
+        AgentExecutionPhase::ExecuteStep
+    );
+
+    app.on_iteration();
+    assert_eq!(
+        app.active_agent_run().unwrap().steps[0].status,
+        StepStatus::Running,
+        "starting worker work must not also complete the visible step"
+    );
+    advance_execution(&mut app, 200);
+    assert_eq!(app.active_agent_run().unwrap().phase, RunPhase::Completed);
+    assert!(app.pending_agent_execution.is_none());
+}
+
+#[test]
+fn approval_suspends_and_resumes_the_same_progressive_run() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    assert!(app.try_start_agent_action("search notes for Aleph context"));
+    let run_id = app.active_run_id.unwrap();
+    app.on_iteration();
+    app.on_iteration();
+    assert_eq!(
+        app.active_agent_run().unwrap().steps[0].status,
+        StepStatus::Completed
+    );
+
+    app.request_approval(
+        ApprovalRequest {
+            operation: String::from("Continue"),
+            target: String::from("local context"),
+            effect: String::from("Continue the remaining read-only steps."),
+        },
+        RunChange {
+            target: String::from("local context"),
+            summary: String::from("Continue."),
+            status: ChangeStatus::Proposed,
+        },
+    )
+    .unwrap();
+    let next_step = app.pending_agent_execution.as_ref().unwrap().current_step;
+    app.on_iteration();
+    assert_eq!(
+        app.pending_agent_execution.as_ref().unwrap().current_step,
+        next_step
+    );
+    assert_eq!(app.active_run_id, Some(run_id));
+
+    app.approve_request().unwrap();
+    app.on_iteration();
+    assert_eq!(app.active_run_id, Some(run_id));
+    assert_eq!(
+        app.active_agent_run().unwrap().steps[next_step].status,
+        StepStatus::Running
+    );
+}
+
+#[test]
+fn rejection_and_cancellation_discard_remaining_progressive_steps() {
+    let mut rejected = App::new();
+    rejected.openrouter_api_key = None;
+    rejected.strix_access_token = None;
+    rejected.refresh_connection_state();
+    assert!(rejected.try_start_agent_action("search notes for broad workspace context"));
+    rejected.on_iteration();
+    rejected
+        .request_approval(
+            ApprovalRequest {
+                operation: String::from("Continue"),
+                target: String::from("context"),
+                effect: String::from("Continue."),
+            },
+            RunChange {
+                target: String::from("context"),
+                summary: String::from("Continue."),
+                status: ChangeStatus::Proposed,
+            },
+        )
+        .unwrap();
+    rejected.reject_request("rejected").unwrap();
+    assert!(rejected.pending_agent_execution.is_none());
+    assert_eq!(
+        rejected.active_agent_run().unwrap().phase,
+        RunPhase::Cancelled
+    );
+
+    let mut cancelled = App::new();
+    cancelled.openrouter_api_key = None;
+    cancelled.strix_access_token = None;
+    cancelled.refresh_connection_state();
+    assert!(cancelled.try_start_agent_action("search notes for broad workspace context"));
+    cancelled.on_iteration();
+    cancelled.cancel_run("cancelled").unwrap();
+    advance_execution(&mut cancelled, 5);
+    let run = cancelled.active_agent_run().unwrap();
+    assert_eq!(run.phase, RunPhase::Cancelled);
+    assert!(run
+        .steps
+        .iter()
+        .skip(1)
+        .all(|step| step.status == StepStatus::Pending));
+}
+
+#[test]
+fn stale_worker_result_cannot_mutate_cancelled_or_newer_run() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    assert!(app.try_start_agent_action("show workspace status"));
+    app.on_iteration();
+    let stale = app.pending_agent_execution.as_ref().unwrap();
+    let stale_run = stale.run_id;
+    let stale_generation = stale.generation;
+    app.cancel_run("cancel old run").unwrap();
+
+    assert!(app.try_start_agent_action("search notes for release"));
+    let newer_run = app.active_run_id.unwrap();
+    app.agent_worker_tx
+        .send(AgentWorkerResult {
+            run_id: stale_run,
+            generation: stale_generation,
+            step_index: 0,
+            result: Ok(None),
+        })
+        .unwrap();
+    app.on_iteration();
+    assert_eq!(app.active_run_id, Some(newer_run));
+    assert_ne!(newer_run, stale_run);
+    assert_ne!(app.active_agent_run().unwrap().phase, RunPhase::Completed);
+}
+
+#[test]
+fn provider_streaming_waits_for_local_steps_and_failure_is_terminal() {
+    let mut app = App::new();
+    app.ai_provider = AiProvider::OpenRouter;
+    app.openrouter_api_key = Some(String::from("test-key"));
+    app.refresh_connection_state();
+    assert!(app.try_start_agent_action("search notes for release context"));
+    assert!(
+        app.pending_agent_execution
+            .as_ref()
+            .unwrap()
+            .pending_provider
+    );
+    while app
+        .pending_agent_execution
+        .as_ref()
+        .is_some_and(|execution| execution.phase != AgentExecutionPhase::Finish)
+    {
+        app.on_iteration();
+    }
+    assert!(app.chat_stream_rx.is_none());
+    assert_eq!(app.active_agent_run().unwrap().phase, RunPhase::Acting);
+
+    let run_id = app.active_run_id.unwrap();
+    let (sender, receiver) = mpsc::channel();
+    app.pending_agent_execution = None;
+    app.chat_stream_rx = Some(receiver);
+    app.transition_run(RunPhase::Streaming).unwrap();
+    sender
+        .send(ChatStreamUpdate::Error(String::from("provider failed")))
+        .unwrap();
+    app.on_tick();
+    assert_eq!(app.agent_run(run_id).unwrap().phase, RunPhase::Failed);
+    assert!(app.pending_agent_execution.is_none());
+    assert!(app.chat_stream_rx.is_none());
 }
 
 #[test]
@@ -2553,6 +2940,10 @@ fn authoritative_run_approval_supports_approve_reject_cancel_and_fail() {
     )
     .unwrap();
     assert!(app.has_pending_agent_approval());
+    assert_eq!(
+        app.chat_composer.interaction(),
+        ComposerInteraction::Approval
+    );
     app.approve_request().unwrap();
     assert!(!app.has_pending_agent_approval());
     app.complete_run("proposal prepared").unwrap();
@@ -2589,6 +2980,27 @@ fn authoritative_run_approval_supports_approve_reject_cancel_and_fail() {
     assert_eq!(run.phase, RunPhase::Failed);
     assert_eq!(run.steps[0].status, StepStatus::Failed);
     assert_eq!(run.steps[0].error.as_deref(), Some("unavailable"));
+}
+
+#[test]
+fn failed_later_step_preserves_completed_earlier_steps() {
+    let mut app = App::new();
+    app.begin_run("two steps", RunPhase::Planning);
+    app.queue_run_steps([
+        (String::from("First"), None),
+        (String::from("Second"), None),
+    ])
+    .unwrap();
+    app.start_queued_step(0).unwrap();
+    app.complete_step(0, "first completed").unwrap();
+    app.start_queued_step(1).unwrap();
+    app.fail_step(1, "second failed").unwrap();
+
+    let run = app.active_agent_run().unwrap();
+    assert_eq!(run.phase, RunPhase::Failed);
+    assert_eq!(run.steps[0].status, StepStatus::Completed);
+    assert_eq!(run.steps[1].status, StepStatus::Failed);
+    assert!(app.pending_agent_execution.is_none());
 }
 
 #[test]
@@ -2705,4 +3117,173 @@ fn completed_read_only_run_renders_no_changes_and_outcome_after_response() {
     let outcome = screen.find("Outcome").unwrap();
     assert!(response < outcome);
     assert!(screen.contains("No changes were made"));
+}
+
+#[test]
+fn composer_enter_submits_and_modified_enter_inserts_newlines() {
+    let mut app = App::new();
+    app.panel_mode = PanelMode::AiChat;
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+
+    app.chat_composer.set_text("inspect workspace");
+    app.handle_chat_key(modified(KeyCode::Enter, KeyModifiers::ALT));
+    app.handle_chat_key(modified(KeyCode::Enter, KeyModifiers::SHIFT));
+    assert_eq!(app.chat_composer.buffer(), "inspect workspace\n\n");
+
+    app.handle_chat_key(press(KeyCode::Enter));
+    assert!(app.chat_composer.buffer().is_empty());
+    assert!(app
+        .chat_messages()
+        .iter()
+        .any(|message| message.role == "user" && message.content == "inspect workspace"));
+}
+
+#[test]
+fn composer_paste_preserves_newlines_and_ctrl_c_clears_before_quitting() {
+    let mut app = App::new();
+    app.panel_mode = PanelMode::AiChat;
+    app.handle_paste("first\n界🙂\nthird");
+    assert_eq!(app.chat_composer.buffer(), "first\n界🙂\nthird");
+
+    app.handle_chat_key(ctrl(KeyCode::Char('c')));
+    assert!(app.chat_composer.buffer().is_empty());
+    assert!(!app.should_quit());
+    app.handle_chat_key(ctrl(KeyCode::Char('c')));
+    assert!(app.should_quit());
+}
+
+#[test]
+fn composer_escape_dismisses_transcript_then_approval_before_chat() {
+    let mut app = App::new();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_composer
+        .set_interaction(ComposerInteraction::Transcript);
+    app.handle_chat_key(press(KeyCode::Esc));
+    assert!(app.is_ai_chat());
+    assert_eq!(
+        app.chat_composer.interaction(),
+        ComposerInteraction::Editing
+    );
+    app.handle_chat_key(press(KeyCode::Esc));
+    assert!(!app.is_ai_chat());
+
+    app.panel_mode = PanelMode::AiChat;
+    app.begin_run("write", RunPhase::Planning);
+    app.request_approval(
+        ApprovalRequest {
+            operation: String::from("Create note"),
+            target: String::from("Draft"),
+            effect: String::from("Create the draft."),
+        },
+        RunChange {
+            target: String::from("Draft"),
+            summary: String::from("Create the draft."),
+            status: ChangeStatus::Proposed,
+        },
+    )
+    .unwrap();
+    app.handle_chat_key(press(KeyCode::Esc));
+    assert!(app.is_ai_chat());
+    assert_eq!(app.active_agent_run().unwrap().phase, RunPhase::Cancelled);
+}
+
+#[test]
+fn active_run_submission_preserves_the_next_instruction() {
+    let mut app = App::new();
+    app.panel_mode = PanelMode::AiChat;
+    app.begin_run("current instruction", RunPhase::Planning);
+    app.chat_composer.set_text("next instruction");
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert_eq!(app.chat_composer.buffer(), "next instruction");
+    assert_eq!(
+        app.active_agent_run().unwrap().request,
+        "current instruction"
+    );
+    assert!(app
+        .chat_composer
+        .notice()
+        .is_some_and(|notice| notice.contains("preserved")));
+}
+
+#[test]
+fn composer_layout_grows_caps_and_degrades_safely() {
+    let mut app = App::new();
+    app.panel_mode = PanelMode::AiChat;
+    let area = ratatui::prelude::Rect::new(0, 0, 80, 30);
+
+    assert_eq!(crate::ui::chat_composer_geometry(&app, area).area.height, 2);
+    app.chat_composer.set_text("one\ntwo\nthree");
+    assert_eq!(crate::ui::chat_composer_geometry(&app, area).area.height, 3);
+    app.chat_composer.set_text("0\n1\n2\n3\n4\n5\n6\n7\n8");
+    let capped = crate::ui::chat_composer_geometry(&app, area);
+    assert_eq!(capped.area.height, 6);
+
+    let narrow = crate::ui::chat_composer_geometry(&app, ratatui::prelude::Rect::new(0, 0, 20, 20));
+    assert!((1..=6).contains(&narrow.area.height));
+    let tiny = crate::ui::chat_composer_geometry(&app, ratatui::prelude::Rect::new(0, 0, 20, 3));
+    assert_eq!(tiny.area.height, 1);
+}
+
+#[test]
+fn composer_keeps_context_and_shortcuts_at_supported_widths() {
+    let mut app = App::new();
+    app.panel_mode = PanelMode::AiChat;
+
+    for width in [60, 80, 107, 108, 140] {
+        let screen = rendered_chat(&app, width);
+        for expected in [
+            "Ask Aleph to inspect",
+            "Ask · Current folder · writes ask first · idle",
+            "Enter:send",
+            "Alt+Enter:newline",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "width {width} did not render {expected:?}\n{screen}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rendered_composer_cursor_stays_inside_with_unicode_and_scrolling() {
+    use ratatui::{backend::Backend, backend::TestBackend, Terminal};
+
+    let mut app = App::new();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_composer
+        .set_text("界🙂 one\ntwo\nthree\nfour\nfive\nsix\nseven");
+    app.chat_composer.ensure_cursor_visible(54, 6);
+    let area = ratatui::prelude::Rect::new(0, 0, 60, 16);
+    let geometry = crate::ui::chat_composer_geometry(&app, area);
+    let backend = TestBackend::new(area.width, area.height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| crate::ui::draw(frame, &app)).unwrap();
+    let cursor = terminal.backend_mut().get_cursor_position().unwrap();
+
+    assert!(geometry.area.contains(cursor));
+    assert!(app.chat_composer.viewport_row() > 0);
+}
+
+#[test]
+fn composer_mouse_hit_testing_uses_shared_variable_geometry() {
+    use ratatui::prelude::{Position, Rect};
+
+    let mut app = App::new();
+    app.chat_composer.set_text("0\n1\n2\n3\n4\n5\n6");
+    let area = Rect::new(0, 0, 80, 30);
+    let geometry = crate::ui::chat_composer_geometry(&app, area);
+    let inside = Position::new(geometry.area.x, geometry.area.y);
+    let former_fixed_row = Position::new(geometry.area.x, area.height - 3);
+
+    assert!(crate::ui::chat_composer_hit_test(&app, area, inside));
+    assert!(!crate::ui::chat_composer_hit_test(
+        &app,
+        area,
+        former_fixed_row
+    ));
 }

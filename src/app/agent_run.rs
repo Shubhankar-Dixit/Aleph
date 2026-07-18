@@ -4,7 +4,7 @@ use super::*;
 impl App {
     pub(super) fn begin_run(&mut self, request: &str, phase: RunPhase) -> u64 {
         if let Some(run) = self.active_agent_run() {
-            if !run.phase.is_terminal() && run.request == request.trim() {
+            if !run.phase.is_terminal() {
                 return run.id;
             }
         }
@@ -42,6 +42,44 @@ impl App {
             ));
         }
         run.phase = next;
+        self.note_transcript_activity();
+        Ok(())
+    }
+
+    pub(super) fn queue_run_steps(
+        &mut self,
+        steps: impl IntoIterator<Item = (String, Option<String>)>,
+    ) -> Result<(), String> {
+        let run = self.active_run_mut()?;
+        run.steps
+            .extend(steps.into_iter().map(|(label, target)| RunStep {
+                label,
+                target,
+                status: StepStatus::Pending,
+                summary: None,
+                error: None,
+            }));
+        self.note_transcript_activity();
+        Ok(())
+    }
+
+    pub(super) fn start_queued_step(&mut self, index: usize) -> Result<(), String> {
+        if self
+            .active_agent_run()
+            .is_some_and(|run| run.phase == RunPhase::Planning)
+        {
+            self.transition_run(RunPhase::Acting)?;
+        }
+        let step = self
+            .active_run_mut()?
+            .steps
+            .get_mut(index)
+            .ok_or_else(|| format!("unknown run step {}", index))?;
+        if step.status != StepStatus::Pending {
+            return Err(format!("run step {} is not pending", index));
+        }
+        step.status = StepStatus::Running;
+        self.note_transcript_activity();
         Ok(())
     }
 
@@ -65,6 +103,7 @@ impl App {
             summary: None,
             error: None,
         });
+        self.note_transcript_activity();
         Ok(index)
     }
 
@@ -81,6 +120,7 @@ impl App {
         step.status = StepStatus::Completed;
         step.summary = Some(summary.into());
         step.error = None;
+        self.note_transcript_activity();
         Ok(())
     }
 
@@ -109,6 +149,9 @@ impl App {
         let run = self.active_run_mut()?;
         run.approval = Some(request);
         run.changes.push(change);
+        self.chat_composer
+            .set_interaction(ComposerInteraction::Approval);
+        self.note_transcript_activity();
         Ok(())
     }
 
@@ -119,6 +162,9 @@ impl App {
         }
         run.approval = None;
         run.phase = RunPhase::Acting;
+        self.chat_composer
+            .set_interaction(ComposerInteraction::Editing);
+        self.note_transcript_activity();
         Ok(())
     }
 
@@ -133,6 +179,10 @@ impl App {
         run.approval = None;
         run.phase = RunPhase::Cancelled;
         run.outcome = Some(RunOutcome::Cancelled { reason });
+        self.chat_composer
+            .set_interaction(ComposerInteraction::Editing);
+        self.terminate_pending_execution();
+        self.note_transcript_activity();
         Ok(())
     }
 
@@ -146,6 +196,10 @@ impl App {
         run.outcome = Some(RunOutcome::Completed {
             summary: summary.into(),
         });
+        self.chat_composer
+            .set_interaction(ComposerInteraction::Editing);
+        self.terminate_pending_execution();
+        self.note_transcript_activity();
         Ok(())
     }
 
@@ -158,6 +212,10 @@ impl App {
         run.approval = None;
         run.phase = RunPhase::Failed;
         run.outcome = Some(RunOutcome::Failed { error });
+        self.chat_composer
+            .set_interaction(ComposerInteraction::Editing);
+        self.terminate_pending_execution();
+        self.note_transcript_activity();
         Ok(())
     }
 
@@ -170,11 +228,16 @@ impl App {
         run.approval = None;
         run.phase = RunPhase::Cancelled;
         run.outcome = Some(RunOutcome::Cancelled { reason });
+        self.chat_composer
+            .set_interaction(ComposerInteraction::Editing);
+        self.terminate_pending_execution();
+        self.note_transcript_activity();
         Ok(())
     }
 
     pub(super) fn add_run_change(&mut self, change: RunChange) -> Result<(), String> {
         self.active_run_mut()?.changes.push(change);
+        self.note_transcript_activity();
         Ok(())
     }
 
@@ -184,6 +247,7 @@ impl App {
                 change.status = status;
             }
         }
+        self.note_transcript_activity();
         Ok(())
     }
 

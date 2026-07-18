@@ -93,6 +93,7 @@ impl App {
             Self::load_room_state().unwrap_or_else(|_| Self::default_room_state());
 
         let (note_sync_tx, note_sync_rx) = mpsc::channel();
+        let (agent_worker_tx, agent_worker_rx) = mpsc::channel();
 
         let mut app = Self {
             started_at: Instant::now(),
@@ -143,13 +144,13 @@ impl App {
                 active: false,
             },
             chat_messages: Vec::new(),
+            next_chat_message_id: 1,
             agent_runs: Vec::new(),
             active_run_id: None,
             next_run_id: 1,
             activity_log: VecDeque::with_capacity(80),
-            chat_input_buffer: String::new(),
-            chat_input_cursor: 0,
-            chat_scroll_offset: 0,
+            chat_composer: ChatComposerState::default(),
+            transcript_viewport: TranscriptViewportState::default(),
             openrouter_api_key,
             strix_access_token,
             chat_stream_rx: None,
@@ -171,6 +172,7 @@ impl App {
             streaming_active: false,
             thinking_status: String::new(),
             chat_render_cache: Vec::new(),
+            transcript_message_cache: RefCell::new(HashMap::new()),
             chat_render_dirty: false,
             chat_cache_stable_len: 0,
             agent_mode_enabled,
@@ -181,8 +183,11 @@ impl App {
             pending_agent_decision: None,
             agent_plan_rx: None,
             agent_plan_query: None,
+            pending_agent_execution: None,
+            agent_execution_generation: 0,
+            agent_worker_tx,
+            agent_worker_rx,
             chat_turn_started_at: None,
-            chat_input_hovered: false,
             ghost_stream_rx: None,
             ghost_streaming: false,
             ghost_result: None,
@@ -938,7 +943,12 @@ impl App {
         }
     }
 
+    pub fn on_iteration(&mut self) {
+        self.process_agent_execution();
+    }
+
     pub fn request_quit(&mut self) {
+        self.cancel_foreground_run("Aleph exited before the run completed.");
         self.quit = true;
     }
 
@@ -1046,16 +1056,16 @@ impl App {
             .is_some_and(|run| run.phase == RunPhase::WaitingApproval && run.approval.is_some())
     }
 
-    pub fn chat_input_buffer(&self) -> &str {
-        &self.chat_input_buffer
+    pub fn agent_approval_policy(&self) -> AgentApprovalPolicy {
+        AgentApprovalPolicy::ExplicitWrites
     }
 
-    pub fn chat_input_cursor(&self) -> usize {
-        self.chat_input_cursor
+    pub fn chat_composer(&self) -> &ChatComposerState {
+        &self.chat_composer
     }
 
-    pub fn chat_scroll_offset(&self) -> usize {
-        self.chat_scroll_offset
+    pub fn transcript_viewport(&self) -> TranscriptViewportState {
+        self.transcript_viewport
     }
 
     pub fn chat_render_lines(&self) -> &[Line<'static>] {
@@ -1243,10 +1253,6 @@ impl App {
             AiProvider::OpenRouter => "OpenRouter",
             AiProvider::Strix => "Strix",
         }
-    }
-
-    pub fn chat_input_hovered(&self) -> bool {
-        self.chat_input_hovered
     }
 
     pub fn strix_logs(&self) -> &[String] {
