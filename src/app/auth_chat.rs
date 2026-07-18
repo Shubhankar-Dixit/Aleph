@@ -679,7 +679,7 @@ impl App {
         Line::from(spans)
     }
 
-    pub(super) fn render_chat_markdown_lines_owned(content: &str) -> Vec<Line<'static>> {
+    pub(crate) fn render_chat_markdown_lines_owned(content: &str) -> Vec<Line<'static>> {
         let mut rendered = Vec::new();
         let lines = content.lines().collect::<Vec<_>>();
         let mut index = 0;
@@ -830,6 +830,8 @@ impl App {
             return false;
         }
 
+        self.begin_run(&query, RunPhase::Planning);
+
         let provider = self.ai_provider;
         let openrouter_api_key = self.openrouter_api_key.clone();
         let strix_access_token = self.strix_access_token.clone();
@@ -873,6 +875,7 @@ impl App {
         self.chat_scroll_offset = 0;
         self.streaming_buffer.clear();
         self.streaming_active = true;
+        let _ = self.transition_run(RunPhase::Streaming);
         self.chat_turn_started_at = Some(Instant::now());
         match provider {
             AiProvider::OpenRouter => self.add_system_log(format!(

@@ -1,13 +1,13 @@
 use super::*;
 
 pub(super) struct NoteSearchResult {
-    index: usize,
+    pub(super) index: usize,
     score: usize,
     snippets: Vec<String>,
 }
 
 pub(super) struct MemorySearchResult {
-    index: usize,
+    pub(super) index: usize,
     score: usize,
 }
 
@@ -67,11 +67,16 @@ impl AgentLoopStep {
 #[allow(dead_code)]
 impl App {
     pub(super) fn try_start_agent_action(&mut self, query: &str) -> bool {
+        if self.chat_stream_rx.is_some() {
+            self.last_action = String::from("Aleph is still answering the previous message.");
+            return false;
+        }
         if self.agent_plan_rx.is_some() {
             self.last_action = String::from("Aleph is still planning the previous message.");
             return false;
         }
 
+        self.begin_run(query, RunPhase::Planning);
         let decision = self.plan_agent_action(query);
         match decision.action {
             AgentAction::CreateNote | AgentAction::EditNote | AgentAction::SaveMemory => {
@@ -108,6 +113,7 @@ impl App {
             return false;
         }
 
+        self.begin_run(query, RunPhase::Planning);
         let messages = self.agent_planner_conversation(query);
         let provider = self.ai_provider;
         let openrouter_api_key = self.openrouter_api_key.clone();
@@ -249,12 +255,24 @@ impl App {
                 "I can help edit a note, but I need the target first. Name the note, select one with `/note list`, or ask me to draft a new one.",
             );
             self.last_action = String::from("Agent needs a note target.");
+            let _ = self.complete_run("A write target is required before Aleph can continue.");
             return;
         }
 
         let message = self.agent_permission_message(&decision);
         self.pending_agent_query = Some(query.trim().to_string());
         self.pending_agent_decision = Some(decision);
+        let decision = self
+            .pending_agent_decision
+            .as_ref()
+            .expect("decision was stored");
+        let approval = self.approval_request_for_decision(decision);
+        let change = RunChange {
+            target: approval.target.clone(),
+            summary: approval.effect.clone(),
+            status: ChangeStatus::Proposed,
+        };
+        let _ = self.request_approval(approval, change);
         self.push_chat_message("assistant", message);
         self.last_action = String::from("Agent action waiting for permission.");
         self.add_activity("Waiting for permission before writing.");
@@ -307,6 +325,9 @@ impl App {
             return false;
         };
         let query = self.pending_agent_query.take().unwrap_or_default();
+        if self.approve_request().is_err() {
+            return false;
+        }
         match decision.action {
             AgentAction::CreateNote => self.start_note_create_agent(&query, decision.title),
             AgentAction::EditNote => self.start_note_edit_agent(&query, decision),
@@ -317,7 +338,7 @@ impl App {
             | AgentAction::SearchMemories
             | AgentAction::WorkspaceStatus
             | AgentAction::SearchTrail => {
-                self.run_agent_loop(&query, decision);
+                self.run_agent_loop_inner(&query, decision, false);
                 true
             }
             AgentAction::Chat => false,
@@ -327,8 +348,50 @@ impl App {
     pub(super) fn cancel_pending_agent_action(&mut self) {
         self.pending_agent_query = None;
         self.pending_agent_decision = None;
+        let _ = self.reject_request("The user rejected the proposed write.");
         self.push_chat_message("assistant", "Cancelled the pending action.");
         self.last_action = String::from("Cancelled pending agent action.");
+    }
+
+    fn approval_request_for_decision(&self, decision: &AgentDecision) -> ApprovalRequest {
+        match decision.action {
+            AgentAction::CreateNote => {
+                let target = decision.title.as_deref().unwrap_or("new note");
+                ApprovalRequest {
+                    operation: String::from("Create note"),
+                    target: target.to_string(),
+                    effect: format!("Draft and open a new note named `{}`.", target),
+                }
+            }
+            AgentAction::EditNote => {
+                let target = decision
+                    .note_index
+                    .and_then(|index| self.notes.get(index))
+                    .map(|note| note.title.clone())
+                    .unwrap_or_else(|| String::from("selected note"));
+                ApprovalRequest {
+                    operation: String::from("Edit note"),
+                    target: target.clone(),
+                    effect: format!("Prepare proposed revisions for `{}`.", target),
+                }
+            }
+            AgentAction::SaveMemory => ApprovalRequest {
+                operation: String::from("Save memory"),
+                target: String::from("local memories"),
+                effect: format!(
+                    "Save `{}` to Aleph's local memory store.",
+                    Self::preview_text(
+                        decision.search_query.as_deref().unwrap_or("this memory"),
+                        120
+                    )
+                ),
+            },
+            _ => ApprovalRequest {
+                operation: String::from("Write"),
+                target: String::from("workspace"),
+                effect: String::from("Apply the proposed workspace change."),
+            },
+        }
     }
 
     pub(super) fn is_affirmative_agent_permission(input: &str) -> bool {
@@ -725,6 +788,14 @@ impl App {
         self.push_chat_message("assistant", response);
         self.last_action = format!("Agent: {}", Self::agent_action_label(decision.action));
         self.add_activity("Returned local context.");
+        if decision.action == AgentAction::SaveMemory {
+            let _ = self.mark_proposed_changes(ChangeStatus::Applied);
+        }
+        let _ = self.complete_run(if decision.action == AgentAction::SaveMemory {
+            "Saved the approved memory change."
+        } else {
+            "Completed from local context. No changes were made."
+        });
     }
 
     fn run_agent_loop(&mut self, query: &str, decision: AgentDecision) {
@@ -743,6 +814,7 @@ impl App {
             self.push_chat_message("user", query.trim());
         }
         self.add_activity("Reading local context before answering.");
+        let _ = self.transition_run(RunPhase::Acting);
         self.last_action = format!("Aleph agent: {}", Self::agent_action_label(decision.action));
 
         let plan = self.agent_loop_plan(query, &decision);
@@ -750,8 +822,14 @@ impl App {
         let mut observations = Vec::new();
         for step in plan {
             self.add_activity(step.progress_line());
+            let run_step = self
+                .start_step(step.progress_line(), Some(step.label().to_string()))
+                .ok();
             let observation = self.run_agent_loop_step(step, query, &decision);
             self.add_activity(observation.summary.clone());
+            if let Some(run_step) = run_step {
+                let _ = self.complete_step(run_step, observation.summary.clone());
+            }
             observations.push(observation);
         }
 
@@ -773,6 +851,12 @@ impl App {
         let final_answer = self.agent_loop_final_answer(query, &decision, &observations);
         self.push_chat_message("assistant", final_answer);
         self.add_activity("Answered from local context.");
+        if decision.action == AgentAction::SaveMemory {
+            let _ = self.mark_proposed_changes(ChangeStatus::Applied);
+            let _ = self.complete_run("Saved the approved memory change.");
+        } else {
+            let _ = self.complete_run("Completed from local context. No changes were made.");
+        }
     }
 
     fn agent_action_label(action: AgentAction) -> &'static str {
@@ -1012,6 +1096,7 @@ impl App {
     }
 
     pub(super) fn start_agent_model_loop(&mut self, query: &str) -> bool {
+        self.begin_run(query, RunPhase::Planning);
         self.panel_mode = PanelMode::AiChat;
         self.chat_scroll_offset = 0;
         self.push_chat_message("user", query.trim());

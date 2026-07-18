@@ -1410,6 +1410,7 @@ impl App {
             timestamp: Self::clock_time_label(),
             thought_seconds: None,
             turn_seconds: None,
+            run_id: self.active_run_id,
         });
 
         if self.chat_messages.len() > MAX_CHAT_MESSAGES {

@@ -73,6 +73,127 @@ pub struct ChatMessage {
     pub thought_seconds: Option<f32>,
     /// Total seconds the turn took, filled in when the stream completes.
     pub turn_seconds: Option<f32>,
+    /// Agent run that owns this message. Older/system messages may have none.
+    pub run_id: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunPhase {
+    Planning,
+    Acting,
+    WaitingApproval,
+    Streaming,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl RunPhase {
+    pub fn can_transition_to(self, next: Self) -> bool {
+        use RunPhase::*;
+        match self {
+            Planning => matches!(
+                next,
+                Acting | WaitingApproval | Streaming | Completed | Failed | Cancelled
+            ),
+            Acting => matches!(
+                next,
+                WaitingApproval | Streaming | Completed | Failed | Cancelled
+            ),
+            WaitingApproval => matches!(next, Acting | Streaming | Completed | Failed | Cancelled),
+            Streaming => matches!(next, Completed | Failed | Cancelled),
+            Completed | Failed | Cancelled => false,
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepositoryContextSource {
+    Live,
+    Snapshot,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunContextSnapshot {
+    pub scope: String,
+    pub room: String,
+    pub room_summary: String,
+    pub selected_note: Option<String>,
+    pub relevant_notes: Vec<String>,
+    pub relevant_memories: usize,
+    pub relevant_trail_events: usize,
+    pub notes_available: usize,
+    pub memories_available: usize,
+    pub local_tools_available: bool,
+    pub provider: String,
+    pub provider_online: bool,
+    pub repository_source: RepositoryContextSource,
+    pub repository_summary: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunStep {
+    pub label: String,
+    pub target: Option<String>,
+    pub status: StepStatus,
+    pub summary: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalRequest {
+    pub operation: String,
+    pub target: String,
+    pub effect: String,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeStatus {
+    Proposed,
+    Applied,
+    Rejected,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunChange {
+    pub target: String,
+    pub summary: String,
+    pub status: ChangeStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunOutcome {
+    Completed { summary: String },
+    Failed { error: String },
+    Cancelled { reason: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentRun {
+    pub id: u64,
+    pub request: String,
+    pub phase: RunPhase,
+    pub context: RunContextSnapshot,
+    pub steps: Vec<RunStep>,
+    pub approval: Option<ApprovalRequest>,
+    pub changes: Vec<RunChange>,
+    pub outcome: Option<RunOutcome>,
 }
 
 #[derive(Clone)]

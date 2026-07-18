@@ -2479,3 +2479,230 @@ fn daemon_status_reports_missing_state() {
     }
     let _ = fs::remove_dir_all(root);
 }
+
+fn rendered_chat(app: &App, width: u16) -> String {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let backend = TestBackend::new(width, 64);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .filter_map(|x| buffer.cell((x, y)))
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn run_phase_transitions_are_guarded() {
+    assert!(RunPhase::Planning.can_transition_to(RunPhase::Acting));
+    assert!(RunPhase::Acting.can_transition_to(RunPhase::WaitingApproval));
+    assert!(RunPhase::WaitingApproval.can_transition_to(RunPhase::Acting));
+    assert!(RunPhase::Streaming.can_transition_to(RunPhase::Completed));
+    assert!(!RunPhase::Completed.can_transition_to(RunPhase::Acting));
+
+    let mut app = App::new();
+    app.begin_run("inspect", RunPhase::Planning);
+    app.complete_run("done").unwrap();
+    assert!(app.transition_run(RunPhase::Acting).is_err());
+}
+
+#[test]
+fn one_agent_request_owns_one_run_id_and_completes_read_only() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+
+    assert!(app.try_start_agent_action("inspect the current workspace status"));
+
+    assert_eq!(app.agent_runs.len(), 1);
+    let run = &app.agent_runs[0];
+    assert_eq!(run.phase, RunPhase::Completed);
+    assert!(run.changes.is_empty());
+    assert!(!run.steps.is_empty());
+    assert!(app
+        .chat_messages
+        .iter()
+        .all(|message| message.run_id == Some(run.id)));
+}
+
+#[test]
+fn authoritative_run_approval_supports_approve_reject_cancel_and_fail() {
+    let mut app = App::new();
+    app.begin_run("write", RunPhase::Planning);
+    app.request_approval(
+        ApprovalRequest {
+            operation: String::from("Create note"),
+            target: String::from("Launch"),
+            effect: String::from("Create the Launch note."),
+        },
+        RunChange {
+            target: String::from("Launch"),
+            summary: String::from("Create the Launch note."),
+            status: ChangeStatus::Proposed,
+        },
+    )
+    .unwrap();
+    assert!(app.has_pending_agent_approval());
+    app.approve_request().unwrap();
+    assert!(!app.has_pending_agent_approval());
+    app.complete_run("proposal prepared").unwrap();
+
+    app.begin_run("reject", RunPhase::Planning);
+    app.request_approval(
+        ApprovalRequest {
+            operation: String::from("Save memory"),
+            target: String::from("local memories"),
+            effect: String::from("Save one memory."),
+        },
+        RunChange {
+            target: String::from("local memories"),
+            summary: String::from("Save one memory."),
+            status: ChangeStatus::Proposed,
+        },
+    )
+    .unwrap();
+    app.reject_request("rejected").unwrap();
+    assert_eq!(app.active_agent_run().unwrap().phase, RunPhase::Cancelled);
+    assert_eq!(
+        app.active_agent_run().unwrap().changes[0].status,
+        ChangeStatus::Rejected
+    );
+
+    app.begin_run("cancel", RunPhase::Planning);
+    app.cancel_run("cancelled").unwrap();
+    assert_eq!(app.active_agent_run().unwrap().phase, RunPhase::Cancelled);
+
+    app.begin_run("fail", RunPhase::Planning);
+    let step = app.start_step("Read workspace", None).unwrap();
+    app.fail_step(step, "unavailable").unwrap();
+    let run = app.active_agent_run().unwrap();
+    assert_eq!(run.phase, RunPhase::Failed);
+    assert_eq!(run.steps[0].status, StepStatus::Failed);
+    assert_eq!(run.steps[0].error.as_deref(), Some("unavailable"));
+}
+
+#[test]
+fn run_context_distinguishes_live_and_cached_repository_state() {
+    let mut app = App::new();
+    app.agent_context_scope = AgentContextScope::CurrentFolder;
+    app.begin_run("live", RunPhase::Planning);
+    assert_eq!(
+        app.active_agent_run().unwrap().context.repository_source,
+        RepositoryContextSource::Live
+    );
+    app.cancel_run("done").unwrap();
+
+    app.agent_context_scope = AgentContextScope::Global;
+    app.temporal_forks.push(TemporalFork {
+        id: String::from("snapshot"),
+        parent_id: None,
+        label: String::from("Snapshot"),
+        reason: String::from("test"),
+        created_at: String::new(),
+        notes: Vec::new(),
+        folders: Vec::new(),
+        memories: Vec::new(),
+        selected_note: 0,
+        activity_context: Vec::new(),
+        chat_context: Vec::new(),
+        repo_context: Some(RepoContext {
+            cwd: String::from("/snapshot"),
+            branch: Some(String::from("saved")),
+            head: None,
+            dirty_files: vec![String::from("old.rs")],
+        }),
+    });
+    app.current_fork_id = Some(String::from("snapshot"));
+    app.begin_run("snapshot", RunPhase::Planning);
+    assert_eq!(
+        app.active_agent_run().unwrap().context.repository_source,
+        RepositoryContextSource::Snapshot
+    );
+}
+
+#[test]
+fn inline_workspace_orders_run_state_and_survives_all_supported_widths() {
+    let mut app = App::new();
+    app.panel_mode = PanelMode::AiChat;
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.begin_run("write a launch note", RunPhase::Planning);
+    app.push_chat_message("user", "write a launch note");
+    let step = app.start_step("Choose the target", None).unwrap();
+    app.complete_step(step, "New note: Launch").unwrap();
+    app.request_approval(
+        ApprovalRequest {
+            operation: String::from("Create note"),
+            target: String::from("Launch"),
+            effect: String::from("Draft and open the Launch note."),
+        },
+        RunChange {
+            target: String::from("Launch"),
+            summary: String::from("Draft and open the Launch note."),
+            status: ChangeStatus::Proposed,
+        },
+    )
+    .unwrap();
+    app.push_chat_message("assistant", "I need permission before writing.");
+
+    for width in [60, 80, 107, 108, 140] {
+        let screen = rendered_chat(&app, width);
+        for expected in [
+            "write a launch note",
+            "Context used",
+            "Run · waiting for approval",
+            "Permission required",
+            "Create note · Launch",
+            "Nothing has changed yet",
+            "Changes",
+            "proposed · Launch",
+            "I need permission before writing",
+            "offline",
+            "local notes",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "width {width} did not render {expected:?}\n{screen}"
+            );
+        }
+        let positions = [
+            "write a launch note",
+            "Context used",
+            "Run · waiting for approval",
+            "Permission required",
+            "Changes",
+            "I need permission before writing",
+        ]
+        .map(|needle| screen.find(needle).unwrap());
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+}
+
+#[test]
+fn completed_read_only_run_renders_no_changes_and_outcome_after_response() {
+    let mut app = App::new();
+    app.panel_mode = PanelMode::AiChat;
+    app.begin_run("inspect", RunPhase::Planning);
+    app.push_chat_message("user", "inspect");
+    let step = app.start_step("Inspect workspace", None).unwrap();
+    app.complete_step(step, "Workspace inspected").unwrap();
+    app.push_chat_message("assistant", "The workspace is clean.");
+    app.complete_run("Inspection completed.").unwrap();
+
+    let screen = rendered_chat(&app, 60);
+    let response = screen.find("The workspace is clean").unwrap();
+    let outcome = screen.find("Outcome").unwrap();
+    assert!(response < outcome);
+    assert!(screen.contains("No changes were made"));
+}

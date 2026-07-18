@@ -143,6 +143,9 @@ impl App {
                 active: false,
             },
             chat_messages: Vec::new(),
+            agent_runs: Vec::new(),
+            active_run_id: None,
+            next_run_id: 1,
             activity_log: VecDeque::with_capacity(80),
             chat_input_buffer: String::new(),
             chat_input_cursor: 0,
@@ -834,6 +837,8 @@ impl App {
                         }
                         None => self.add_activity("Finished response."),
                     }
+                    let _ =
+                        self.complete_run("Aleph completed the response. No changes were made.");
                     stream_finished = true;
                 }
                 Ok(ChatStreamUpdate::Error(error)) => {
@@ -872,6 +877,7 @@ impl App {
                         "Request failed: {}",
                         Self::preview_text(&error, 72)
                     ));
+                    let _ = self.fail_run(error);
                     stream_finished = true;
                 }
                 Err(TryRecvError::Empty) => {
@@ -908,6 +914,8 @@ impl App {
                     self.chat_stream_rx = None;
                     self.last_action = String::from("AI request disconnected.");
                     self.add_activity("Request disconnected.");
+                    let _ =
+                        self.fail_run("The provider disconnected before completing the response.");
                     stream_finished = true;
                 }
             }
@@ -1018,6 +1026,24 @@ impl App {
 
     pub fn chat_messages(&self) -> &[ChatMessage] {
         &self.chat_messages
+    }
+
+    pub fn agent_runs(&self) -> &[AgentRun] {
+        &self.agent_runs
+    }
+
+    pub fn active_agent_run(&self) -> Option<&AgentRun> {
+        let id = self.active_run_id?;
+        self.agent_runs.iter().find(|run| run.id == id)
+    }
+
+    pub fn agent_run(&self, id: u64) -> Option<&AgentRun> {
+        self.agent_runs.iter().find(|run| run.id == id)
+    }
+
+    pub fn has_pending_agent_approval(&self) -> bool {
+        self.active_agent_run()
+            .is_some_and(|run| run.phase == RunPhase::WaitingApproval && run.approval.is_some())
     }
 
     pub fn chat_input_buffer(&self) -> &str {

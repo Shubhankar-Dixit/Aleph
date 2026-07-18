@@ -175,9 +175,11 @@ impl App {
                             self.ghost_result =
                                 Some(String::from("AI returned an empty proposal."));
                             self.last_action = String::from("AI note edit returned no changes.");
+                            let _ = self.complete_run("Aleph returned no proposed changes.");
                         } else if proposed == self.editor_buffer {
                             self.ghost_result = Some(String::from("No changes proposed."));
                             self.last_action = String::from("AI note edit found no changes.");
+                            let _ = self.complete_run("The note already matched the requested result. No changes were made.");
                         } else if self.editor_note_index.is_none() {
                             let title = self
                                 .ai_draft_create_title
@@ -219,6 +221,8 @@ impl App {
                     self.thinking_ticks_remaining = 0;
                     self.ghost_stream_rx = None;
                     self.last_action = String::from("Ghost request failed.");
+                    let _ = self.mark_proposed_changes(ChangeStatus::Failed);
+                    let _ = self.fail_run(error);
                     finished = true;
                 }
                 Err(TryRecvError::Empty) => {
@@ -233,6 +237,9 @@ impl App {
                     self.thinking_status.clear();
                     self.thinking_ticks_remaining = 0;
                     self.ghost_stream_rx = None;
+                    let _ = self.mark_proposed_changes(ChangeStatus::Failed);
+                    let _ = self
+                        .fail_run("The edit provider disconnected before producing a proposal.");
                     finished = true;
                 }
             }
@@ -256,11 +263,15 @@ impl App {
                     self.open_note_editor(index);
                     self.ghost_result = None;
                     self.last_action = format!("Created AI note: {}", title);
+                    let _ = self.mark_proposed_changes(ChangeStatus::Applied);
+                    let _ = self.complete_run(format!("Created note `{}`.", title));
                     self.close_ai_overlay();
                 }
                 Err(error) => {
                     self.ghost_result = Some(format!("Create failed: {}", error));
                     self.last_action = String::from("AI note create failed.");
+                    let _ = self.mark_proposed_changes(ChangeStatus::Failed);
+                    let _ = self.fail_run(error);
                 }
             }
             return;
@@ -277,6 +288,17 @@ impl App {
         self.ghost_result = None;
         self.save_editor_contents();
         self.last_action = String::from("Applied AI note edits.");
+        match self.editor_save_status() {
+            EditorSaveStatus::Failed(error) => {
+                let error = error.clone();
+                let _ = self.mark_proposed_changes(ChangeStatus::Failed);
+                let _ = self.fail_run(error);
+            }
+            _ => {
+                let _ = self.mark_proposed_changes(ChangeStatus::Applied);
+                let _ = self.complete_run("Applied and saved the approved note edits.");
+            }
+        }
         self.close_ai_overlay();
     }
 
@@ -288,6 +310,7 @@ impl App {
         self.thinking = false;
         self.thinking_ticks_remaining = 0;
         self.last_action = String::from("Rejected AI note edits.");
+        let _ = self.reject_request("The user rejected the generated note proposal.");
     }
 
     /// Models frequently ignore the "no code fences, no preamble" instruction.

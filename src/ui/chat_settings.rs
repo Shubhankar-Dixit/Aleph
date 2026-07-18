@@ -19,81 +19,55 @@ fn settings_panel_sections(inner: Rect) -> std::rc::Rc<[Rect]> {
         .split(inner)
 }
 
-pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
-    let show_activity = area.width >= 108;
-    let max_width = if show_activity { 140 } else { 120 };
-    let center_width = area.width.saturating_sub(6).min(max_width);
-    let left_padding = area.width.saturating_sub(center_width) / 2;
-    let room_accent = app.room_accent();
-    let room_accent_soft = app.room_accent_soft();
-    let current_mode = chat_console_mode(app);
-    let repo_context = app.current_repo_context();
-    let git_status = repo_context
-        .map(|repo| {
-            if repo.dirty_files.is_empty() {
-                String::from("clean")
-            } else {
-                format!("{} dirty", repo.dirty_files.len())
-            }
-        })
-        .unwrap_or_else(|| String::from("unknown"));
-    let workspace_status = repo_context
-        .and_then(|repo| repo.branch.as_ref().map(|branch| branch.as_str()))
-        .map(|branch| branch.to_string())
-        .unwrap_or_else(|| String::from("awake"));
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ChatLayout {
+    pub meta: Rect,
+    pub transcript: Rect,
+    pub input: Rect,
+    pub hints: Rect,
+}
 
-    let v_chunks = Layout::default()
+pub(super) fn chat_layout(area: Rect) -> ChatLayout {
+    let max_width = 120;
+    let center_width = area.width.saturating_sub(4).min(max_width);
+    let left_padding = area.width.saturating_sub(center_width) / 2;
+    let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Top meta
-            Constraint::Length(1), // Spacer
-            Constraint::Min(0),    // Chat messages
-            Constraint::Length(1), // Spacer
-            Constraint::Length(1), // Input area
-            Constraint::Length(1), // Bottom hints
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .margin(1)
         .split(area);
-
-    let top_h_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(left_padding),
-            Constraint::Length(center_width),
-            Constraint::Min(0),
-        ]);
-
-    let content_area = top_h_chunks.split(v_chunks[2])[1];
-    let content_chunks = if show_activity {
+    let column = |row| {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Min(48),
-                Constraint::Length(2),
-                Constraint::Length(30),
+                Constraint::Length(left_padding),
+                Constraint::Length(center_width),
+                Constraint::Min(0),
             ])
-            .split(content_area)
-    } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(0)])
-            .split(content_area)
+            .split(row)[1]
     };
 
-    let meta_area = top_h_chunks.split(v_chunks[0])[1];
-    let chat_area = content_chunks[0];
-    let input_area = top_h_chunks.split(v_chunks[4])[1];
-    let hints_area = top_h_chunks.split(v_chunks[5])[1];
+    ChatLayout {
+        meta: column(rows[0]),
+        transcript: column(rows[2]),
+        input: column(rows[4]),
+        hints: column(rows[5]),
+    }
+}
 
-    let provider_connected = match app.ai_provider() {
-        AiProvider::OpenRouter => app.is_openrouter_connected(),
-        AiProvider::Strix => app.is_strix_connected(),
-    };
-    let provider_status = if provider_connected {
-        "online"
-    } else {
-        "offline"
-    };
+pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
+    let layout = chat_layout(area);
+    let room_accent = app.room_accent();
+    let current_mode = chat_console_mode(app);
+    let chat_area = layout.transcript;
+
     let pulse_label = if app.is_streaming() || app.is_thinking() {
         app.thinking_status()
     } else {
@@ -113,33 +87,17 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
                 current_mode,
                 Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  ·  ", Style::default().fg(MUTED)),
-            Span::styled(
-                format!("room {}", app.active_room_label()),
-                Style::default().fg(MUTED),
-            ),
         ]),
-        Line::from(vec![
-            Span::styled(
-                format!("{} {}", app.ai_provider_label(), provider_status),
-                Style::default().fg(room_accent_soft),
-            ),
-            Span::styled("  ·  ", Style::default().fg(MUTED)),
-            Span::styled(workspace_status, Style::default().fg(MUTED)),
-            Span::styled(" · ", Style::default().fg(MUTED)),
-            Span::styled(git_status, Style::default().fg(MUTED)),
-            Span::styled("  ·  ", Style::default().fg(MUTED)),
-            Span::styled(
-                pulse_label,
-                Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
-            ),
-        ]),
+        Line::from(Span::styled(
+            pulse_label,
+            Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
+        )),
     ])
     .alignment(Alignment::Left)
     .style(Style::default().fg(TEXT));
-    frame.render_widget(top_meta, meta_area);
+    frame.render_widget(top_meta, layout.meta);
 
-    let lines: Vec<Line<'static>> = app.chat_render_lines().to_vec();
+    let lines = render_chat_workspace_lines(app);
 
     let lines = wrap_lines_to_width(lines, chat_area.width as usize);
     let visible_lines = chat_area.height as usize;
@@ -152,9 +110,6 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         .scroll((scroll_y, 0))
         .style(Style::default().fg(MUTED));
     frame.render_widget(messages_widget, chat_area);
-    if show_activity {
-        render_run_map_panel(frame, app, content_chunks[2]);
-    }
 
     let input_buffer = app.chat_input_buffer();
     let cursor = app.chat_input_cursor().min(input_buffer.len());
@@ -182,7 +137,7 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(CURSOR, Style::default().fg(MUTED)),
         Span::styled(after_cursor, input_text_style),
     ]));
-    frame.render_widget(input_line, input_area);
+    frame.render_widget(input_line, layout.input);
 
     let hint_key = |label: &'static str| {
         Span::styled(
@@ -212,96 +167,286 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let bottom_hints = Paragraph::new(Line::from(hints_spans))
         .alignment(Alignment::Left)
         .style(Style::default().fg(MUTED));
-    frame.render_widget(bottom_hints, hints_area);
+    frame.render_widget(bottom_hints, layout.hints);
 }
 
-fn render_run_map_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .title(Span::styled(
-            "Run Map",
-            Style::default()
-                .fg(ACCENT_SOFT)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(BORDER));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+pub(super) fn render_chat_workspace_lines(app: &App) -> Vec<Line<'static>> {
+    if app.chat_messages().is_empty() {
+        return vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Ask Aleph to inspect local notes, memories, Trail, or workspace context.",
+                Style::default().fg(MUTED),
+            )),
+        ];
+    }
 
-    let repo_context = app.current_repo_context();
-    let current_state = if app.is_streaming() || app.is_thinking() {
-        app.thinking_status().to_string()
-    } else {
-        app.activity_headline()
-    };
-    let workspace_state = repo_context
-        .and_then(|repo| {
-            repo.branch
-                .as_ref()
-                .map(|branch| (branch.as_str(), repo.dirty_files.len()))
-        })
-        .map(|(branch, dirty)| {
-            if dirty == 0 {
-                format!("{} · clean", branch)
-            } else {
-                format!("{} · {} dirty", branch, dirty)
-            }
-        })
-        .unwrap_or_else(|| String::from("workspace idle"));
-    let provider_state = if matches!(app.ai_provider(), AiProvider::OpenRouter) {
-        if app.is_openrouter_connected() {
-            String::from("OpenRouter connected")
-        } else {
-            String::from("OpenRouter offline")
+    let messages = app.chat_messages();
+    let mut lines = Vec::new();
+    let mut rendered_runs = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
         }
-    } else if app.is_strix_connected() {
-        String::from("Strix connected")
-    } else {
-        String::from("Strix offline")
-    };
-    let next_state = if app.has_pending_ai_edit() {
-        String::from("awaiting approval")
-    } else if app.is_streaming() || app.is_thinking() {
-        String::from("synthesizing")
-    } else {
-        String::from("awaiting input")
-    };
+        render_chat_message(&mut lines, message, app);
 
-    let lines = vec![
-        Line::from(vec![Span::styled("Current", Style::default().fg(MUTED))]),
-        Line::from(vec![
-            Span::styled("● ", Style::default().fg(ACCENT)),
-            Span::styled(current_state, Style::default().fg(TEXT)),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled("Context", Style::default().fg(MUTED))]),
-        Line::from(vec![
-            Span::styled("✓ ", Style::default().fg(ACCENT_SOFT)),
+        let Some(run_id) = message.run_id else {
+            continue;
+        };
+        let Some(run) = app.agent_run(run_id) else {
+            continue;
+        };
+
+        if message.role == "user" && !rendered_runs.contains(&run_id) {
+            rendered_runs.push(run_id);
+            render_run_context(&mut lines, run);
+            render_run_timeline(&mut lines, run);
+            render_run_approval(&mut lines, run);
+            render_run_changes(&mut lines, run);
+        }
+
+        let has_later_assistant = messages[index + 1..]
+            .iter()
+            .any(|later| later.run_id == Some(run_id) && later.role == "assistant");
+        if message.role == "assistant" && !has_later_assistant {
+            render_run_outcome(&mut lines, run);
+        }
+    }
+    lines
+}
+
+fn render_chat_message(lines: &mut Vec<Line<'static>>, message: &ChatMessage, app: &App) {
+    if message.role == "user" {
+        let mut content = message.content.lines();
+        let first = content.next().unwrap_or("");
+        lines.push(Line::from(vec![
             Span::styled(
-                format!("room {}", app.active_room_label()),
-                Style::default().fg(TEXT),
+                "❯ ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("✓ ", Style::default().fg(ACCENT_SOFT)),
-            Span::styled(provider_state, Style::default().fg(TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled("✓ ", Style::default().fg(ACCENT_SOFT)),
-            Span::styled(workspace_state, Style::default().fg(TEXT)),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled("Next", Style::default().fg(MUTED))]),
-        Line::from(vec![
-            Span::styled("○ ", Style::default().fg(MUTED)),
-            Span::styled(next_state, Style::default().fg(TEXT)),
-        ]),
-    ];
+            Span::styled(
+                first.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  ·  {}", message.timestamp),
+                Style::default().fg(MUTED),
+            ),
+        ]));
+        for extra in content {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", extra),
+                Style::default().fg(TEXT),
+            )));
+        }
+        return;
+    }
 
-    frame.render_widget(
-        Paragraph::new(wrap_lines_to_width(lines, inner.width as usize)),
-        inner,
-    );
+    let live = message.content.trim().is_empty() && (app.is_streaming() || app.is_thinking());
+    lines.push(Line::from(vec![
+        Span::styled(
+            "◆ Aleph",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if live {
+                format!("  ·  {}", app.thinking_status())
+            } else if let Some(seconds) = message.thought_seconds {
+                format!("  ·  thought for {:.1}s", seconds)
+            } else {
+                String::new()
+            },
+            Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
+        ),
+    ]));
+    if !message.content.trim().is_empty() {
+        lines.extend(App::render_chat_markdown_lines_owned(&message.content));
+    }
+}
+
+fn render_run_context(lines: &mut Vec<Line<'static>>, run: &AgentRun) {
+    lines.push(section_label("Context used"));
+    lines.push(detail_line(
+        "◌",
+        format!(
+            "{} scope · room {} · {} notes · {} memories",
+            run.context.scope,
+            run.context.room,
+            run.context.notes_available,
+            run.context.memories_available
+        ),
+    ));
+    if let Some(note) = run.context.selected_note.as_deref() {
+        lines.push(detail_line("◌", format!("selected note: {}", note)));
+    }
+    if !run.context.relevant_notes.is_empty() {
+        lines.push(detail_line(
+            "◌",
+            format!("relevant notes: {}", run.context.relevant_notes.join(", ")),
+        ));
+    }
+    if run.context.relevant_memories > 0 || run.context.relevant_trail_events > 0 {
+        lines.push(detail_line(
+            "◌",
+            format!(
+                "matched context: {} memories · {} Trail events",
+                run.context.relevant_memories, run.context.relevant_trail_events
+            ),
+        ));
+    }
+    let provider = if run.context.provider_online {
+        format!("{} online", run.context.provider)
+    } else {
+        format!(
+            "{} offline · local notes, memories, Trail, and workspace tools remain available",
+            run.context.provider
+        )
+    };
+    lines.push(detail_line("◌", provider));
+    if let Some(repository) = run.context.repository_summary.as_deref() {
+        let source = match run.context.repository_source {
+            RepositoryContextSource::Live => "live repository",
+            RepositoryContextSource::Snapshot => "cached repository snapshot",
+            RepositoryContextSource::Unavailable => "repository unavailable",
+        };
+        lines.push(detail_line("◌", format!("{}: {}", source, repository)));
+    }
+}
+
+fn render_run_timeline(lines: &mut Vec<Line<'static>>, run: &AgentRun) {
+    lines.push(section_label(format!(
+        "Run · {}",
+        run_phase_label(run.phase)
+    )));
+    if run.steps.is_empty() {
+        let text = match run.phase {
+            RunPhase::Planning => "Choosing the next action.",
+            RunPhase::Streaming => "Synthesizing the response.",
+            RunPhase::WaitingApproval => "Plan ready; waiting for permission.",
+            _ => "No tool steps were required.",
+        };
+        lines.push(detail_line("·", text));
+        return;
+    }
+    for step in &run.steps {
+        let (glyph, color) = match step.status {
+            StepStatus::Pending => ("○", MUTED),
+            StepStatus::Running => ("●", ACCENT),
+            StepStatus::Completed => ("✓", ACCENT_SOFT),
+            StepStatus::Failed => ("×", Color::Rgb(190, 110, 125)),
+        };
+        let mut text = step.label.clone();
+        if let Some(target) = step.target.as_deref() {
+            text.push_str(&format!(" · {}", target));
+        }
+        if let Some(summary) = step.summary.as_deref() {
+            text.push_str(&format!(" — {}", summary));
+        }
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", glyph), Style::default().fg(color)),
+            Span::styled(text, Style::default().fg(TEXT)),
+        ]));
+        if let Some(error) = step.error.as_deref() {
+            lines.push(detail_line("  ×", format!("failed: {}", error)));
+        }
+    }
+}
+
+fn render_run_approval(lines: &mut Vec<Line<'static>>, run: &AgentRun) {
+    let Some(approval) = run.approval.as_ref() else {
+        return;
+    };
+    lines.push(section_label("Permission required"));
+    lines.push(detail_line(
+        "!",
+        format!("{} · {}", approval.operation, approval.target),
+    ));
+    lines.push(detail_line(" ", approval.effect.clone()));
+    lines.push(detail_line(" ", "Nothing has changed yet."));
+    lines.push(detail_line(
+        " ",
+        "Press Enter or type `yes` to approve; type `no` or press Esc to reject.",
+    ));
+}
+
+fn render_run_changes(lines: &mut Vec<Line<'static>>, run: &AgentRun) {
+    if run.changes.is_empty() {
+        return;
+    }
+    lines.push(section_label("Changes"));
+    for change in &run.changes {
+        let status = match change.status {
+            ChangeStatus::Proposed => "proposed",
+            ChangeStatus::Applied => "applied",
+            ChangeStatus::Rejected => "rejected",
+            ChangeStatus::Failed => "failed",
+        };
+        lines.push(detail_line(
+            "◇",
+            format!("{} · {} — {}", status, change.target, change.summary),
+        ));
+    }
+}
+
+fn render_run_outcome(lines: &mut Vec<Line<'static>>, run: &AgentRun) {
+    let Some(outcome) = run.outcome.as_ref() else {
+        return;
+    };
+    lines.push(section_label("Outcome"));
+    match outcome {
+        RunOutcome::Completed { summary } => {
+            lines.push(detail_line("✓", summary.clone()));
+            if run.changes.is_empty() {
+                lines.push(detail_line(" ", "No changes were made."));
+            }
+            lines.push(detail_line(
+                "→",
+                "You can ask Aleph to continue or inspect another target.",
+            ));
+        }
+        RunOutcome::Failed { error } => {
+            lines.push(detail_line("×", format!("Run failed: {}", error)));
+            lines.push(detail_line(
+                "→",
+                "Review the failed step, then retry or change the request.",
+            ));
+        }
+        RunOutcome::Cancelled { reason } => {
+            lines.push(detail_line("×", format!("Run cancelled: {}", reason)));
+            lines.push(detail_line(
+                "→",
+                "Nothing was applied. You can revise the request.",
+            ));
+        }
+    }
+}
+
+fn section_label(label: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("  {}", label.into()),
+        Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn detail_line(glyph: &str, text: impl Into<String>) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("  {} ", glyph), Style::default().fg(ACCENT_SOFT)),
+        Span::styled(text.into(), Style::default().fg(TEXT)),
+    ])
+}
+
+fn run_phase_label(phase: RunPhase) -> &'static str {
+    match phase {
+        RunPhase::Planning => "planning",
+        RunPhase::Acting => "acting",
+        RunPhase::WaitingApproval => "waiting for approval",
+        RunPhase::Streaming => "streaming",
+        RunPhase::Completed => "completed",
+        RunPhase::Failed => "failed",
+        RunPhase::Cancelled => "cancelled",
+    }
 }
 
 fn wrap_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
@@ -372,14 +517,21 @@ fn line_is_table_row(line: &Line<'static>) -> bool {
 }
 
 fn chat_console_mode(app: &App) -> &'static str {
-    if app.has_pending_ai_edit() {
-        "Ship"
-    } else if app.is_streaming() || app.is_thinking() {
-        "Inspect"
-    } else if app.is_agent_mode_enabled() {
-        "Plan"
+    if let Some(run) = app.active_agent_run() {
+        return match run.phase {
+            RunPhase::Planning => "Planning",
+            RunPhase::Acting => "Acting",
+            RunPhase::WaitingApproval => "Approval",
+            RunPhase::Streaming => "Streaming",
+            RunPhase::Completed => "Completed",
+            RunPhase::Failed => "Failed",
+            RunPhase::Cancelled => "Cancelled",
+        };
+    }
+    if app.is_agent_mode_enabled() {
+        "Agent"
     } else {
-        "Ask"
+        "Chat"
     }
 }
 

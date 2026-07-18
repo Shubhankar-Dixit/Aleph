@@ -432,7 +432,7 @@ impl App {
     pub(super) fn handle_chat_key(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Esc if key_event.kind == KeyEventKind::Press => {
-                if self.pending_agent_decision.is_some() {
+                if self.has_pending_agent_approval() {
                     self.cancel_pending_agent_action();
                     return;
                 }
@@ -457,7 +457,7 @@ impl App {
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
                 // Send chat message
                 let msg = self.chat_input_buffer.trim().to_string();
-                if self.pending_agent_decision.is_some() {
+                if self.has_pending_agent_approval() {
                     if msg.is_empty() || Self::is_affirmative_agent_permission(&msg) {
                         if self.confirm_pending_agent_action() {
                             self.chat_input_buffer.clear();

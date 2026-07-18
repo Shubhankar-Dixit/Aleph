@@ -23,6 +23,7 @@ use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 
 mod agent;
+mod agent_run;
 mod ai_edit;
 mod auth_chat;
 mod commands;
@@ -153,6 +154,9 @@ pub struct App {
     redo_stack: VecDeque<EditorState>,
     search_state: SearchState,
     chat_messages: Vec<ChatMessage>,
+    agent_runs: Vec<AgentRun>,
+    active_run_id: Option<u64>,
+    next_run_id: u64,
     activity_log: VecDeque<ActivityEntry>,
     chat_input_buffer: String,
     chat_input_cursor: usize,
@@ -184,6 +188,9 @@ pub struct App {
     agent_context_scope: AgentContextScope,
     login_picker_selected: usize,
     settings_selected: usize,
+    // Compatibility bridge: these retain the executable payload while
+    // AgentRun::approval is the authoritative user-visible permission state.
+    // Remove them when AgentDecision itself moves into the typed run model.
     pending_agent_query: Option<String>,
     pending_agent_decision: Option<AgentDecision>,
     agent_plan_rx: Option<Receiver<Result<String, String>>>,

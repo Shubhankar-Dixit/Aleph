@@ -790,6 +790,7 @@ impl App {
             timestamp: value.get("timestamp")?.as_str()?.to_string(),
             thought_seconds: None,
             turn_seconds: None,
+            run_id: None,
         })
     }
 
