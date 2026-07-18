@@ -38,6 +38,7 @@ pub struct Note {
     pub raw_content: String,
     pub updated_at: String,
     pub folder_id: Option<usize>,
+    pub strix_sync_pending: bool,
 }
 
 #[derive(Clone)]
@@ -68,6 +69,10 @@ pub struct ChatMessage {
     pub role: String, // "user" or "assistant"
     pub content: String,
     pub timestamp: String,
+    /// Seconds from turn start until the first streamed token arrived.
+    pub thought_seconds: Option<f32>,
+    /// Total seconds the turn took, filled in when the stream completes.
+    pub turn_seconds: Option<f32>,
 }
 
 #[derive(Clone)]
@@ -113,6 +118,13 @@ pub enum NoteSaveTarget {
     Strix,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentContextScope {
+    CurrentFolder,
+    ActiveRoom,
+    Global,
+}
+
 #[derive(Clone)]
 pub struct EditorState {
     pub buffer: String,
@@ -156,4 +168,13 @@ impl Selection {
         self.end = len;
         self.active = len > 0;
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum EditorSaveStatus {
+    #[default]
+    Clean,
+    Unsaved,
+    Saved,
+    Failed(String),
 }

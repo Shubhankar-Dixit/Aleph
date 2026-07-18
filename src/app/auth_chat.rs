@@ -19,9 +19,12 @@ impl App {
             vec![
                 String::from("A browser window will open for OpenRouter authorization."),
                 String::from("After you authorize Aleph, the API key will be stored locally."),
-                String::from("If the browser does not open, copy the auth URL from the terminal."),
+                String::from(
+                    "If the browser cannot open, create a key at openrouter.ai/keys and run /login openrouter <key>.",
+                ),
             ],
         );
+        self.add_system_log("Starting OpenRouter browser login");
         self.last_action = String::from("Starting OpenRouter provider setup.");
 
         thread::spawn(move || {
@@ -38,33 +41,90 @@ impl App {
         let (code_verifier, code_challenge) = Self::build_pkce_pair();
         let callback_nonce = Self::build_login_nonce();
         let callback_path = format!("{}/{}", OPENROUTER_AUTH_CALLBACK, callback_nonce);
-        let callback_url = format!("http://localhost:{}{}", OPENROUTER_AUTH_PORT, callback_path);
+
+        // OpenRouter supports a localhost callback on any port. Asking the OS for
+        // an available port avoids colliding with common local web dev servers
+        // (port 3000 in particular) and makes the URL match the listener exactly.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
+            format!(
+                "failed to bind local OpenRouter callback listener: {}",
+                error
+            )
+        })?;
+        let callback_port = listener
+            .local_addr()
+            .map_err(|error| format!("failed to read the callback listener address: {}", error))?
+            .port();
+        let callback_url = Self::openrouter_callback_url(callback_port, &callback_path);
         let auth_url = format!(
             "https://openrouter.ai/auth?callback_url={}&code_challenge={}&code_challenge_method=S256",
             urlencoding::encode(&callback_url),
             urlencoding::encode(&code_challenge),
         );
 
-        let listener = TcpListener::bind(("127.0.0.1", OPENROUTER_AUTH_PORT)).map_err(|error| {
-            format!(
-                "failed to bind local OpenRouter callback listener: {}",
-                error
-            )
-        })?;
         listener
             .set_nonblocking(true)
             .map_err(|error| format!("failed to configure the callback listener: {}", error))?;
 
-        Self::open_browser(&auth_url)?;
+        Self::open_browser(&auth_url).map_err(|error| {
+            format!(
+                "{}. Create an API key at https://openrouter.ai/keys, then run /login openrouter <key>.",
+                error
+            )
+        })?;
 
         let deadline = Instant::now() + Duration::from_secs(600);
-        let (mut stream, _) = loop {
+        let code = loop {
             if cancel_flag.load(Ordering::Relaxed) {
                 return Err(String::from("OpenRouter authorization was canceled."));
             }
 
             match listener.accept() {
-                Ok(connection) => break connection,
+                Ok((mut stream, _)) => {
+                    // A stray localhost probe must not permanently consume the
+                    // one callback connection or hang the login thread.
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
+
+                    let request_path = match Self::read_oauth_callback_path(
+                        &mut stream,
+                        &callback_path,
+                        "OpenRouter",
+                    ) {
+                        Ok(path) => path,
+                        Err(_) => {
+                            let _ = Self::write_openrouter_callback_response(
+                                &mut stream,
+                                "This is not Aleph's active OpenRouter callback. Return to the authorization page and try again.",
+                            );
+                            continue;
+                        }
+                    };
+
+                    if let Some(error) = Self::query_parameter(&request_path, "error") {
+                        let _ = Self::write_openrouter_callback_response(
+                            &mut stream,
+                            "OpenRouter authorization was not completed. You can close this page and try again in Aleph.",
+                        );
+                        return Err(format!("OpenRouter login returned an error: {}", error));
+                    }
+
+                    let Some(code) = Self::query_parameter(&request_path, "code") else {
+                        let _ = Self::write_openrouter_callback_response(
+                            &mut stream,
+                            "OpenRouter did not return an authorization code. You can close this page and try again in Aleph.",
+                        );
+                        return Err(String::from(
+                            "OpenRouter callback did not include an authorization code",
+                        ));
+                    };
+
+                    Self::write_openrouter_callback_response(
+                        &mut stream,
+                        "OpenRouter authorization completed. You can return to Aleph now.",
+                    )?;
+                    break code;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
                         return Err(String::from(
@@ -79,18 +139,15 @@ impl App {
             }
         };
 
-        let code = Self::read_openrouter_callback_code(&mut stream, &callback_path)?;
-
-        Self::write_openrouter_callback_response(
-            &mut stream,
-            "OpenRouter authorization completed. You can return to Aleph now.",
-        )?;
-
         if cancel_flag.load(Ordering::Relaxed) {
             return Err(String::from("OpenRouter authorization was canceled."));
         }
 
         Self::exchange_openrouter_code_for_key(&code, &code_verifier)
+    }
+
+    pub(super) fn openrouter_callback_url(port: u16, callback_path: &str) -> String {
+        format!("http://127.0.0.1:{}{}", port, callback_path)
     }
 
     pub(super) fn start_strix_browser_login(&mut self) -> bool {
@@ -768,6 +825,10 @@ impl App {
             self.last_action = String::from("Aleph is still answering the previous message.");
             return false;
         }
+        if self.agent_plan_rx.is_some() {
+            self.last_action = String::from("Aleph is still planning the previous message.");
+            return false;
+        }
 
         let provider = self.ai_provider;
         let openrouter_api_key = self.openrouter_api_key.clone();
@@ -779,12 +840,10 @@ impl App {
 
         let direct_smalltalk = Self::looks_like_direct_smalltalk(&query) && extra_context.is_none();
 
-        let conversation = match provider {
-            AiProvider::OpenRouter => {
-                self.openrouter_conversation_with_context(&query, extra_context.as_deref())
-            }
-            AiProvider::Strix => Vec::new(),
-        };
+        // Built for both providers: OpenRouter uses it directly, the Strix
+        // path keeps it as a fallback conversation if the Strix call fails.
+        let conversation =
+            self.openrouter_conversation_with_context(&query, extra_context.as_deref());
         let strix_notes = if provider == AiProvider::Strix {
             self.notes.clone()
         } else {
@@ -814,6 +873,14 @@ impl App {
         self.chat_scroll_offset = 0;
         self.streaming_buffer.clear();
         self.streaming_active = true;
+        self.chat_turn_started_at = Some(Instant::now());
+        match provider {
+            AiProvider::OpenRouter => self.add_system_log(format!(
+                "Asking OpenRouter ({})",
+                Self::openrouter_chat_model()
+            )),
+            AiProvider::Strix => self.add_system_log("Asking Strix (/nest/ask)"),
+        }
         self.last_action = format!("AI Chat: {}", query);
         self.add_activity(format!("User asked: {}", Self::preview_text(&query, 72)));
         self.add_activity(if direct_smalltalk {
@@ -862,16 +929,38 @@ impl App {
                     return true;
                 };
                 let base_url = Self::strix_api_base_url();
+                let fallback_api_key = openrouter_api_key;
                 thread::spawn(move || {
-                    if let Err(error) = Self::send_strix_chat(
+                    let strix_result = Self::send_strix_chat(
                         &base_url,
                         &access_token,
                         &query,
                         &strix_context,
                         &strix_notes,
                         sender.clone(),
-                    ) {
-                        let _ = sender.send(ChatStreamUpdate::Error(error));
+                    );
+                    if let Err(error) = strix_result {
+                        // Strix ask endpoints are not always reachable from a
+                        // native token (they live on the Strix backend); fall
+                        // back to OpenRouter when it is configured.
+                        if let Some(api_key) = fallback_api_key {
+                            let _ = sender.send(ChatStreamUpdate::Notice(format!(
+                                "Strix chat failed ({}); falling back to OpenRouter",
+                                error
+                            )));
+                            if let Err(fallback_error) = Self::send_openrouter_chat_streaming(
+                                &api_key,
+                                &conversation,
+                                sender.clone(),
+                            ) {
+                                let _ = sender.send(ChatStreamUpdate::Error(format!(
+                                    "Strix chat failed ({}); OpenRouter fallback also failed: {}",
+                                    error, fallback_error
+                                )));
+                            }
+                        } else {
+                            let _ = sender.send(ChatStreamUpdate::Error(error));
+                        }
                     }
                 });
             }
@@ -895,7 +984,7 @@ impl App {
             String::from(
                 "You are Aleph, a fast local computer-use agent inside the user's terminal workspace. \
                  You have an advantage over remote desktop agents because Aleph already sees local notes, memories, room scope, repo state, Trail activity, provider status, and file-backed workspace metadata. \
-                 Answer like an operator: state what local evidence says, propose the next concrete action, and avoid slow speculative planning when a direct local read is enough. \
+                 Answer like an operator: be brief, use the local evidence, and avoid filler. Do not add next steps unless the user asks for them or a write needs approval. \
                  Separate read-only inspection from writes. Never claim you changed files, launched apps, clicked UI, or executed shell commands unless Aleph actually did so through an available command or approved tool path. \
                  For risky or destructive computer actions, ask for explicit approval and prefer dry-run/status output first. \
                  If the provided context lacks enough evidence, say exactly what is missing.",
@@ -950,15 +1039,47 @@ impl App {
             }
 
             let is_user = message.role == "user";
-            let prefix = if is_user { "You" } else { "Aleph" };
-            let color = if is_user {
-                CHAT_ACCENT_SOFT
-            } else {
-                CHAT_ACCENT
-            };
 
-            let is_live_assistant = !is_user
-                && index == msg_count - 1
+            if is_user {
+                // Highlighted block row: `❯ message` with a timestamp chip.
+                let mut content_lines = message.content.lines();
+                let first = content_lines.next().unwrap_or("").to_string();
+                let mut spans = vec![
+                    Span::styled(
+                        "❯ ",
+                        Style::default()
+                            .fg(CHAT_ACCENT)
+                            .bg(CHAT_USER_BG)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        first,
+                        Style::default()
+                            .fg(CHAT_USER_TEXT)
+                            .bg(CHAT_USER_BG)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                if !message.timestamp.is_empty() {
+                    spans.push(Span::styled(
+                        format!("  ·  {}", message.timestamp),
+                        Style::default().fg(CHAT_MUTED),
+                    ));
+                }
+                lines.push(Line::from(spans));
+                for extra in content_lines {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", extra),
+                        Style::default().fg(CHAT_USER_TEXT).bg(CHAT_USER_BG),
+                    )));
+                }
+                if index == msg_count - 1 {
+                    self.chat_cache_stable_len = lines.len();
+                }
+                continue;
+            }
+
+            let is_live_assistant = index == msg_count - 1
                 && message.content.trim().is_empty()
                 && (self.is_streaming() || self.is_thinking());
 
@@ -966,20 +1087,42 @@ impl App {
                 let live_status = self.thinking_status().to_string();
                 lines.push(Line::from(vec![
                     Span::styled(
-                        format!("{} ", prefix),
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        "◆ Aleph ",
+                        Style::default()
+                            .fg(CHAT_ACCENT)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw("· "),
-                    Span::styled(live_status, Style::default().fg(CHAT_MUTED)),
+                    Span::styled("· ", Style::default().fg(CHAT_MUTED)),
+                    Span::styled(
+                        live_status,
+                        Style::default()
+                            .fg(CHAT_MUTED)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
                 ]));
                 self.chat_cache_stable_len = lines.len();
                 continue;
             }
 
-            lines.push(Line::from(vec![Span::styled(
-                prefix,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            )]));
+            let mut header = vec![Span::styled(
+                "◆ Aleph",
+                Style::default()
+                    .fg(CHAT_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )];
+            if let Some(thought) = message.thought_seconds {
+                header.push(Span::styled(
+                    format!("  ·  thought for {:.1}s", thought),
+                    Style::default().fg(CHAT_MUTED),
+                ));
+            }
+            if !message.timestamp.is_empty() {
+                header.push(Span::styled(
+                    format!("  ·  {}", message.timestamp),
+                    Style::default().fg(CHAT_MUTED),
+                ));
+            }
+            lines.push(Line::from(header));
 
             // Mark stable length right after the last message's header
             if index == msg_count - 1 {
@@ -991,6 +1134,18 @@ impl App {
             }
 
             lines.extend(Self::render_chat_markdown_lines_owned(&message.content));
+
+            if index == msg_count - 1 {
+                if let Some(turn) = message.turn_seconds {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        format!("Turn completed in {:.1}s.", turn),
+                        Style::default()
+                            .fg(CHAT_MUTED)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
+            }
         }
 
         self.chat_render_cache = lines;
@@ -1032,7 +1187,7 @@ impl App {
             .collect();
 
         let payload = serde_json::json!({
-            "model": OPENROUTER_CHAT_MODEL,
+            "model": Self::openrouter_chat_model(),
             "messages": messages,
             "temperature": 0.7,
             "stream": true,
@@ -1178,7 +1333,7 @@ impl App {
             .collect();
 
         let payload = serde_json::json!({
-            "model": OPENROUTER_CHAT_MODEL,
+            "model": Self::openrouter_chat_model(),
             "messages": messages,
             "temperature": 0.1,
             "stream": false,
@@ -1215,6 +1370,14 @@ impl App {
             .map(|content| content.trim().to_string())
             .filter(|content| !content.is_empty())
             .ok_or_else(|| String::from("OpenRouter returned an empty planner response"))
+    }
+
+    pub(super) fn openrouter_chat_model() -> String {
+        std::env::var("ALEPH_OPENROUTER_MODEL")
+            .ok()
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+            .unwrap_or_else(|| String::from(OPENROUTER_CHAT_MODEL))
     }
 
     pub fn is_openrouter_connected(&self) -> bool {
@@ -1292,11 +1455,41 @@ impl App {
     }
 
     pub(super) fn strix_auth_base_url() -> String {
-        std::env::var("STRIX_AUTH_BASE_URL")
-            .ok()
+        Self::normalized_strix_auth_base_url(
+            std::env::var("STRIX_AUTH_BASE_URL").ok().as_deref(),
+            std::env::var("STRIX_LOCAL_AUTH_BASE_URL").ok().as_deref(),
+        )
+    }
+
+    pub(super) fn normalized_strix_auth_base_url(
+        configured_url: Option<&str>,
+        local_dev_url: Option<&str>,
+    ) -> String {
+        if let Some(url) = Self::clean_base_url(local_dev_url) {
+            return url;
+        }
+
+        Self::clean_base_url(configured_url)
+            .filter(|url| !Self::is_local_strix_auth_base_url(url))
+            .unwrap_or_else(|| String::from(STRIX_AUTH_BASE_URL))
+    }
+
+    fn clean_base_url(value: Option<&str>) -> Option<String> {
+        value
             .map(|url| url.trim().trim_end_matches('/').to_string())
             .filter(|url| !url.is_empty())
-            .unwrap_or_else(|| String::from(STRIX_AUTH_BASE_URL))
+    }
+
+    fn is_local_strix_auth_base_url(url: &str) -> bool {
+        let normalized = url.trim().to_ascii_lowercase();
+        normalized.starts_with("http://localhost")
+            || normalized.starts_with("https://localhost")
+            || normalized.starts_with("http://127.0.0.1")
+            || normalized.starts_with("https://127.0.0.1")
+            || normalized.starts_with("http://0.0.0.0")
+            || normalized.starts_with("https://0.0.0.0")
+            || normalized.starts_with("http://[::1]")
+            || normalized.starts_with("https://[::1]")
     }
 
     pub(super) fn strix_api_base_url() -> String {
@@ -1340,6 +1533,8 @@ impl App {
             "GET" => client.get(url),
             "POST" => client.post(url),
             "PATCH" => client.patch(url),
+            "PUT" => client.put(url),
+            "DELETE" => client.delete(url),
             _ => return Err(format!("unsupported Strix HTTP method: {}", method)),
         }
         .bearer_auth(token);
@@ -1355,8 +1550,16 @@ impl App {
         let body = response
             .text()
             .map_err(|error| format!("failed to read Strix response: {}", error))?;
+        if status.as_u16() == 401 {
+            return Err(String::from(
+                "Strix rejected the access token (expired or revoked). Run /login strix again.",
+            ));
+        }
         if !status.is_success() {
             return Err(format!("Strix returned {}: {}", status, body));
+        }
+        if body.trim().is_empty() {
+            return Ok(serde_json::Value::Object(serde_json::Map::new()));
         }
         serde_json::from_str(&body)
             .map_err(|error| format!("failed to parse Strix response: {}", error))
@@ -1370,7 +1573,7 @@ impl App {
         notes: &[Note],
         sender: Sender<ChatStreamUpdate>,
     ) -> Result<(), String> {
-        let notes_payload: Vec<_> = notes
+        let mut notes_payload: Vec<_> = notes
             .iter()
             .take(STRIX_NOTES_LIMIT)
             .map(|note| {
@@ -1385,13 +1588,19 @@ impl App {
                 })
             })
             .collect();
+        // Strix's AskRequest has no "context" field; workspace context rides
+        // along as a synthetic note so the RAG ranker can use it without
+        // citing it as a source note.
+        if !workspace_context.trim().is_empty() {
+            notes_payload.push(serde_json::json!({
+                "id": "aleph:workspace-context",
+                "title": "Aleph workspace context",
+                "content": workspace_context,
+                "meta": { "synthetic": true },
+            }));
+        }
         let payload = serde_json::json!({
-            "question": format!(
-                "Use this Aleph local computer/workspace context when relevant:\n{}\n\nUser question:\n{}",
-                workspace_context,
-                query
-            ),
-            "context": workspace_context,
+            "question": query,
             "notes": notes_payload,
         });
         let value =
@@ -1483,6 +1692,13 @@ impl App {
                     }
                     if note.folder_id.is_none() {
                         note.folder_id = existing.folder_id;
+                    }
+                    if existing.strix_sync_pending {
+                        note.title = existing.title.clone();
+                        note.content = existing.content.clone();
+                        note.raw_content = existing.raw_content.clone();
+                        note.updated_at = existing.updated_at.clone();
+                        note.strix_sync_pending = true;
                     }
                 }
                 remote_ids.push(remote_id);

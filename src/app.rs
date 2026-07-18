@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -45,20 +45,21 @@ use trail::TrailImportance;
 const OPENROUTER_CHAT_MODEL: &str = "nvidia/nemotron-3-nano-30b-a3b:free";
 const OPENROUTER_SERVICE: &str = "Aleph";
 const OPENROUTER_ACCOUNT: &str = "openrouter_api_key";
+const OPENROUTER_KEY_CONFIG: &str = "openrouter-api-key";
 const OPENROUTER_AUTH_CALLBACK: &str = "/aleph/openrouter/callback";
-const OPENROUTER_AUTH_PORT: u16 = 3000;
 const STRIX_SERVICE: &str = "Aleph";
 const STRIX_ACCOUNT: &str = "strix_access_token";
 const STRIX_AUTH_CALLBACK: &str = "/aleph/strix/callback";
 const STRIX_AUTH_PORT: u16 = 43879;
 const STRIX_CLIENT_ID: &str = "aleph";
-const STRIX_AUTH_BASE_URL: &str = "http://localhost:3000";
+const STRIX_AUTH_BASE_URL: &str = "https://strix.page";
 const STRIX_NOTES_LIMIT: usize = 100;
 const OBSIDIAN_SERVICE: &str = "Aleph";
 const OBSIDIAN_ACCOUNT: &str = "obsidian_vault_path";
 const NOTE_SAVE_TARGET_CONFIG: &str = "note-save-target";
 const AI_PROVIDER_CONFIG: &str = "ai-provider";
 const AGENT_MODE_CONFIG: &str = "agent-mode";
+const AGENT_CONTEXT_SCOPE_CONFIG: &str = "agent-context-scope";
 const EDITOR_IMAGES_CONFIG: &str = "editor-images";
 const OBSIDIAN_PAIRING_DISABLED_CONFIG: &str = "obsidian-vault-disabled";
 const STRIX_TOKEN_CONFIG: &str = "strix-access-token";
@@ -67,11 +68,16 @@ const CHAT_TEXT: Color = Color::Rgb(142, 144, 158);
 const CHAT_MUTED: Color = Color::Rgb(104, 107, 122);
 const CHAT_ACCENT: Color = Color::Rgb(136, 129, 176);
 const CHAT_ACCENT_SOFT: Color = Color::Rgb(112, 108, 148);
+const CHAT_USER_BG: Color = Color::Rgb(32, 34, 41);
+const CHAT_USER_TEXT: Color = Color::Rgb(196, 198, 210);
 
 enum ChatStreamUpdate {
     Delta(String),
     Done,
     Error(String),
+    /// Out-of-band status (e.g. provider fallback) logged to the system log
+    /// without touching the message content.
+    Notice(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -94,6 +100,12 @@ struct AgentDecision {
     title: Option<String>,
     search_query: Option<String>,
     rationale: String,
+}
+
+struct NoteSyncUpdate {
+    local_id: usize,
+    sent_content: String,
+    result: Result<Note, String>,
 }
 
 #[allow(dead_code)]
@@ -127,6 +139,7 @@ pub struct App {
     ai_overlay_visible: bool,
     ai_overlay_pulse_ticks: u8,
     save_shimmer_ticks: u8,
+    editor_save_status: EditorSaveStatus,
     ai_input_buffer: String,
     ai_input_cursor: usize,
     suggestion_filter: Option<String>,
@@ -135,6 +148,7 @@ pub struct App {
     editor_images_enabled: bool,
     editor_cursor_style: CursorStyle,
     editor_selection: Selection,
+    editor_drag_anchor: Option<usize>,
     undo_stack: VecDeque<EditorState>,
     redo_stack: VecDeque<EditorState>,
     search_state: SearchState,
@@ -150,6 +164,10 @@ pub struct App {
     openrouter_login_cancel: Option<Arc<AtomicBool>>,
     strix_login_rx: Option<Receiver<Result<String, String>>>,
     strix_login_cancel: Option<Arc<AtomicBool>>,
+    note_sync_tx: Sender<NoteSyncUpdate>,
+    note_sync_rx: Receiver<NoteSyncUpdate>,
+    note_sync_in_flight: HashSet<usize>,
+    note_sync_queued: HashMap<usize, Note>,
     obsidian_vault_path: Option<PathBuf>,
     obsidian_vaults: Vec<ObsidianVault>,
     obsidian_vault_selected: usize,
@@ -163,10 +181,15 @@ pub struct App {
     chat_render_dirty: bool,
     chat_cache_stable_len: usize,
     agent_mode_enabled: bool,
+    agent_context_scope: AgentContextScope,
     login_picker_selected: usize,
     settings_selected: usize,
     pending_agent_query: Option<String>,
     pending_agent_decision: Option<AgentDecision>,
+    agent_plan_rx: Option<Receiver<Result<String, String>>>,
+    agent_plan_query: Option<String>,
+    chat_turn_started_at: Option<Instant>,
+    chat_input_hovered: bool,
     ghost_stream_rx: Option<Receiver<ChatStreamUpdate>>,
     ghost_streaming: bool,
     ghost_result: Option<String>,

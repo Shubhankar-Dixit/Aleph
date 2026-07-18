@@ -6,6 +6,65 @@ const FORK_CHAT_CONTEXT_LIMIT: usize = 8;
 
 #[allow(dead_code)]
 impl App {
+    pub(super) fn run_path_cli_command(&mut self, args: &[String]) -> Result<Vec<String>, String> {
+        let action = args.first().map(|value| value.as_str()).unwrap_or("list");
+        match action {
+            "list" | "ls" => Ok(self.temporal_fork_list_lines()),
+            "save" | "now" => {
+                let label = args.get(1..).unwrap_or(&[]).join(" ").trim().to_string();
+                let label = if label.is_empty() {
+                    String::from("decision point")
+                } else {
+                    label
+                };
+                let id = self.create_temporal_fork(&label, "manual")?;
+                let _ = self.append_trail_event(
+                    "path",
+                    format!("Saved decision point: {}.", label),
+                    vec![id.clone()],
+                    TrailImportance::High,
+                );
+                Ok(vec![
+                    format!("Saved decision point: {}", label),
+                    format!("Path ID: {}", id),
+                    String::from(
+                        "Aleph captured your ideas, memory, recent context, and read-only code context.",
+                    ),
+                    String::from("Use `aleph path list`, `aleph path show <name>`, or `aleph path return <name>`."),
+                ])
+            }
+            "show" | "read" => {
+                let target = args.get(1..).unwrap_or(&[]).join(" ");
+                let Some(index) = self.resolve_temporal_fork_index(target.trim()) else {
+                    return Err(String::from(
+                        "Path not found. Use `aleph path list`, then `aleph path show <name|id>`.",
+                    ));
+                };
+                Ok(self.temporal_fork_detail_lines(index))
+            }
+            "return" | "checkout" | "restore" => {
+                let target = args.get(1..).unwrap_or(&[]).join(" ");
+                let Some(index) = self.resolve_temporal_fork_index(target.trim()) else {
+                    return Err(String::from(
+                        "Path not found. Use `aleph path list`, then `aleph path return <name|id>`.",
+                    ));
+                };
+                let fork = self.temporal_forks[index].clone();
+                let lines = self.checkout_temporal_fork(index)?;
+                let _ = self.append_trail_event(
+                    "path",
+                    format!("Returned to decision point: {}.", fork.label),
+                    vec![fork.id],
+                    TrailImportance::High,
+                );
+                Ok(lines)
+            }
+            _ => Err(String::from(
+                "Usage: aleph path <list|save|show|return> [name|id]",
+            )),
+        }
+    }
+
     pub(super) fn handle_fork_command(&mut self, command: &str, args: &str) {
         match command {
             "path save" | "world save" | "fork now" => {
@@ -93,8 +152,12 @@ impl App {
         }
     }
 
-    pub(super) fn create_auto_temporal_fork(&mut self, label: &str) {
-        let _ = self.create_temporal_fork(label, "auto");
+    pub(super) fn create_auto_temporal_fork(&mut self, label: &str) -> Option<RepoContext> {
+        let id = self.create_temporal_fork(label, "auto").ok()?;
+        self.temporal_forks
+            .iter()
+            .find(|fork| fork.id == id)
+            .and_then(|fork| fork.repo_context.clone())
     }
 
     pub(super) fn create_temporal_fork(
@@ -486,7 +549,7 @@ impl App {
 
         fs::write(
             &path,
-            serde_json::to_string_pretty(&payload)
+            serde_json::to_string(&payload)
                 .map_err(|error| format!("failed to encode temporal forks: {}", error))?,
         )
         .map_err(|error| {
@@ -512,10 +575,24 @@ impl App {
 
     pub(crate) fn capture_repo_context() -> Option<RepoContext> {
         let cwd = std::env::current_dir().ok()?;
-        let cwd_label = cwd.display().to_string();
-        let branch = Self::git_output(&["branch", "--show-current"]);
-        let head = Self::git_output(&["rev-parse", "--short", "HEAD"]);
-        let dirty_files = Self::git_output(&["status", "--short"])
+        Self::capture_repo_context_for_path(&cwd)
+    }
+
+    pub(crate) fn capture_repo_context_for_path(path: &Path) -> Option<RepoContext> {
+        let cwd_label = path
+            .canonicalize()
+            .ok()
+            .unwrap_or_else(|| path.to_path_buf())
+            .display()
+            .to_string();
+        // Windows canonicalize() yields verbatim paths (\\?\C:\...); strip the prefix for display
+        let cwd_label = cwd_label
+            .strip_prefix(r"\\?\")
+            .map(str::to_string)
+            .unwrap_or(cwd_label);
+        let branch = Self::git_output_in(path, &["branch", "--show-current"]);
+        let head = Self::git_output_in(path, &["rev-parse", "--short", "HEAD"]);
+        let dirty_files = Self::git_output_in(path, &["status", "--short"])
             .map(|output| output.lines().map(str::to_string).collect::<Vec<_>>())
             .unwrap_or_default();
 
@@ -532,7 +609,16 @@ impl App {
     }
 
     pub(crate) fn git_output(args: &[&str]) -> Option<String> {
-        let output = Command::new("git").args(args).output().ok()?;
+        let cwd = std::env::current_dir().ok()?;
+        Self::git_output_in(&cwd, args)
+    }
+
+    pub(crate) fn git_output_in(path: &Path, args: &[&str]) -> Option<String> {
+        let output = Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -702,6 +788,8 @@ impl App {
             role: value.get("role")?.as_str()?.to_string(),
             content: value.get("content")?.as_str()?.to_string(),
             timestamp: value.get("timestamp")?.as_str()?.to_string(),
+            thought_seconds: None,
+            turn_seconds: None,
         })
     }
 

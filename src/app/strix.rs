@@ -186,10 +186,17 @@ impl App {
             raw_content,
             updated_at,
             folder_id: None,
+            strix_sync_pending: false,
         }
     }
 
     pub(super) fn note_source_label(note: &Note) -> String {
+        if note.strix_sync_pending {
+            if let Some(remote_id) = note.remote_id.as_deref() {
+                return format!("Strix ID: {} · sync pending", remote_id);
+            }
+            return String::from("Source: local · Strix sync pending");
+        }
         if let Some(path) = note.obsidian_path.as_ref() {
             return format!("Obsidian: {}", path.display());
         }
@@ -418,6 +425,7 @@ impl App {
                     "rawContent": note.raw_content.as_str(),
                     "updatedAt": note.updated_at.as_str(),
                     "folderId": note.folder_id,
+                    "strixSyncPending": note.strix_sync_pending,
                 })
             })
             .collect::<Vec<_>>();
@@ -429,7 +437,7 @@ impl App {
 
         fs::write(
             &path,
-            serde_json::to_string_pretty(&payload)
+            serde_json::to_string(&payload)
                 .map_err(|error| format!("failed to encode local notes: {}", error))?,
         )
         .map_err(|error| {
@@ -485,6 +493,10 @@ impl App {
                 .get("folderId")
                 .and_then(|id| id.as_u64())
                 .map(|id| id as usize),
+            strix_sync_pending: value
+                .get("strixSyncPending")
+                .and_then(|pending| pending.as_bool())
+                .unwrap_or(false),
         })
     }
 
@@ -557,7 +569,7 @@ impl App {
         });
         fs::write(
             &path,
-            serde_json::to_string_pretty(&payload)
+            serde_json::to_string(&payload)
                 .map_err(|error| format!("failed to encode Strix note cache: {}", error))?,
         )
         .map_err(|error| format!("failed to write Strix note cache: {}", error))
@@ -753,6 +765,13 @@ impl App {
             }
         }
 
+        if let Ok(key) = fs::read_to_string(Self::openrouter_api_key_path()) {
+            let trimmed = key.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+
         std::env::var("OPENROUTER_API_KEY")
             .ok()
             .map(|key| key.trim().to_string())
@@ -760,16 +779,190 @@ impl App {
     }
 
     pub(super) fn store_openrouter_api_key(&self, api_key: &str) -> Result<(), String> {
-        let entry = Self::openrouter_key_entry()?;
-        entry
-            .set_password(api_key.trim())
-            .map_err(|error| format!("failed to save OpenRouter API key: {}", error))
+        let key = api_key.trim();
+        if key.is_empty() {
+            return Err(String::from("OpenRouter API key cannot be empty."));
+        }
+
+        if let Ok(entry) = Self::openrouter_key_entry() {
+            if entry.set_password(key).is_ok() {
+                let _ = fs::remove_file(Self::openrouter_api_key_path());
+                return Ok(());
+            }
+        }
+
+        Self::store_openrouter_api_key_fallback(key)
+    }
+
+    pub(super) fn store_openrouter_api_key_fallback(api_key: &str) -> Result<(), String> {
+        let key_path = Self::openrouter_api_key_path();
+        if let Some(parent) = key_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create OpenRouter credential directory '{}': {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+        fs::write(&key_path, api_key).map_err(|error| {
+            format!(
+                "failed to save OpenRouter API key fallback '{}': {}",
+                key_path.display(),
+                error
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+                format!(
+                    "failed to restrict OpenRouter API key fallback '{}': {}",
+                    key_path.display(),
+                    error
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn queue_strix_note_sync(&mut self, index: usize) -> Result<(), String> {
+        if !self.is_strix_connected() {
+            return Err(String::from(
+                "Strix save target requires a Strix connection. Use /login strix first.",
+            ));
+        }
+        let note = self
+            .notes
+            .get_mut(index)
+            .ok_or_else(|| format!("Cannot sync missing note at index {}.", index))?;
+        note.strix_sync_pending = true;
+        let note = note.clone();
+        let local_id = note.id;
+
+        if self.note_sync_in_flight.contains(&local_id) {
+            // Coalesce repeated Ctrl+S presses into the latest version instead
+            // of creating concurrent remote writes or duplicate remote notes.
+            self.note_sync_queued.insert(local_id, note);
+            self.add_activity("Saved locally; updated the pending Strix sync.");
+            return Ok(());
+        }
+
+        let token = self.strix_access_token()?.to_string();
+        let base_url = Self::strix_api_base_url();
+        let sender = self.note_sync_tx.clone();
+        let sent_content = note.content.clone();
+        self.note_sync_in_flight.insert(local_id);
+        self.add_activity("Saved locally; syncing the note to Strix in the background.");
+
+        thread::spawn(move || {
+            let result = Self::sync_note_to_strix_with(&base_url, &token, note);
+            let _ = sender.send(NoteSyncUpdate {
+                local_id,
+                sent_content,
+                result,
+            });
+        });
+        Ok(())
+    }
+
+    fn sync_note_to_strix_with(base_url: &str, token: &str, note: Note) -> Result<Note, String> {
+        let (method, path, payload) = if let Some(remote_id) = note.remote_id.as_deref() {
+            (
+                "PATCH",
+                format!(
+                    "/api/auth/native/notes/{}",
+                    urlencoding::encode(remote_id.trim())
+                ),
+                serde_json::json!({
+                    "title": note.title,
+                    "content": Self::text_to_strix_html(&note.content),
+                }),
+            )
+        } else {
+            (
+                "POST",
+                String::from("/api/auth/native/notes"),
+                serde_json::json!({
+                    "title": note.title,
+                    "content": Self::text_to_strix_html(&note.content),
+                    "tags": [],
+                }),
+            )
+        };
+        let value = Self::strix_json_request_with(base_url, token, method, &path, Some(payload))?;
+        let value = value
+            .get("note")
+            .ok_or_else(|| String::from("Strix note response did not include note"))?;
+        let mut synced = Self::note_from_strix_value(note.id, value);
+        synced.id = note.id;
+        synced.folder_id = note.folder_id;
+        synced.obsidian_path = note.obsidian_path;
+        Ok(synced)
+    }
+
+    pub(super) fn process_note_sync_updates(&mut self) {
+        while let Ok(update) = self.note_sync_rx.try_recv() {
+            self.note_sync_in_flight.remove(&update.local_id);
+            match update.result {
+                Ok(synced) => {
+                    let has_queued_update = self.note_sync_queued.contains_key(&update.local_id);
+                    if let Some(local) = self
+                        .notes
+                        .iter_mut()
+                        .find(|note| note.id == update.local_id)
+                    {
+                        local.remote_id = synced.remote_id;
+                        if local.content == update.sent_content {
+                            local.raw_content = synced.raw_content;
+                            local.updated_at = synced.updated_at;
+                            if !has_queued_update {
+                                local.strix_sync_pending = false;
+                            }
+                        }
+                    }
+                    let _ = Self::save_cached_strix_notes(&self.notes);
+                    let _ = Self::save_local_notes(&self.notes);
+                    self.add_strix_log("Pushed note changes to Strix");
+                    self.add_activity("Strix note sync completed.");
+                }
+                Err(error) => {
+                    self.add_strix_log(format!("Note sync failed: {}", error));
+                    self.add_activity(format!(
+                        "Strix note sync failed; the local save is safe: {}",
+                        Self::preview_text(&error, 96)
+                    ));
+                }
+            }
+
+            if let Some(mut queued) = self.note_sync_queued.remove(&update.local_id) {
+                if let Some(current) = self.notes.iter().find(|note| note.id == update.local_id) {
+                    queued.remote_id = current.remote_id.clone();
+                    queued.obsidian_path = current.obsidian_path.clone();
+                    queued.folder_id = current.folder_id;
+                }
+                if let Some(index) = self
+                    .notes
+                    .iter()
+                    .position(|note| note.id == update.local_id)
+                {
+                    // Keep the queued content while reusing the normal scheduler.
+                    let current = std::mem::replace(&mut self.notes[index], queued);
+                    let result = self.queue_strix_note_sync(index);
+                    self.notes[index] = current;
+                    if let Err(error) = result {
+                        self.add_strix_log(format!("Queued note sync failed: {}", error));
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn clear_openrouter_api_key(&self) {
         if let Ok(entry) = Self::openrouter_key_entry() {
             let _ = entry.delete_credential();
         }
+        let _ = fs::remove_file(Self::openrouter_api_key_path());
     }
 
     pub(super) fn reset_and_clear_all(&mut self) {
@@ -850,6 +1043,8 @@ impl App {
         self.openrouter_login_rx = None;
         self.strix_login_rx = None;
         self.ghost_stream_rx = None;
+        self.agent_plan_rx = None;
+        self.agent_plan_query = None;
         if let Some(cancel_flag) = &self.openrouter_login_cancel {
             cancel_flag.store(true, Ordering::Relaxed);
         }
@@ -881,5 +1076,9 @@ impl App {
     pub(super) fn openrouter_key_entry() -> Result<Entry, String> {
         Entry::new(OPENROUTER_SERVICE, OPENROUTER_ACCOUNT)
             .map_err(|error| format!("failed to open OpenRouter API key store: {}", error))
+    }
+
+    pub(super) fn openrouter_api_key_path() -> PathBuf {
+        Self::aleph_config_dir().join(OPENROUTER_KEY_CONFIG)
     }
 }

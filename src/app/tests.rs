@@ -36,6 +36,62 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[test]
+fn openrouter_callback_url_matches_the_ipv4_loopback_listener() {
+    assert_eq!(
+        App::openrouter_callback_url(43_880, "/aleph/openrouter/callback/test"),
+        "http://127.0.0.1:43880/aleph/openrouter/callback/test"
+    );
+}
+
+#[test]
+fn openrouter_key_fallback_path_uses_aleph_config_directory() {
+    let _guard = env_lock();
+    let original = std::env::var_os("ALEPH_CONFIG_DIR");
+    let config_dir =
+        std::env::temp_dir().join(format!("aleph-openrouter-key-path-{}", App::now_millis()));
+    std::env::set_var("ALEPH_CONFIG_DIR", &config_dir);
+
+    assert_eq!(
+        App::openrouter_api_key_path(),
+        config_dir.join("openrouter-api-key")
+    );
+
+    match original {
+        Some(value) => std::env::set_var("ALEPH_CONFIG_DIR", value),
+        None => std::env::remove_var("ALEPH_CONFIG_DIR"),
+    }
+}
+
+#[test]
+fn openrouter_key_fallback_persists_with_private_permissions() {
+    let _guard = env_lock();
+    let original = std::env::var_os("ALEPH_CONFIG_DIR");
+    let config_dir = std::env::temp_dir().join(format!(
+        "aleph-openrouter-key-fallback-{}",
+        App::now_millis()
+    ));
+    std::env::set_var("ALEPH_CONFIG_DIR", &config_dir);
+
+    App::store_openrouter_api_key_fallback("sk-or-v1-test").unwrap();
+    let key_path = App::openrouter_api_key_path();
+    assert_eq!(fs::read_to_string(&key_path).unwrap(), "sk-or-v1-test");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    let _ = fs::remove_dir_all(&config_dir);
+    match original {
+        Some(value) => std::env::set_var("ALEPH_CONFIG_DIR", value),
+        None => std::env::remove_var("ALEPH_CONFIG_DIR"),
+    }
+}
+
 fn test_note(id: usize, remote_id: Option<&str>, title: &str, content: &str) -> Note {
     Note {
         id,
@@ -46,6 +102,7 @@ fn test_note(id: usize, remote_id: Option<&str>, title: &str, content: &str) -> 
         raw_content: String::new(),
         updated_at: String::new(),
         folder_id: None,
+        strix_sync_pending: false,
     }
 }
 
@@ -77,6 +134,37 @@ fn seed_test_rooms(app: &mut App) {
         },
     ];
     app.active_room_index = 0;
+}
+
+#[test]
+fn strix_auth_base_defaults_to_production() {
+    assert_eq!(
+        App::normalized_strix_auth_base_url(None, None),
+        "https://strix.page"
+    );
+}
+
+#[test]
+fn strix_auth_base_ignores_legacy_localhost_override() {
+    assert_eq!(
+        App::normalized_strix_auth_base_url(Some("http://localhost:3000"), None),
+        "https://strix.page"
+    );
+    assert_eq!(
+        App::normalized_strix_auth_base_url(Some("http://127.0.0.1:3000/"), None),
+        "https://strix.page"
+    );
+}
+
+#[test]
+fn strix_auth_base_allows_explicit_local_dev_override() {
+    assert_eq!(
+        App::normalized_strix_auth_base_url(
+            Some("https://strix.page"),
+            Some("http://localhost:3000/")
+        ),
+        "http://localhost:3000"
+    );
 }
 
 #[test]
@@ -382,6 +470,108 @@ fn typing_command_family_space_shows_subcommands_only() {
 }
 
 #[test]
+fn exact_command_family_is_one_focused_navigation_choice() {
+    let mut app = App::new();
+
+    for character in "/note".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+
+    let suggestions = app.visible_commands(16);
+    assert_eq!(
+        suggestions
+            .iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>(),
+        vec!["note"]
+    );
+    assert_eq!(
+        App::command_subcommand_summary(suggestions[0]).as_deref(),
+        Some("Enter to open 6 actions")
+    );
+}
+
+#[test]
+fn command_family_browser_uses_short_action_labels() {
+    let mut app = App::new();
+
+    for character in "/note ".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+
+    assert_eq!(app.command_browse_family().as_deref(), Some("note"));
+    let suggestions = app.visible_commands(16);
+    assert_eq!(app.command_palette_label(suggestions[0]), "list");
+}
+
+#[test]
+fn every_command_family_expands_to_only_its_own_actions() {
+    let family_names = COMMANDS
+        .iter()
+        .filter(|command| {
+            !command.name.contains(char::is_whitespace) && App::command_family_expands(command.name)
+        })
+        .map(|command| command.name)
+        .collect::<Vec<_>>();
+
+    for family in family_names {
+        let mut app = App::new();
+        for character in format!("/{}", family).chars() {
+            app.handle_key(press(KeyCode::Char(character)));
+        }
+        assert_eq!(app.visible_commands(16).len(), 1, "family: {family}");
+
+        app.handle_key(press(KeyCode::Enter));
+        let suggestions = app.visible_commands(32);
+        assert!(!suggestions.is_empty(), "family: {family}");
+        assert!(
+            suggestions
+                .iter()
+                .all(|command| command.name.starts_with(&format!("{} ", family))),
+            "family: {family}"
+        );
+    }
+}
+
+#[test]
+fn exact_leaf_command_does_not_show_its_parent() {
+    let mut app = App::new();
+    for character in "/note list".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+
+    let suggestions = app.visible_commands(16);
+    assert_eq!(
+        suggestions
+            .iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>(),
+        vec!["note list"]
+    );
+    assert_eq!(app.command_browse_family().as_deref(), Some("note"));
+    assert_eq!(app.command_palette_label(suggestions[0]), "list");
+}
+
+#[test]
+fn arrow_navigation_keeps_the_expanded_family_context() {
+    let mut app = App::new();
+    for character in "/note".chars() {
+        app.handle_key(press(KeyCode::Char(character)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+    app.handle_key(press(KeyCode::Down));
+
+    assert_eq!(app.command_browse_family().as_deref(), Some("note"));
+    let suggestions = app.visible_commands(16);
+    assert!(suggestions
+        .iter()
+        .all(|command| command.name.starts_with("note ")));
+    assert!(suggestions
+        .iter()
+        .all(|command| !app.command_palette_label(command).starts_with('/')));
+}
+
+#[test]
 fn enter_executes_typed_command() {
     let mut app = App::new();
 
@@ -519,11 +709,17 @@ fn settings_round_trip_to_config() {
     app.store_ai_provider().unwrap();
     app.agent_mode_enabled = false;
     app.store_agent_mode_enabled().unwrap();
+    app.agent_context_scope = AgentContextScope::Global;
+    app.store_agent_context_scope().unwrap();
     app.editor_images_enabled = true;
     app.store_editor_images_enabled().unwrap();
 
     assert_eq!(App::load_ai_provider(), Some(AiProvider::Strix));
     assert_eq!(App::load_agent_mode_enabled(), Some(false));
+    assert_eq!(
+        App::load_agent_context_scope(),
+        Some(AgentContextScope::Global)
+    );
     assert_eq!(App::load_editor_images_enabled(), Some(true));
 
     std::env::remove_var("ALEPH_CONFIG_DIR");
@@ -677,7 +873,7 @@ fn settings_obsidian_row_opens_pairing_when_unpaired() {
     app.obsidian_vault_path = None;
 
     app.open_settings_panel();
-    for _ in 0..5 {
+    for _ in 0..6 {
         app.handle_settings_key(press(KeyCode::Down));
     }
     app.handle_settings_key(press(KeyCode::Enter));
@@ -695,7 +891,7 @@ fn clicking_settings_obsidian_row_opens_pairing_when_unpaired() {
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 4,
-            row: 25,
+            row: 26,
             modifiers: KeyModifiers::NONE,
         },
         40,
@@ -709,6 +905,7 @@ fn clicking_settings_obsidian_row_opens_pairing_when_unpaired() {
 fn settings_mouse_hit_test_tracks_rendered_panel_layout() {
     assert_eq!(App::settings_index_for_mouse_row(40, 80, 20), Some(0));
     assert_eq!(App::settings_index_for_mouse_row(40, 80, 25), Some(5));
+    assert_eq!(App::settings_index_for_mouse_row(40, 80, 26), Some(6));
     assert_eq!(App::settings_index_for_mouse_row(40, 80, 19), None);
 
     assert_eq!(App::settings_index_for_mouse_row(22, 80, 20), None);
@@ -1047,7 +1244,7 @@ fn temporal_fork_auto_snapshots_before_note_writes() {
         .temporal_forks
         .iter()
         .any(|fork| fork.label == "Before note create"));
-    assert!(app
+    assert!(!app
         .temporal_forks
         .iter()
         .any(|fork| fork.label == "Before note save"));
@@ -1166,6 +1363,52 @@ fn temporal_fork_repo_context_degrades_outside_git_repo() {
 }
 
 #[test]
+fn cli_path_commands_use_temporal_forks() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-forks-cli-test-{}", App::now_millis()));
+    let forks_path = root.join("temporal-forks.json");
+    let notes_path = root.join("notes.json");
+    let trail_path = root.join("trail.jsonl");
+    fs::create_dir_all(&root).unwrap();
+    std::env::set_var("ALEPH_FORKS_PATH", &forks_path);
+    std::env::set_var("ALEPH_NOTES_PATH", &notes_path);
+    std::env::set_var("ALEPH_TRAIL_PATH", &trail_path);
+
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+
+    let saved = app
+        .run_cli_command(&[
+            String::from("path"),
+            String::from("save"),
+            String::from("cli"),
+            String::from("path"),
+        ])
+        .unwrap();
+    assert!(saved.iter().any(|line| line.contains("cli path")));
+
+    let listed = app
+        .run_cli_command(&[String::from("path"), String::from("list")])
+        .unwrap();
+    assert!(listed.iter().any(|line| line.contains("cli path")));
+
+    let shown = app
+        .run_cli_command(&[
+            String::from("path"),
+            String::from("show"),
+            String::from("cli"),
+            String::from("path"),
+        ])
+        .unwrap();
+    assert!(shown.iter().any(|line| line.contains("Path: cli path")));
+
+    std::env::remove_var("ALEPH_FORKS_PATH");
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    std::env::remove_var("ALEPH_TRAIL_PATH");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn note_list_delete_requires_second_press() {
     let mut app = App::new();
     let original_count = app.notes.len();
@@ -1230,6 +1473,20 @@ fn note_list_delete_pending_is_cancelled_by_moving_selection() {
 }
 
 #[test]
+fn note_list_delete_preserves_folder_markers_when_reindexing() {
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+
+    app.open_note_list_panel();
+    assert_eq!(app.note_list_indices()[0], usize::MAX);
+
+    app.delete_note_at_index(0).unwrap();
+
+    assert_eq!(app.note_list_indices()[0], usize::MAX);
+    assert_eq!(app.note_list_indices()[1], 0);
+}
+
+#[test]
 fn note_list_delete_removes_obsidian_file() {
     let root = std::env::temp_dir().join(format!("aleph-note-delete-test-{}", App::now_millis()));
     fs::create_dir_all(&root).unwrap();
@@ -1277,7 +1534,7 @@ fn chat_note_create_request_opens_ai_draft_instead_of_chatting() {
 }
 
 #[test]
-fn agent_mode_routes_general_write_prompt_to_note_draft() {
+fn agent_mode_does_not_route_general_write_prompt_to_note_draft() {
     let mut app = App::new();
     app.openrouter_api_key = None;
     app.strix_access_token = None;
@@ -1289,14 +1546,9 @@ fn agent_mode_routes_general_write_prompt_to_note_draft() {
     app.handle_chat_key(press(KeyCode::Enter));
 
     assert!(app.is_ai_chat());
-    assert!(app.pending_agent_decision.is_some());
-    assert_eq!(app.chat_messages().len(), 2);
-
-    app.handle_chat_key(press(KeyCode::Enter));
-
-    assert!(app.is_full_editor());
-    assert_eq!(app.ai_draft_create_title.as_deref(), Some("Moat Strategy"));
     assert!(app.pending_agent_decision.is_none());
+    assert_eq!(app.chat_messages().len(), 2);
+    assert!(!app.is_full_editor());
 }
 
 #[test]
@@ -1410,6 +1662,94 @@ fn agent_mode_can_search_notes_without_provider() {
     assert!(app.pending_agent_decision.is_none());
     assert_eq!(app.chat_messages().len(), 2);
     assert!(app.chat_messages()[1].content.contains("Strix gateway"));
+    assert!(!app.chat_messages()[1].content.contains("Result."));
+    assert!(!app.chat_messages()[1].content.contains("Path:"));
+    assert!(!app.chat_messages()[1].content.contains("Steps run:"));
+}
+
+#[test]
+fn agent_mode_followup_search_uses_recent_chat_context() {
+    let mut app = App::new();
+    app.notes = vec![
+        test_note(1, None, "Strix gateway", "gateway notes"),
+        test_note(2, None, "Garden", "seed notes"),
+    ];
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.panel_mode = PanelMode::AiChat;
+    app.push_chat_message("user", "I was looking for notes about gateway");
+    app.chat_input_buffer = String::from("find that");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.is_ai_chat());
+    assert!(app.pending_agent_decision.is_none());
+    assert!(app
+        .chat_messages()
+        .last()
+        .unwrap()
+        .content
+        .contains("Strix gateway"));
+}
+
+#[test]
+fn greeting_before_note_search_does_not_force_smalltalk() {
+    let app = App::new();
+    let decision = app.plan_agent_action_locally("hey find notes about gateway");
+
+    assert!(matches!(decision.action, AgentAction::SearchNotes));
+    assert_eq!(decision.search_query.as_deref(), Some("gateway"));
+}
+
+#[test]
+fn workspace_request_uses_local_agent_steps_without_provider() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("inspect the current workspace status");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    let answer = &app.chat_messages().last().unwrap().content;
+    assert!(answer.contains("- agent context: Current folder"));
+    assert!(answer.contains("Daemon"));
+    assert!(!answer.contains("Running step"));
+    assert!(!answer.contains("Next useful move"));
+}
+
+#[test]
+fn note_write_permission_prompt_stays_explicit_but_natural() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("write a note about launch planning");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    let prompt = &app.chat_messages()[1].content;
+    assert!(prompt.contains("Press Enter to approve"));
+    assert!(prompt.contains("type `no`"));
+    assert!(!prompt.contains("using the note-writing agent"));
+}
+
+#[test]
+fn agent_context_scope_can_skip_current_folder_context() {
+    let mut app = App::new();
+    app.agent_context_scope = AgentContextScope::Global;
+
+    let lines = app.workspace_context_lines().join("\n");
+
+    assert!(lines.contains("- agent context: Global"));
+    assert!(lines.contains("- git: skipped"));
+    assert!(!lines.contains("- cwd:"));
 }
 
 #[test]
@@ -1598,6 +1938,292 @@ fn editor_vertical_navigation_keeps_cursor_on_char_boundary() {
 }
 
 #[test]
+fn editor_search_handles_unicode_matches_on_character_boundaries() {
+    let mut app = App::new();
+    app.editor_buffer = String::from("éé É");
+    app.search_state.query = String::from("é");
+
+    app.update_search();
+
+    assert_eq!(app.search_state.matches, vec![0, "é".len(), "éé ".len()]);
+    assert!(app
+        .search_state
+        .matches
+        .iter()
+        .all(|&index| app.editor_buffer.is_char_boundary(index)));
+}
+
+#[test]
+fn hash_note_reference_uses_persistent_id() {
+    let mut app = App::new();
+    app.notes = vec![
+        test_note(2, None, "First", "one"),
+        test_note(7, None, "Second", "two"),
+    ];
+
+    assert_eq!(app.resolve_note_index("#7"), Some(1));
+    assert_eq!(app.resolve_note_index("#2"), Some(0));
+    assert_eq!(app.resolve_note_index("2"), Some(1));
+}
+
+#[test]
+fn pending_ai_edit_blocks_editor_mutations() {
+    let mut app = App::new();
+    app.open_note_editor(0);
+    app.ai_overlay_visible = true;
+    app.insert_editor_character('!');
+    let edited = app.editor_buffer.clone();
+    app.pending_ai_edit = Some(AiEditProposal {
+        note_index: Some(0),
+        title: None,
+        instruction: String::from("replace"),
+        proposed: String::from("replacement"),
+        diff_lines: Vec::new(),
+    });
+
+    app.handle_key(ctrl(KeyCode::Char('z')));
+
+    assert_eq!(app.editor_buffer, edited);
+    assert!(app.has_pending_ai_edit());
+    assert_eq!(
+        app.last_action,
+        "Apply or reject the pending AI edits first."
+    );
+}
+
+#[test]
+fn failed_save_keeps_editor_open() {
+    let root = std::env::temp_dir().join(format!("aleph-save-failure-{}", App::now_millis()));
+    fs::create_dir_all(&root).unwrap();
+
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    app.note_save_target = NoteSaveTarget::Local;
+    app.notes[0].obsidian_path = Some(root.clone());
+    app.open_note_editor(0);
+    app.insert_editor_character('!');
+    app.exit_editor();
+
+    assert!(matches!(
+        app.editor_save_status,
+        EditorSaveStatus::Failed(_)
+    ));
+    assert_eq!(app.editor_note_index, Some(0));
+    assert!(app.panel_mode == PanelMode::FullEditor);
+    assert!(app.last_action.starts_with("Note save failed:"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn editor_save_feedback_moves_from_saving_to_saved() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-save-feedback-{}", App::now_millis()));
+    let notes_path = root.join("notes.json");
+    fs::create_dir_all(&root).unwrap();
+    std::env::set_var("ALEPH_NOTES_PATH", &notes_path);
+
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    app.note_save_target = NoteSaveTarget::Local;
+    app.open_note_editor(0);
+    app.insert_editor_character('!');
+    assert_eq!(app.editor_save_status, EditorSaveStatus::Unsaved);
+
+    app.save_editor();
+    assert_eq!(app.editor_save_status, EditorSaveStatus::Saved);
+    assert_eq!(app.save_shimmer_ticks, 18);
+    for _ in 0..18 {
+        app.on_tick();
+    }
+    assert_eq!(app.save_shimmer_ticks, 0);
+
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn exiting_an_unchanged_editor_skips_persistence() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-clean-exit-{}", App::now_millis()));
+    let forks_path = root.join("temporal-forks.json");
+    let notes_path = root.join("notes.json");
+    fs::create_dir_all(&root).unwrap();
+    std::env::set_var("ALEPH_FORKS_PATH", &forks_path);
+    std::env::set_var("ALEPH_NOTES_PATH", &notes_path);
+
+    let mut app = App::new();
+    seed_test_notes(&mut app);
+    app.note_save_target = NoteSaveTarget::Local;
+    app.open_note_editor(0);
+    app.exit_editor();
+
+    assert!(!app.is_full_editor());
+    assert!(app.temporal_forks.is_empty());
+    assert!(!forks_path.exists());
+    assert_eq!(app.editor_save_status, EditorSaveStatus::Clean);
+    assert_eq!(app.save_shimmer_ticks, 0);
+
+    std::env::remove_var("ALEPH_FORKS_PATH");
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn exiting_a_large_note_builds_only_a_compact_preview() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-fast-exit-{}", App::now_millis()));
+    fs::create_dir_all(&root).unwrap();
+    std::env::set_var("ALEPH_NOTES_PATH", root.join("notes.json"));
+
+    let mut app = App::new();
+    app.note_save_target = NoteSaveTarget::Local;
+    app.notes[0].content = (0..500)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.open_note_editor(0);
+    app.exit_editor();
+
+    assert!(app.panel_lines().len() <= 25);
+    assert!(app
+        .panel_lines()
+        .last()
+        .is_some_and(|line| line.contains("more lines")));
+
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn edited_note_drops_stale_duplicate_raw_content() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-raw-content-{}", App::now_millis()));
+    fs::create_dir_all(&root).unwrap();
+    std::env::set_var("ALEPH_NOTES_PATH", root.join("notes.json"));
+
+    let mut app = App::new();
+    app.note_save_target = NoteSaveTarget::Local;
+    app.notes[0].raw_content = String::from("<p>old remote HTML</p>");
+    app.open_note_editor(0);
+    app.insert_editor_text(" updated");
+    app.save_editor();
+
+    assert!(app.notes[0].raw_content.is_empty());
+    assert!(app.temporal_forks.is_empty());
+
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn repeated_strix_saves_coalesce_to_the_latest_note() {
+    let mut app = App::new();
+    app.strix_access_token = Some(String::from("test-token"));
+    app.refresh_connection_state();
+    let note_id = app.notes[0].id;
+    app.note_sync_in_flight.insert(note_id);
+    app.notes[0].content = String::from("latest local content");
+
+    app.queue_strix_note_sync(0).unwrap();
+
+    assert_eq!(app.note_sync_queued.len(), 1);
+    assert_eq!(
+        app.note_sync_queued
+            .get(&note_id)
+            .map(|note| note.content.as_str()),
+        Some("latest local content")
+    );
+}
+
+#[test]
+fn background_strix_result_never_overwrites_newer_local_content() {
+    let _guard = env_lock();
+    let root = std::env::temp_dir().join(format!("aleph-sync-result-{}", App::now_millis()));
+    fs::create_dir_all(&root).unwrap();
+    std::env::set_var("ALEPH_NOTES_PATH", root.join("notes.json"));
+
+    let mut app = App::new();
+    let note_id = app.notes[0].id;
+    app.notes[0].content = String::from("newer local content");
+    app.notes[0].strix_sync_pending = true;
+    app.note_sync_in_flight.insert(note_id);
+    let mut synced = app.notes[0].clone();
+    synced.remote_id = Some(String::from("remote-note"));
+    synced.content = String::from("older sent content");
+    synced.raw_content = String::from("<p>older sent content</p>");
+
+    app.note_sync_tx
+        .send(NoteSyncUpdate {
+            local_id: note_id,
+            sent_content: String::from("older sent content"),
+            result: Ok(synced),
+        })
+        .unwrap();
+    app.process_note_sync_updates();
+
+    assert_eq!(app.notes[0].content, "newer local content");
+    assert_eq!(app.notes[0].remote_id.as_deref(), Some("remote-note"));
+    assert_ne!(app.notes[0].raw_content, "<p>older sent content</p>");
+    assert!(app.notes[0].strix_sync_pending);
+    assert!(!app.note_sync_in_flight.contains(&note_id));
+
+    std::env::remove_var("ALEPH_NOTES_PATH");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn strix_refresh_preserves_a_durable_pending_local_edit() {
+    let mut app = App::new();
+    let mut local = test_note(1, Some("remote-1"), "Local title", "unsynced local body");
+    local.strix_sync_pending = true;
+    app.notes = vec![local];
+
+    app.merge_strix_notes(vec![test_note(
+        9,
+        Some("remote-1"),
+        "Older remote title",
+        "older remote body",
+    )]);
+
+    assert_eq!(app.notes[0].title, "Local title");
+    assert_eq!(app.notes[0].content, "unsynced local body");
+    assert!(app.notes[0].strix_sync_pending);
+}
+
+#[test]
+fn typing_replaces_utf8_selection_and_remains_undoable() {
+    let mut app = App::new();
+    app.editor_buffer = String::from("AéBC");
+    app.editor_cursor = "Aé".len();
+    app.editor_selection = Selection {
+        start: 1,
+        end: "Aé".len(),
+        active: true,
+    };
+
+    app.insert_editor_text("x");
+    assert_eq!(app.editor_buffer, "AxBC");
+    assert_eq!(app.editor_cursor, 2);
+    assert_eq!(app.editor_save_status, EditorSaveStatus::Unsaved);
+
+    app.undo();
+    assert_eq!(app.editor_buffer, "AéBC");
+}
+
+#[test]
+fn editor_click_position_maps_terminal_cells_to_utf8_offsets() {
+    let mut app = App::new();
+    app.editor_buffer = String::from("éclair\nsecond");
+    app.editor_cursor = 0;
+    let area = ratatui::prelude::Rect::new(0, 0, 100, 30);
+
+    assert_eq!(crate::ui::editor_position_at(&app, area, 12, 3), Some(2));
+    assert_eq!(crate::ui::editor_position_at(&app, area, 14, 4), Some(11));
+    assert_eq!(crate::ui::editor_position_at(&app, area, 0, 0), None);
+}
+
+#[test]
 fn chat_markdown_tables_are_padded_as_blocks() {
     let lines = App::render_chat_markdown_lines_owned(
         "| Name | Count |\n| --- | ---: |\n| Alpha | 2 |\n| Beta project | 14 |",
@@ -1703,6 +2329,26 @@ fn memory_save_persists_to_local_cache() {
         std::env::remove_var("ALEPH_CONFIG_DIR");
     }
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn agent_memory_write_waits_for_explicit_approval() {
+    let mut app = App::new();
+    app.openrouter_api_key = None;
+    app.strix_access_token = None;
+    app.refresh_connection_state();
+    app.panel_mode = PanelMode::AiChat;
+    app.chat_input_buffer = String::from("remember that command families should stay compact");
+    app.chat_input_cursor = app.chat_input_buffer.len();
+
+    app.handle_chat_key(press(KeyCode::Enter));
+
+    assert!(app.pending_agent_decision.is_some());
+    assert!(app.memories.is_empty());
+    assert!(app
+        .chat_messages()
+        .last()
+        .is_some_and(|message| message.content.contains("Press Enter to approve")));
 }
 
 #[test]

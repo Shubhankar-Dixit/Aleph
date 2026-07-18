@@ -161,33 +161,56 @@ pub(super) fn render_full_chat(frame: &mut Frame, app: &App, area: Rect) {
     let before_cursor = &input_buffer[..cursor];
     let after_cursor = &input_buffer[cursor..];
 
+    let input_hovered = app.chat_input_hovered();
+    let prompt_style = if input_hovered {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(room_accent)
+            .add_modifier(Modifier::BOLD)
+    };
+    let input_text_style = if input_hovered {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(TEXT)
+    };
     let input_line = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "> ",
-            Style::default()
-                .fg(room_accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(before_cursor, Style::default().fg(TEXT)),
+        Span::styled("❯ ", prompt_style),
+        Span::styled(before_cursor, input_text_style),
         Span::styled(CURSOR, Style::default().fg(MUTED)),
-        Span::styled(after_cursor, Style::default().fg(TEXT)),
+        Span::styled(after_cursor, input_text_style),
     ]));
     frame.render_widget(input_line, input_area);
 
+    let hint_key = |label: &'static str| {
+        Span::styled(
+            label,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let hint_label = |label: &'static str| Span::styled(label, Style::default().fg(MUTED));
     let hints_spans = vec![
-        Span::styled("Enter", Style::default().fg(room_accent)),
-        Span::raw(" send · "),
-        Span::styled("PgUp/PgDn", Style::default().fg(room_accent_soft)),
-        Span::raw(" scroll · "),
-        Span::styled("Ctrl+G", Style::default().fg(room_accent_soft)),
-        Span::raw(" mode · "),
-        Span::styled("Esc", Style::default().fg(room_accent_soft)),
-        Span::raw(" exit · "),
-        Span::styled("Ctrl+C", Style::default().fg(room_accent)),
-        Span::raw(" quit"),
+        hint_key("Enter"),
+        hint_label(":send"),
+        hint_label("   |   "),
+        hint_key("PgUp/PgDn"),
+        hint_label(":scroll"),
+        hint_label("   |   "),
+        hint_key("Ctrl+G"),
+        hint_label(":mode"),
+        hint_label("   |   "),
+        hint_key("Esc"),
+        hint_label(":exit"),
+        hint_label("   |   "),
+        hint_key("Ctrl+C"),
+        hint_label(":quit"),
     ];
     let bottom_hints = Paragraph::new(Line::from(hints_spans))
-        .alignment(Alignment::Right)
+        .alignment(Alignment::Left)
         .style(Style::default().fg(MUTED));
     frame.render_widget(bottom_hints, hints_area);
 }
@@ -417,6 +440,10 @@ pub(super) fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 "Chat (answers only)".to_string()
             },
+        ),
+        (
+            "Agent Context".to_string(),
+            format!("{} (Enter to cycle)", app.agent_context_scope_label()),
         ),
         (
             "Save Notes".to_string(),

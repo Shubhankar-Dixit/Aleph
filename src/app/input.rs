@@ -3,6 +3,12 @@ use ratatui::prelude::Rect;
 
 #[allow(dead_code)]
 impl App {
+    pub fn handle_paste(&mut self, text: &str) {
+        if self.is_full_editor() && !self.ai_overlay_visible {
+            self.insert_editor_text(text);
+        }
+    }
+
     pub fn handle_key(&mut self, key_event: KeyEvent) {
         if self.is_full_editor() {
             self.handle_full_editor_key(key_event);
@@ -102,6 +108,11 @@ impl App {
             match mouse_event.kind {
                 MouseEventKind::ScrollUp => self.scroll_chat_up(1),
                 MouseEventKind::ScrollDown => self.scroll_chat_down(1),
+                MouseEventKind::Moved => {
+                    if let Ok((_, height)) = crossterm::terminal::size() {
+                        self.chat_input_hovered = mouse_event.row == height.saturating_sub(3);
+                    }
+                }
                 _ => {}
             }
             return;
@@ -112,19 +123,134 @@ impl App {
             && matches!(mouse_event.kind, MouseEventKind::Down(_))
         {
             self.close_ai_overlay();
-        }
-    }
-
-    pub(super) fn handle_settings_mouse(&mut self, mouse_event: MouseEvent) {
-        if !matches!(mouse_event.kind, MouseEventKind::Down(MouseButton::Left)) {
             return;
         }
 
+        if self.is_full_editor() {
+            self.handle_full_editor_mouse(mouse_event);
+            return;
+        }
+
+        // Hovering the command suggestion list moves the selection; clicking
+        // completes the hovered command like Tab.
+        if self.is_typing_command() && !self.is_full_editor() {
+            match mouse_event.kind {
+                MouseEventKind::Moved => {
+                    let _ = self.hover_command_suggestion(mouse_event.row);
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if self.hover_command_suggestion(mouse_event.row) {
+                        self.autocomplete();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn handle_full_editor_mouse(&mut self, mouse_event: MouseEvent) {
+        let Ok((width, height)) = crossterm::terminal::size() else {
+            return;
+        };
+        let area = Rect::new(0, 0, width, height);
+        match mouse_event.kind {
+            MouseEventKind::ScrollUp => self.scroll_up(3),
+            MouseEventKind::ScrollDown => self.scroll_down(3),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(position) =
+                    crate::ui::editor_position_at(self, area, mouse_event.column, mouse_event.row)
+                else {
+                    return;
+                };
+                let anchor = if mouse_event.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.editor_cursor
+                } else {
+                    self.clear_editor_selection();
+                    position
+                };
+                self.editor_drag_anchor = Some(anchor);
+                self.editor_cursor = position;
+                if anchor != position {
+                    self.editor_selection = Selection {
+                        start: anchor.min(position),
+                        end: anchor.max(position),
+                        active: true,
+                    };
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(anchor) = self.editor_drag_anchor else {
+                    return;
+                };
+                let Some(position) =
+                    crate::ui::editor_position_at(self, area, mouse_event.column, mouse_event.row)
+                else {
+                    return;
+                };
+                self.editor_cursor = position;
+                self.editor_selection = Selection {
+                    start: anchor.min(position),
+                    end: anchor.max(position),
+                    active: anchor != position,
+                };
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.editor_drag_anchor = None;
+                if self.editor_selection.active {
+                    self.copy_editor_selection();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Map a mouse row to a visible command suggestion and select it.
+    /// Returns true when the row landed on a suggestion.
+    pub(super) fn hover_command_suggestion(&mut self, row: u16) -> bool {
+        let Ok((width, height)) = crossterm::terminal::size() else {
+            return false;
+        };
+        let terminal_area = Rect::new(0, 0, width, height);
+        let panel_area = crate::ui::app_root_layout(terminal_area)[4];
+        // Suggestions render one per row just inside the panel border.
+        let inner_y = panel_area.y.saturating_add(1);
+        let bottom = panel_area
+            .y
+            .saturating_add(panel_area.height.saturating_sub(1));
+        if row < inner_y || row >= bottom {
+            return false;
+        }
+        let local = (row - inner_y) as usize;
+        let (visible_len, offset) = {
+            let (suggestions, offset) = self.visible_commands_window(8);
+            (suggestions.len(), offset)
+        };
+        if local >= visible_len {
+            return false;
+        }
+        self.selected_suggestion = offset + local;
+        true
+    }
+
+    pub(super) fn handle_settings_mouse(&mut self, mouse_event: MouseEvent) {
         let Ok((width, height)) = crossterm::terminal::size() else {
             return;
         };
 
-        self.handle_settings_mouse_with_size(mouse_event, height, width);
+        match mouse_event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_settings_mouse_with_size(mouse_event, height, width);
+            }
+            MouseEventKind::Moved => {
+                // Hover highlights the row; click activates it.
+                if let Some(index) =
+                    Self::settings_index_for_mouse_row(height, width, mouse_event.row)
+                {
+                    self.settings_selected = index;
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(super) fn handle_settings_mouse_with_size(
@@ -148,7 +274,7 @@ impl App {
         terminal_width: u16,
         row: u16,
     ) -> Option<usize> {
-        const SETTINGS_ITEM_COUNT: usize = 9;
+        const SETTINGS_ITEM_COUNT: usize = 10;
 
         let terminal_area = Rect::new(0, 0, terminal_width, terminal_height);
         let panel_area = crate::ui::app_root_layout(terminal_area)[4];
@@ -582,7 +708,7 @@ impl App {
             return;
         }
 
-        if Self::command_has_subcommands(&prompt) {
+        if Self::command_family_expands(&prompt) {
             self.prompt = format!("/{} ", prompt);
             self.cursor = self.prompt.len();
             self.selected_suggestion = 0;
@@ -762,6 +888,24 @@ impl App {
             format!("{} (save failed: {})", mode_message, error)
         } else {
             String::from(mode_message)
+        };
+    }
+
+    pub(super) fn cycle_agent_context_scope(&mut self) {
+        self.agent_context_scope = match self.agent_context_scope {
+            AgentContextScope::CurrentFolder => AgentContextScope::ActiveRoom,
+            AgentContextScope::ActiveRoom => AgentContextScope::Global,
+            AgentContextScope::Global => AgentContextScope::CurrentFolder,
+        };
+
+        self.last_action = if let Err(error) = self.store_agent_context_scope() {
+            format!(
+                "Agent context: {} (save failed: {})",
+                self.agent_context_scope_label(),
+                error
+            )
+        } else {
+            format!("Agent context: {}", self.agent_context_scope_label())
         };
     }
 

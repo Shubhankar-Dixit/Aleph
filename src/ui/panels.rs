@@ -14,12 +14,7 @@ pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     // If no status to show and prompt is empty, show minimalist ghost text
     if !has_status && app.is_prompt_empty() {
-        // Determine title based on auth state
-        let title_text = if app.is_openrouter_connected() || app.is_strix_connected() {
-            format!("Aleph · {}", app.active_room_label())
-        } else {
-            format!("Aleph · {}", app.active_room_label())
-        };
+        let title_text = format!("Aleph · {}", app.active_room_label());
 
         let block = Block::default()
             .title(Span::styled(
@@ -82,9 +77,14 @@ pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     // If user is typing a command, show filtered commands
     if app.is_typing_command() {
+        let browse_family = app.command_browse_family();
+        let command_title = browse_family
+            .as_deref()
+            .map(|family| format!("{} actions · {}", family, app.active_room_label()))
+            .unwrap_or_else(|| format!("Commands · {}", app.active_room_label()));
         let block = Block::default()
             .title(Span::styled(
-                format!("Commands · {}", app.active_room_label()),
+                command_title,
                 Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
@@ -118,7 +118,7 @@ pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
                     let selected = global_index == selected_global;
                     let row_style = if selected {
                         Style::default()
-                            .fg(TEXT)
+                            .fg(accent)
                             .bg(PANEL)
                             .add_modifier(Modifier::BOLD)
                     } else {
@@ -128,12 +128,14 @@ pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
                         .unwrap_or_else(|| (*command).description.to_string());
 
                     Row::new(vec![
-                        Cell::from(Span::styled(App::command_label(command), row_style)),
+                        Cell::from(Span::styled(if selected { "›" } else { " " }, row_style)),
+                        Cell::from(Span::styled(app.command_palette_label(command), row_style)),
                         Cell::from(Span::styled(description, row_style)),
                     ])
                 })
                 .chain((remaining > 0).then(|| {
                     Row::new(vec![
+                        Cell::from(Span::styled(" ", Style::default())),
                         Cell::from(Span::styled(
                             format!("+ {} more", remaining),
                             Style::default().fg(MUTED),
@@ -143,9 +145,17 @@ pub(super) fn render_commands_panel(frame: &mut Frame, app: &App, area: Rect) {
                 }))
                 .collect::<Vec<_>>();
 
-            let suggestions_table = Table::new(rows, [Constraint::Length(26), Constraint::Min(10)])
-                .column_spacing(3)
-                .style(Style::default().fg(Color::Rgb(122, 122, 128)));
+            let label_width = if browse_family.is_some() { 16 } else { 25 };
+            let suggestions_table = Table::new(
+                rows,
+                [
+                    Constraint::Length(2),
+                    Constraint::Length(label_width),
+                    Constraint::Min(10),
+                ],
+            )
+            .column_spacing(1)
+            .style(Style::default().fg(Color::Rgb(122, 122, 128)));
             frame.render_widget(suggestions_table, inner);
         }
         return;
@@ -403,7 +413,7 @@ pub(super) fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect
             )]));
             status_lines.push(Line::from(""));
             status_lines.push(Line::from(vec![Span::styled(
-                "Press Enter to open your browser and authorize an API key.",
+                "Press Enter to authorize in your browser, or run /login openrouter <key>.",
                 Style::default().fg(TEXT),
             )]));
         }
@@ -435,7 +445,7 @@ pub(super) fn render_login_picker_panel(frame: &mut Frame, app: &App, area: Rect
                 Style::default().fg(TEXT),
             )]));
             status_lines.push(Line::from(vec![Span::styled(
-                "Set STRIX_AUTH_BASE_URL if Strix is not running on http://localhost:3000.",
+                "Set STRIX_LOCAL_AUTH_BASE_URL only if you need a local Strix dev server.",
                 Style::default().fg(MUTED),
             )]));
         }
@@ -870,27 +880,31 @@ pub(super) fn render_path_list_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     let forks = app.temporal_forks();
     if forks.is_empty() {
-        let empty_p = Paragraph::new("No paths saved yet. Use /path save <name> at a decision point.")
-            .style(Style::default().fg(MUTED))
-            .alignment(Alignment::Center);
+        let empty_p =
+            Paragraph::new("No paths saved yet. Use /path save <name> at a decision point.")
+                .style(Style::default().fg(MUTED))
+                .alignment(Alignment::Center);
         frame.render_widget(empty_p, sections[0]);
     } else {
         // Build a tree structure from forks
         let mut tree_lines: Vec<Line<'static>> = Vec::new();
         let selected_idx = app.path_list_selected().min(forks.len().saturating_sub(1));
-        
-        // Create a map of parent -> children
-        let mut children_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+
+        // Roots: forks with no parent, or whose parent is missing from the list
+        let fork_ids: std::collections::HashSet<&str> =
+            forks.iter().map(|fork| fork.id.as_str()).collect();
         let mut root_indices: Vec<usize> = Vec::new();
-        
+
         for (i, fork) in forks.iter().enumerate() {
-            if let Some(pid) = &fork.parent_id {
-                children_map.entry(pid.clone()).or_default().push(i);
-            } else {
+            let has_parent = fork
+                .parent_id
+                .as_deref()
+                .is_some_and(|pid| fork_ids.contains(pid));
+            if !has_parent {
                 root_indices.push(i);
             }
         }
-        
+
         // Recursive function to render tree
         fn render_tree(
             forks: &[TemporalFork],
@@ -905,7 +919,7 @@ pub(super) fn render_path_list_panel(frame: &mut Frame, app: &App, area: Rect) {
             let fork = &forks[idx];
             let is_selected = idx == selected_idx;
             let is_current = current_fork_id == Some(fork.id.as_str());
-            
+
             // Build the tree connector
             let connector = if depth == 0 {
                 String::new()
@@ -913,7 +927,7 @@ pub(super) fn render_path_list_panel(frame: &mut Frame, app: &App, area: Rect) {
                 let connector = if is_last { "└── " } else { "├── " };
                 format!("{}{}", prefix, connector)
             };
-            
+
             // Style for the node
             let node_style = if is_selected {
                 Style::default()
@@ -925,13 +939,18 @@ pub(super) fn render_path_list_panel(frame: &mut Frame, app: &App, area: Rect) {
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
-                    .fg(TEXT)
+                Style::default().fg(TEXT)
             };
-            
+
             // Node marker
-            let marker = if is_selected { "●" } else if is_current { "★" } else { "○" };
-            
+            let marker = if is_selected {
+                "●"
+            } else if is_current {
+                "★"
+            } else {
+                "○"
+            };
+
             // Build the line with owned strings
             let mut spans = vec![
                 Span::styled(connector.clone(), Style::default().fg(MUTED)),
@@ -939,16 +958,13 @@ pub(super) fn render_path_list_panel(frame: &mut Frame, app: &App, area: Rect) {
                 Span::raw(" "),
                 Span::styled(fork.label.clone(), node_style),
             ];
-            
+
             // Add metadata
-            let meta = format!(
-                " [{} notes]",
-                fork.notes.len()
-            );
+            let meta = format!(" [{} notes]", fork.notes.len());
             spans.push(Span::styled(meta, Style::default().fg(MUTED)));
-            
+
             lines.push(Line::from(spans));
-            
+
             // Render children
             let children: Vec<_> = children_map_for_forks(forks, idx);
             for (child_idx, child_i) in children.iter().enumerate() {
@@ -971,16 +987,17 @@ pub(super) fn render_path_list_panel(frame: &mut Frame, app: &App, area: Rect) {
                 );
             }
         }
-        
+
         fn children_map_for_forks(forks: &[TemporalFork], parent_idx: usize) -> Vec<usize> {
             let parent_id = &forks[parent_idx].id;
-            forks.iter()
+            forks
+                .iter()
                 .enumerate()
                 .filter(|(_, f)| f.parent_id.as_deref() == Some(parent_id))
                 .map(|(i, _)| i)
                 .collect()
         }
-        
+
         // Render all root nodes
         for (i, root_idx) in root_indices.iter().enumerate() {
             let is_last = i == root_indices.len() - 1;
@@ -995,7 +1012,7 @@ pub(super) fn render_path_list_panel(frame: &mut Frame, app: &App, area: Rect) {
                 &mut tree_lines,
             );
         }
-        
+
         // Render the tree
         let tree_para = Paragraph::new(tree_lines)
             .wrap(Wrap { trim: false })

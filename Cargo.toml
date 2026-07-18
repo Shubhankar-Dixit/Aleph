@@ -26,7 +26,9 @@ exclude = [
 
 [dependencies]
 anyhow = "1"
+arboard = "3"
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crossterm = "0.28"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 keyring = { version = "3", features = ["windows-native"] }

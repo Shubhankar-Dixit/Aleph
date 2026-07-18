@@ -75,6 +75,12 @@ impl App {
         let agent_mode_enabled = Self::load_agent_mode_enabled().unwrap_or(true);
 
         #[cfg(test)]
+        let agent_context_scope = AgentContextScope::CurrentFolder;
+        #[cfg(not(test))]
+        let agent_context_scope =
+            Self::load_agent_context_scope().unwrap_or(AgentContextScope::CurrentFolder);
+
+        #[cfg(test)]
         let (temporal_forks, current_fork_id) = (Vec::new(), None);
         #[cfg(not(test))]
         let (temporal_forks, current_fork_id) =
@@ -85,6 +91,8 @@ impl App {
         #[cfg(not(test))]
         let (rooms, active_room_index) =
             Self::load_room_state().unwrap_or_else(|_| Self::default_room_state());
+
+        let (note_sync_tx, note_sync_rx) = mpsc::channel();
 
         let mut app = Self {
             started_at: Instant::now(),
@@ -116,6 +124,7 @@ impl App {
             ai_overlay_visible: false,
             ai_overlay_pulse_ticks: 0,
             save_shimmer_ticks: 0,
+            editor_save_status: EditorSaveStatus::Clean,
             ai_input_buffer: String::new(),
             ai_input_cursor: 0,
             suggestion_filter: None,
@@ -124,6 +133,7 @@ impl App {
             editor_images_enabled,
             editor_cursor_style: CursorStyle::Line,
             editor_selection: Selection::default(),
+            editor_drag_anchor: None,
             undo_stack: VecDeque::with_capacity(100),
             redo_stack: VecDeque::with_capacity(100),
             search_state: SearchState {
@@ -144,6 +154,10 @@ impl App {
             openrouter_login_cancel: None,
             strix_login_rx: None,
             strix_login_cancel: None,
+            note_sync_tx,
+            note_sync_rx,
+            note_sync_in_flight: HashSet::new(),
+            note_sync_queued: HashMap::new(),
             obsidian_vault_path,
             obsidian_vaults,
             obsidian_vault_selected: 0,
@@ -157,10 +171,15 @@ impl App {
             chat_render_dirty: false,
             chat_cache_stable_len: 0,
             agent_mode_enabled,
+            agent_context_scope,
             login_picker_selected: 0,
             settings_selected: 0,
             pending_agent_query: None,
             pending_agent_decision: None,
+            agent_plan_rx: None,
+            agent_plan_query: None,
+            chat_turn_started_at: None,
+            chat_input_hovered: false,
             ghost_stream_rx: None,
             ghost_streaming: false,
             ghost_result: None,
@@ -193,6 +212,16 @@ impl App {
                         String::from("Loaded cached Strix notes. Run /sync to refresh.");
                 }
             }
+
+            let pending_syncs = app
+                .notes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, note)| note.strix_sync_pending.then_some(index))
+                .collect::<Vec<_>>();
+            for index in pending_syncs {
+                let _ = app.queue_strix_note_sync(index);
+            }
         }
 
         app.add_activity("Ready for input.");
@@ -216,19 +245,22 @@ impl App {
             content,
             updated_at: String::from("seed"),
             folder_id: None,
+            strix_sync_pending: false,
         }]
     }
 
     pub fn run_cli_command(&mut self, args: &[String]) -> Result<Vec<String>, String> {
         if args.is_empty() {
             return Ok(vec![
-                String::from("Usage: aleph <notes|room|obsidian|trail|daemon|sync> ..."),
+                String::from("Usage: aleph <notes|room|obsidian|path|trail|daemon|sync> ..."),
                 String::from("Examples:"),
                 String::from("  aleph notes search roadmap"),
                 String::from("  aleph notes read <id>"),
                 String::from("  aleph room list"),
                 String::from("  aleph room use <name>"),
                 String::from("  aleph room all"),
+                String::from("  aleph path list"),
+                String::from("  aleph path save <name>"),
                 String::from("  aleph trail"),
                 String::from("  aleph daemon status"),
                 String::from("  aleph notes write <id> -   # content from stdin"),
@@ -250,6 +282,10 @@ impl App {
             return self.run_room_cli_command(&args[1..]);
         }
 
+        if area == "path" || area == "world" || area == "fork" {
+            return self.run_path_cli_command(&args[1..]);
+        }
+
         if area == "trail" {
             return self.run_trail_cli_command(&args[1..]);
         }
@@ -266,7 +302,7 @@ impl App {
                 TrailImportance::Normal,
             );
             return Err(format!(
-                "Unknown Aleph CLI area '{}'. Try 'notes', 'room', 'obsidian', 'trail', or 'daemon'.",
+                "Unknown Aleph CLI area '{}'. Try 'notes', 'room', 'obsidian', 'path', 'trail', or 'daemon'.",
                 area
             ));
         }
@@ -598,6 +634,7 @@ impl App {
                         Ok(()) => {
                             self.openrouter_api_key = Some(api_key);
                             self.refresh_connection_state();
+                            self.add_system_log("OpenRouter login completed; API key stored");
                             self.rebuild_chat_render_cache();
                             self.set_result_panel(
                                 "OpenRouter provider",
@@ -628,6 +665,7 @@ impl App {
                 }
                 Ok(Err(error)) => {
                     self.refresh_connection_state();
+                    self.add_system_log(format!("OpenRouter login failed: {}", error));
                     self.set_result_panel("OpenRouter provider failed", vec![error]);
                     self.last_action = String::from("OpenRouter provider setup failed.");
                     self.openrouter_login_rx = None;
@@ -732,6 +770,9 @@ impl App {
                     let first_chunk = self.streaming_buffer.is_empty();
                     self.streaming_active = true;
                     self.streaming_buffer.push_str(&chunk);
+                    let thought_seconds = self
+                        .chat_turn_started_at
+                        .map(|started| started.elapsed().as_secs_f32());
                     if let Some(message) = self
                         .chat_messages
                         .iter_mut()
@@ -739,6 +780,9 @@ impl App {
                         .find(|message| message.role == "assistant")
                     {
                         message.content.push_str(&chunk);
+                        if first_chunk && message.thought_seconds.is_none() {
+                            message.thought_seconds = thought_seconds;
+                        }
                     }
                     self.chat_render_dirty = true;
                     self.thinking = true;
@@ -746,6 +790,10 @@ impl App {
                     if first_chunk {
                         self.add_activity("Receiving model response.");
                     }
+                }
+                Ok(ChatStreamUpdate::Notice(notice)) => {
+                    self.add_system_log(notice.clone());
+                    self.add_activity(notice);
                 }
                 Ok(ChatStreamUpdate::Done) => {
                     if self.streaming_buffer.trim().is_empty() {
@@ -759,6 +807,18 @@ impl App {
                         }
                     }
 
+                    let turn_seconds = self
+                        .chat_turn_started_at
+                        .take()
+                        .map(|started| started.elapsed().as_secs_f32());
+                    if let Some(message) = self
+                        .chat_messages
+                        .iter_mut()
+                        .rev()
+                        .find(|message| message.role == "assistant")
+                    {
+                        message.turn_seconds = turn_seconds;
+                    }
                     self.streaming_buffer.clear();
                     self.streaming_active = false;
                     self.rebuild_chat_render_cache();
@@ -768,7 +828,12 @@ impl App {
                     self.thinking_ticks_remaining = 0;
                     self.chat_stream_rx = None;
                     self.last_action = String::from("AI response received.");
-                    self.add_activity("Finished response.");
+                    match turn_seconds {
+                        Some(seconds) => {
+                            self.add_activity(format!("Turn completed in {:.1}s.", seconds))
+                        }
+                        None => self.add_activity("Finished response."),
+                    }
                     stream_finished = true;
                 }
                 Ok(ChatStreamUpdate::Error(error)) => {
@@ -788,6 +853,7 @@ impl App {
                         self.push_chat_message("assistant", format!("AI chat failed: {}", error));
                     }
 
+                    self.chat_turn_started_at = None;
                     self.streaming_buffer.clear();
                     self.streaming_active = false;
                     self.rebuild_chat_render_cache();
@@ -797,6 +863,11 @@ impl App {
                     self.thinking_ticks_remaining = 0;
                     self.chat_stream_rx = None;
                     self.last_action = String::from("AI request failed.");
+                    self.add_system_log(format!(
+                        "{} request failed: {}",
+                        self.ai_provider_label(),
+                        Self::preview_text(&error, 120)
+                    ));
                     self.add_activity(format!(
                         "Request failed: {}",
                         Self::preview_text(&error, 72)
@@ -826,6 +897,7 @@ impl App {
                             String::from("AI chat disconnected before a response arrived.");
                     }
 
+                    self.chat_turn_started_at = None;
                     self.streaming_buffer.clear();
                     self.streaming_active = false;
                     self.rebuild_chat_render_cache();
@@ -847,6 +919,8 @@ impl App {
         }
 
         self.process_ghost_stream();
+        self.process_agent_plan();
+        self.process_note_sync_updates();
 
         if self.ai_overlay_visible && self.ai_overlay_pulse_ticks > 0 {
             self.ai_overlay_pulse_ticks -= 1;
@@ -916,6 +990,10 @@ impl App {
 
     pub fn save_shimmer_ticks(&self) -> u8 {
         self.save_shimmer_ticks
+    }
+
+    pub fn editor_save_status(&self) -> &EditorSaveStatus {
+        &self.editor_save_status
     }
 
     pub fn ai_input_buffer(&self) -> &str {
@@ -1141,6 +1219,10 @@ impl App {
         }
     }
 
+    pub fn chat_input_hovered(&self) -> bool {
+        self.chat_input_hovered
+    }
+
     pub fn strix_logs(&self) -> &[String] {
         &self.strix_logs
     }
@@ -1155,6 +1237,14 @@ impl App {
 
     pub fn is_agent_mode_enabled(&self) -> bool {
         self.agent_mode_enabled
+    }
+
+    pub fn agent_context_scope(&self) -> AgentContextScope {
+        self.agent_context_scope
+    }
+
+    pub fn agent_context_scope_label(&self) -> &'static str {
+        Self::agent_context_scope_name(self.agent_context_scope)
     }
 
     pub fn login_picker_selected(&self) -> usize {
@@ -1356,12 +1446,7 @@ impl App {
         &self,
         window_size: usize,
     ) -> (Vec<&'static CommandSpec>, usize) {
-        // Use suggestion_filter if initialized, otherwise fall back to prompt
-        let query = if let Some(ref filter) = self.suggestion_filter {
-            filter.clone()
-        } else {
-            self.command_query()
-        };
+        let query = self.active_command_query();
 
         let all = self.matching_commands(&query);
 
@@ -1412,7 +1497,7 @@ impl App {
             return Vec::new();
         }
 
-        let query = self.command_query();
+        let query = self.active_command_query();
 
         let mut commands = self.matching_commands(&query);
         commands.truncate(limit);
@@ -1427,6 +1512,15 @@ impl App {
                 .collect();
         }
 
+        // Any exact command is a single choice. In particular, `/note list`
+        // must not also rank its `/note` parent as a second suggestion.
+        if let Some(exact) = COMMANDS
+            .iter()
+            .find(|command| command.name == query && self.is_command_visible(command))
+        {
+            return vec![exact];
+        }
+
         if let Some(base) = query.strip_suffix(' ') {
             if !base.is_empty() && Self::command_has_subcommands(base) {
                 let prefix = format!("{} ", base);
@@ -1434,6 +1528,33 @@ impl App {
                     .iter()
                     .filter(|cmd| self.is_command_visible(cmd) && cmd.name.starts_with(&prefix))
                     .collect();
+            }
+        }
+
+        // Once input is inside a command family, keep every result inside that
+        // family. This applies both to direct typing (`/note li`) and to arrow
+        // navigation after Enter expanded the family.
+        if let Some((family, _)) = query.split_once(' ') {
+            if Self::command_has_subcommands(family) {
+                let prefix = format!("{} ", family);
+                let mut matches = COMMANDS
+                    .iter()
+                    .filter(|command| {
+                        self.is_command_visible(command) && command.name.starts_with(&prefix)
+                    })
+                    .filter_map(|command| {
+                        Self::command_match_rank(command, query).map(|rank| (rank, command))
+                    })
+                    .collect::<Vec<_>>();
+                matches
+                    .sort_by_key(|(rank, command)| (*rank, std::cmp::Reverse(command.name.len())));
+                if matches.is_empty() && family == "room" {
+                    // Room names are dynamic arguments (`/room project-name`),
+                    // not registered leaf commands. Preserve the family row as
+                    // the execution affordance when no static room action fits.
+                } else {
+                    return matches.into_iter().map(|(_, command)| command).collect();
+                }
             }
         }
 
@@ -1461,7 +1582,14 @@ impl App {
             .any(|candidate| candidate.name.starts_with(&prefix))
     }
 
+    pub(super) fn command_family_expands(command: &str) -> bool {
+        Self::command_has_subcommands(command) && !matches!(command, "trail" | "daemon")
+    }
+
     pub fn command_subcommand_summary(command: &CommandSpec) -> Option<String> {
+        if !Self::command_family_expands(command.name) {
+            return None;
+        }
         let prefix = format!("{} ", command.name);
         let subcommands = COMMANDS
             .iter()
@@ -1477,8 +1605,30 @@ impl App {
         if subcommands.is_empty() {
             None
         } else {
-            Some(format!("Enter to expand: {}", subcommands.join(" · ")))
+            let noun = if subcommands.len() == 1 {
+                "action"
+            } else {
+                "actions"
+            };
+            Some(format!("Enter to open {} {}", subcommands.len(), noun))
         }
+    }
+
+    pub fn command_browse_family(&self) -> Option<String> {
+        let query = self.active_command_query();
+        let family = query.split_whitespace().next()?;
+        (query.contains(char::is_whitespace) && Self::command_has_subcommands(family))
+            .then(|| family.to_string())
+    }
+
+    pub fn command_palette_label(&self, command: &CommandSpec) -> String {
+        if let Some(family) = self.command_browse_family() {
+            if let Some(action) = command.name.strip_prefix(&format!("{} ", family)) {
+                return action.to_string();
+            }
+        }
+
+        Self::command_label(command)
     }
 
     pub(super) fn command_query(&self) -> String {
@@ -1500,6 +1650,12 @@ impl App {
         }
     }
 
+    pub(super) fn active_command_query(&self) -> String {
+        self.suggestion_filter
+            .clone()
+            .unwrap_or_else(|| self.command_query())
+    }
+
     pub(super) fn is_command_visible(&self, cmd: &CommandSpec) -> bool {
         match cmd.name {
             "config" => false, // Hidden alias for /settings
@@ -1515,7 +1671,7 @@ impl App {
             return 0;
         }
 
-        let query = self.command_query();
+        let query = self.active_command_query();
 
         self.matching_commands(&query).len()
     }

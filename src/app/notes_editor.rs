@@ -16,52 +16,132 @@ impl App {
         self.panel_title = format!("Editing: {}", self.notes[index].title);
         self.panel_lines.clear();
         self.close_ai_overlay();
+        self.editor_save_status = EditorSaveStatus::Clean;
+        self.editor_drag_anchor = None;
+        self.clear_editor_selection();
         self.last_action = format!("Editing note: {}", self.notes[index].title);
     }
 
     pub(super) fn save_editor(&mut self) {
-        self.save_editor_with_temporal_fork(Some("Before note save"));
+        // Ordinary human saves already have editor undo history and should stay
+        // cheap. Explicit paths, command mutations, and AI applies retain their
+        // existing Temporal Fork checkpoints.
+        self.save_editor_contents();
     }
 
-    pub(super) fn save_editor_with_temporal_fork(&mut self, fork_label: Option<&str>) {
+    pub(super) fn save_editor_contents(&mut self) {
         let Some(index) = self.editor_note_index else {
             return;
         };
 
-        if let Some(label) = fork_label {
-            self.create_auto_temporal_fork(label);
+        let content_unchanged = self
+            .notes
+            .get(index)
+            .map(|note| note.content == self.editor_buffer)
+            .unwrap_or(false);
+        if content_unchanged
+            && matches!(
+                self.editor_save_status,
+                EditorSaveStatus::Clean | EditorSaveStatus::Saved
+            )
+        {
+            return;
         }
+
         let updated_at = self.uptime();
         if let Some(note) = self.notes.get_mut(index) {
             note.content = self.editor_buffer.clone();
-            note.raw_content = self.editor_buffer.clone();
+            // raw_content stores the original rich remote representation. Once
+            // plain text is edited it is stale; clearing it also avoids keeping
+            // and serializing a second full copy of every edited note.
+            note.raw_content.clear();
             note.updated_at = updated_at;
         }
-        if let Err(error) = self.persist_note(index) {
-            self.last_action = format!("Note save failed: {}", error);
-        } else if let Some(note) = self.notes.get(index) {
-            let _ = self.append_trail_event(
-                "note",
-                format!("Saved note: {}.", note.title),
-                vec![note.id.to_string()],
-                TrailImportance::High,
-            );
+        match self.persist_note(index) {
+            Err(error) => {
+                self.last_action = format!("Note save failed: {}", error);
+                self.editor_save_status = EditorSaveStatus::Failed(error);
+            }
+            Ok(()) => {
+                self.editor_save_status = EditorSaveStatus::Saved;
+                self.last_action = String::from("Note saved successfully.");
+                if let Some(note) = self.notes.get(index) {
+                    let _ = self.append_trail_event(
+                        "note",
+                        format!("Saved note: {}.", note.title),
+                        vec![note.id.to_string()],
+                        TrailImportance::High,
+                    );
+                }
+            }
         }
-        self.save_shimmer_ticks = 4;
+        // Keep the initiated state visible before revealing the completed result.
+        self.save_shimmer_ticks = 18;
     }
 
     pub(super) fn persist_note(&mut self, index: usize) -> Result<(), String> {
-        match self.note_save_target {
-            NoteSaveTarget::Local => Self::save_local_notes(&self.notes),
-            NoteSaveTarget::Obsidian => {
-                self.ensure_note_obsidian_path(index)?;
-                self.write_note_to_obsidian(index)?;
-                Self::save_local_notes(&self.notes)
+        // A note always writes back to every home it already has, regardless
+        // of the global save target. Otherwise an Obsidian-backed note saved
+        // while the target is Strix forks into a duplicate remote note while
+        // the vault file goes stale (and vice versa).
+        let has_obsidian_home = self
+            .notes
+            .get(index)
+            .and_then(|note| note.obsidian_path.as_ref())
+            .is_some();
+        let has_strix_home = self
+            .notes
+            .get(index)
+            .and_then(|note| note.remote_id.as_ref())
+            .is_some();
+
+        let mut first_error: Option<String> = None;
+        let record_error = |error: String, first_error: &mut Option<String>| {
+            if first_error.is_none() {
+                *first_error = Some(error);
             }
-            NoteSaveTarget::Strix => {
-                self.push_note_to_strix(index)?;
-                Self::save_local_notes(&self.notes)
+        };
+
+        if has_obsidian_home {
+            if let Err(error) = self.write_note_to_obsidian(index) {
+                record_error(error, &mut first_error);
             }
+        }
+        if has_strix_home && self.is_strix_connected() {
+            if let Err(error) = self.queue_strix_note_sync(index) {
+                record_error(error, &mut first_error);
+            }
+        }
+
+        // Local-only notes adopt the configured save target as their home.
+        if !has_obsidian_home && !has_strix_home {
+            match self.note_save_target {
+                NoteSaveTarget::Local => {}
+                NoteSaveTarget::Obsidian => {
+                    let result = self
+                        .ensure_note_obsidian_path(index)
+                        .and_then(|_| self.write_note_to_obsidian(index));
+                    if let Err(error) = result {
+                        record_error(error, &mut first_error);
+                    }
+                }
+                NoteSaveTarget::Strix => {
+                    if let Err(error) = self.queue_strix_note_sync(index) {
+                        record_error(error, &mut first_error);
+                    }
+                }
+            }
+        }
+
+        // The local cache is the source of truth for the TUI; always write it
+        // even when a remote home failed.
+        if let Err(error) = Self::save_local_notes(&self.notes) {
+            record_error(error, &mut first_error);
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 
@@ -108,6 +188,9 @@ impl App {
 
     pub(super) fn exit_editor(&mut self) {
         self.save_editor();
+        if matches!(self.editor_save_status, EditorSaveStatus::Failed(_)) {
+            return;
+        }
         let index = self.editor_note_index.unwrap_or(0);
         let note_title = self
             .notes
@@ -118,7 +201,7 @@ impl App {
         self.selected_note = index;
         self.set_result_panel(
             format!("Saved note: {}", note_title),
-            self.note_detail_lines(index),
+            self.note_exit_lines(index),
         );
         self.last_action = format!("Exited note: {}", note_title);
         self.editor_note_index = None;
@@ -146,6 +229,38 @@ impl App {
         lines
     }
 
+    pub(super) fn note_exit_lines(&self, index: usize) -> Vec<String> {
+        const EXIT_PREVIEW_LINES: usize = 18;
+        let Some(note) = self.notes.get(index) else {
+            return vec![String::from("No note available.")];
+        };
+        let folder_info = note
+            .folder_id
+            .map(|folder_id| format!("Folder: {}", self.get_folder_path(folder_id)))
+            .unwrap_or_else(|| String::from("Folder: Uncategorized"));
+        let mut lines = vec![
+            format!("ID: {}", note.id),
+            Self::note_source_label(note),
+            format!("Updated: {}", note.updated_at),
+            folder_info,
+            String::new(),
+        ];
+        let mut content_lines = note.content.lines();
+        lines.extend(
+            content_lines
+                .by_ref()
+                .take(EXIT_PREVIEW_LINES)
+                .map(str::to_string),
+        );
+        if content_lines.next().is_some() {
+            lines.push(String::new());
+            lines.push(String::from(
+                "… more lines · use /note read to reopen the full note",
+            ));
+        }
+        lines
+    }
+
     pub(super) fn current_note_index(&self) -> Option<usize> {
         if self.notes.is_empty() {
             None
@@ -160,8 +275,14 @@ impl App {
             return self.current_note_index();
         }
 
-        let normalized = trimmed.trim_start_matches('#');
-        if let Ok(index) = normalized.parse::<usize>() {
+        if let Some(id) = trimmed.strip_prefix('#') {
+            return id
+                .parse::<usize>()
+                .ok()
+                .and_then(|id| self.note_index_by_id(id));
+        }
+
+        if let Ok(index) = trimmed.parse::<usize>() {
             if index == 0 {
                 return None;
             }
@@ -227,18 +348,38 @@ impl App {
     }
 
     pub(super) fn preview_text(content: &str, limit: usize) -> String {
-        let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
-        let preview = collapsed.trim();
-
-        if preview.chars().count() <= limit {
-            return preview.to_string();
+        if limit == 0 {
+            return String::new();
         }
 
+        let mut preview = String::new();
+        let mut character_count = 0;
+        let mut truncated = false;
+
+        'words: for word in content.split_whitespace() {
+            if !preview.is_empty() {
+                if character_count == limit {
+                    truncated = true;
+                    break;
+                }
+                preview.push(' ');
+                character_count += 1;
+            }
+            for character in word.chars() {
+                if character_count == limit {
+                    truncated = true;
+                    break 'words;
+                }
+                preview.push(character);
+                character_count += 1;
+            }
+        }
+
+        if truncated {
+            preview.pop();
+            preview.push('…');
+        }
         preview
-            .chars()
-            .take(limit.saturating_sub(1))
-            .collect::<String>()
-            + "…"
     }
 
     pub(super) fn resolve_folder_id(&self, target: &str) -> Option<usize> {
@@ -394,6 +535,7 @@ impl App {
             scroll_offset: self.editor_scroll_offset,
         });
         self.redo_stack.clear();
+        self.editor_save_status = EditorSaveStatus::Unsaved;
     }
 
     pub(super) fn undo(&mut self) {
@@ -409,6 +551,7 @@ impl App {
             self.editor_buffer = state.buffer;
             self.editor_cursor = state.cursor;
             self.editor_scroll_offset = state.scroll_offset;
+            self.editor_save_status = EditorSaveStatus::Unsaved;
         }
     }
 
@@ -425,23 +568,32 @@ impl App {
             self.editor_buffer = state.buffer;
             self.editor_cursor = state.cursor;
             self.editor_scroll_offset = state.scroll_offset;
+            self.editor_save_status = EditorSaveStatus::Unsaved;
         }
     }
 
     pub(super) fn insert_editor_text(&mut self, text: &str) {
         self.save_undo_state();
-        for character in text.chars() {
-            self.insert_editor_character(character);
-        }
+        self.delete_editor_selection_without_undo();
+        self.editor_buffer.insert_str(self.editor_cursor, text);
+        self.editor_cursor += text.len();
+        self.editor_save_status = EditorSaveStatus::Unsaved;
     }
 
     pub(super) fn insert_editor_character(&mut self, character: char) {
-        self.clear_editor_selection();
+        if self.editor_selection.active {
+            self.save_undo_state();
+            self.delete_editor_selection_without_undo();
+        }
+        self.editor_save_status = EditorSaveStatus::Unsaved;
         self.editor_buffer.insert(self.editor_cursor, character);
         self.editor_cursor += character.len_utf8();
     }
 
     pub(super) fn editor_backspace(&mut self) {
+        if self.delete_editor_selection() {
+            return;
+        }
         if self.editor_cursor == 0 {
             return;
         }
@@ -457,6 +609,9 @@ impl App {
     }
 
     pub(super) fn editor_delete(&mut self) {
+        if self.delete_editor_selection() {
+            return;
+        }
         if self.editor_cursor >= self.editor_buffer.len() {
             return;
         }
@@ -488,10 +643,67 @@ impl App {
             self.editor_buffer.len()
         };
         self.editor_selection.select_all(buffer_len);
+        self.editor_cursor = buffer_len;
     }
 
     pub(super) fn clear_editor_selection(&mut self) {
         self.editor_selection.clear();
+    }
+
+    pub(super) fn selected_editor_text(&self) -> Option<&str> {
+        if !self.editor_selection.active || self.has_live_ai_editor_preview() {
+            return None;
+        }
+        let start = Self::clamp_to_char_boundary(&self.editor_buffer, self.editor_selection.start);
+        let end = Self::clamp_to_char_boundary(&self.editor_buffer, self.editor_selection.end);
+        (start < end).then(|| &self.editor_buffer[start..end])
+    }
+
+    pub(super) fn copy_editor_selection(&mut self) -> bool {
+        let Some(text) = self.selected_editor_text().map(str::to_owned) else {
+            return false;
+        };
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)) {
+            Ok(()) => {
+                self.last_action = String::from("Selection copied to clipboard.");
+                true
+            }
+            Err(error) => {
+                self.last_action = format!("Could not copy selection: {}", error);
+                false
+            }
+        }
+    }
+
+    pub(super) fn paste_editor_clipboard(&mut self) {
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+            Ok(text) => self.insert_editor_text(&text),
+            Err(error) => self.last_action = format!("Could not paste from clipboard: {}", error),
+        }
+    }
+
+    pub(super) fn delete_editor_selection(&mut self) -> bool {
+        if !self.editor_selection.active {
+            return false;
+        }
+        self.save_undo_state();
+        self.delete_editor_selection_without_undo()
+    }
+
+    fn delete_editor_selection_without_undo(&mut self) -> bool {
+        if !self.editor_selection.active {
+            return false;
+        }
+        let start = Self::clamp_to_char_boundary(&self.editor_buffer, self.editor_selection.start);
+        let end = Self::clamp_to_char_boundary(&self.editor_buffer, self.editor_selection.end);
+        self.clear_editor_selection();
+        if start >= end {
+            return false;
+        }
+        self.editor_buffer.drain(start..end);
+        self.editor_cursor = start;
+        self.editor_save_status = EditorSaveStatus::Unsaved;
+        true
     }
 
     pub(super) fn scroll_up(&mut self, lines: usize) {
@@ -530,6 +742,7 @@ impl App {
             if let Some(index) = self.editor_note_index {
                 self.notes[index].title = self.title_buffer.trim().to_string();
                 self.panel_title = format!("Editing: {}", self.notes[index].title);
+                self.editor_save_status = EditorSaveStatus::Unsaved;
                 self.last_action = format!("Title updated to: {}", self.notes[index].title);
             }
         } else if !save {
@@ -657,13 +870,18 @@ impl App {
             return;
         }
         let query = self.search_state.query.to_lowercase();
-        let buffer_lower = self.editor_buffer.to_lowercase();
-        let mut start = 0;
-        while let Some(pos) = buffer_lower[start..].find(&query) {
-            let absolute_pos = start + pos;
-            self.search_state.matches.push(absolute_pos);
-            start = absolute_pos + 1;
+        let mut buffer_lower = String::with_capacity(self.editor_buffer.len());
+        let mut boundaries = Vec::new();
+        for (original_index, character) in self.editor_buffer.char_indices() {
+            boundaries.push((buffer_lower.len(), original_index));
+            buffer_lower.extend(character.to_lowercase());
         }
+        self.search_state.matches.extend(
+            boundaries
+                .into_iter()
+                .filter(|(lower_index, _)| buffer_lower[*lower_index..].starts_with(&query))
+                .map(|(_, original_index)| original_index),
+        );
         if !self.search_state.matches.is_empty() {
             self.search_state.current_match = Some(0);
             self.editor_cursor = self.search_state.matches[0];

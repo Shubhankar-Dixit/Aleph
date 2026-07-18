@@ -113,6 +113,25 @@ impl App {
             summary.into(),
             targets,
             importance,
+            None,
+        )
+    }
+
+    pub(super) fn append_trail_event_with_repo_context(
+        &self,
+        kind: &str,
+        summary: impl Into<String>,
+        targets: Vec<String>,
+        importance: TrailImportance,
+        repo: Option<RepoContext>,
+    ) -> Result<(), String> {
+        Self::append_trail_event_for_current_workspace(
+            kind,
+            "aleph",
+            summary.into(),
+            targets,
+            importance,
+            repo,
         )
     }
 
@@ -122,10 +141,11 @@ impl App {
         summary: String,
         targets: Vec<String>,
         importance: TrailImportance,
+        repo: Option<RepoContext>,
     ) -> Result<(), String> {
         let cwd = Self::current_workspace_label();
         let workspace_id = Self::workspace_id_for_label(&cwd);
-        let repo = Self::capture_repo_context();
+        let repo = repo.or_else(Self::capture_repo_context);
         let signals = Self::extract_signals(&summary);
         let timestamp_ms = Self::now_millis();
         let id = Self::trail_event_id(timestamp_ms, kind, &summary);
@@ -331,6 +351,7 @@ impl App {
             String::from("Aleph Trail daemon is watching this workspace."),
             Vec::new(),
             TrailImportance::Normal,
+            None,
         )?;
 
         let mut previous_git = Self::current_git_snapshot();
@@ -347,6 +368,7 @@ impl App {
                     String::from("Aleph Trail daemon stopped."),
                     Vec::new(),
                     TrailImportance::Normal,
+                    None,
                 )?;
                 let _ = fs::remove_file(Self::daemon_state_path());
                 return Ok(vec![String::from("Aleph Trail daemon stopped.")]);
@@ -365,6 +387,7 @@ impl App {
                     summary,
                     Vec::new(),
                     TrailImportance::Normal,
+                    None,
                 )?;
             }
             if current_git.head != previous_git.head {
@@ -379,6 +402,7 @@ impl App {
                     summary,
                     Vec::new(),
                     TrailImportance::Normal,
+                    None,
                 )?;
             }
             previous_git = current_git;

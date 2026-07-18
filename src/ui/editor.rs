@@ -3,6 +3,95 @@ use super::image_preview::{image_fallback_line, render_image_reference};
 use super::panels::editor_word_count;
 use super::*;
 
+fn full_editor_content_area(area: Rect) -> Rect {
+    let center_width = area.width.saturating_sub(8).min(80);
+    let left_padding = area.width.saturating_sub(center_width) / 2;
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .margin(1)
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(left_padding),
+            Constraint::Length(center_width),
+            Constraint::Min(0),
+        ])
+        .split(vertical[2])[1]
+}
+
+pub(crate) fn editor_position_at(app: &App, area: Rect, column: u16, row: u16) -> Option<usize> {
+    let content_area = full_editor_content_area(area);
+    if column < content_area.x
+        || column >= content_area.right()
+        || row < content_area.y
+        || row >= content_area.bottom()
+    {
+        return None;
+    }
+
+    let target_row = app.editor_scroll_offset() + usize::from(row - content_area.y);
+    let target_column = usize::from(column - content_area.x);
+    let wrap_width = usize::from(content_area.width.max(1));
+    let text = app.editor_buffer();
+    let mut byte_offset = 0;
+    let mut visual_row = 0;
+
+    for raw_line in text.split_inclusive('\n') {
+        let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        if line.starts_with("# ") && byte_offset > 0 {
+            if visual_row == target_row {
+                return Some(byte_offset);
+            }
+            visual_row += 1;
+        }
+
+        let char_count = line.chars().count();
+        let row_count = if app.editor_word_wrap() {
+            char_count.max(1).div_ceil(wrap_width)
+        } else {
+            1
+        };
+        if target_row < visual_row + row_count {
+            let row_in_line = target_row - visual_row;
+            let character_index = if app.editor_word_wrap() {
+                row_in_line * wrap_width + target_column
+            } else {
+                target_column
+            }
+            .min(char_count);
+            let within_line = line
+                .char_indices()
+                .nth(character_index)
+                .map(|(offset, _)| offset)
+                .unwrap_or(line.len());
+            return Some(byte_offset + within_line);
+        }
+        visual_row += row_count;
+
+        if line.starts_with("# ") {
+            if visual_row == target_row {
+                return Some(byte_offset + line.len());
+            }
+            visual_row += 1;
+        }
+        byte_offset += raw_line.len();
+    }
+
+    if text.is_empty() || target_row >= visual_row {
+        Some(text.len())
+    } else {
+        None
+    }
+}
+
 pub(super) fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
     let max_width = 80;
     let center_width = area.width.saturating_sub(8).min(max_width);
@@ -20,16 +109,7 @@ pub(super) fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
         .margin(1)
         .split(area);
 
-    let h_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(left_padding),
-            Constraint::Length(center_width),
-            Constraint::Min(0),
-        ])
-        .split(v_chunks[2]);
-
-    let editor_content_area = h_chunks[1];
+    let editor_content_area = full_editor_content_area(area);
 
     let title = app.editor_note_title().unwrap_or("Untitled");
 
@@ -267,8 +347,41 @@ pub(super) fn render_full_editor(frame: &mut Frame, app: &App, area: Rect) {
             MUTED
         }),
     );
-    let bottom_hints = Paragraph::new(Line::from(hints)).alignment(Alignment::Right);
-    frame.render_widget(bottom_hints, v_chunks[4]);
+    let (save_label, save_style) = if app.save_shimmer_ticks() > 0 {
+        (
+            "● Saving...",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        match app.editor_save_status() {
+            EditorSaveStatus::Clean => ("", Style::default()),
+            EditorSaveStatus::Unsaved => ("● Unsaved", Style::default().fg(ACCENT_SOFT)),
+            EditorSaveStatus::Saved => (
+                "✓ Saved",
+                Style::default()
+                    .fg(DIFF_ADDED_FG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            EditorSaveStatus::Failed(_) => (
+                "! Save failed",
+                Style::default()
+                    .fg(DIFF_REMOVED_FG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        }
+    };
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(18), Constraint::Min(0)])
+        .split(v_chunks[4]);
+    frame.render_widget(
+        Paragraph::new(Span::styled(save_label, save_style)),
+        bottom[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(hints)).alignment(Alignment::Right),
+        bottom[1],
+    );
 
     if app.ai_overlay_visible() {
         let cursor_row = cursor_visual_row

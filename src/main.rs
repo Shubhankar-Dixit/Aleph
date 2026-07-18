@@ -5,7 +5,10 @@ use std::io::{self, Read};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -56,7 +59,12 @@ impl TerminalSession {
         enable_raw_mode()?;
 
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(error) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        ) {
             let _ = disable_raw_mode();
             return Err(error.into());
         }
@@ -70,7 +78,12 @@ impl Drop for TerminalSession {
         let _ = disable_raw_mode();
 
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            stdout,
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
     }
 }
 
@@ -90,6 +103,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             match event::read()? {
                 Event::Key(key_event) => app.handle_key(key_event),
                 Event::Mouse(mouse_event) => app.handle_mouse(mouse_event),
+                Event::Paste(text) => app.handle_paste(&text),
                 _ => {}
             }
         }

@@ -15,38 +15,37 @@ impl App {
         }
 
         if self.ai_overlay_visible {
-            match key_event.code {
-                KeyCode::Enter
-                    if key_event.kind == KeyEventKind::Press && self.has_pending_ai_edit() =>
-                {
-                    self.apply_pending_ai_edit();
-                    return;
-                }
-                KeyCode::Char('r')
-                    if key_event.kind == KeyEventKind::Press
-                        && key_event.modifiers.contains(KeyModifiers::CONTROL)
-                        && self.has_pending_ai_edit() =>
-                {
-                    self.reject_pending_ai_edit();
-                    return;
-                }
-                KeyCode::Esc if key_event.kind == KeyEventKind::Press => {
-                    if self.has_pending_ai_edit() {
-                        self.reject_pending_ai_edit();
-                    } else {
-                        self.close_ai_overlay();
+            if self.has_pending_ai_edit() {
+                match key_event.code {
+                    KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
+                        self.apply_pending_ai_edit();
                     }
+                    KeyCode::Char('r')
+                        if key_event.kind == KeyEventKind::Press
+                            && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        self.reject_pending_ai_edit();
+                    }
+                    KeyCode::Esc if key_event.kind == KeyEventKind::Press => {
+                        self.reject_pending_ai_edit();
+                    }
+                    _ => {
+                        self.last_action =
+                            String::from("Apply or reject the pending AI edits first.");
+                    }
+                }
+                return;
+            }
+
+            match key_event.code {
+                KeyCode::Esc if key_event.kind == KeyEventKind::Press => {
+                    self.close_ai_overlay();
                     return;
                 }
                 KeyCode::Char(' ')
                     if key_event.kind == KeyEventKind::Press
                         && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
-                    if self.has_pending_ai_edit() {
-                        self.last_action =
-                            String::from("Apply or reject the pending AI edits first.");
-                        return;
-                    }
                     self.toggle_ai_overlay();
                     return;
                 }
@@ -54,7 +53,16 @@ impl App {
                     if key_event.kind == KeyEventKind::Press
                         && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
-                    self.exit_editor();
+                    if !self.copy_editor_selection() {
+                        self.exit_editor();
+                    }
+                    return;
+                }
+                KeyCode::Char('v')
+                    if key_event.kind == KeyEventKind::Press
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.paste_editor_clipboard();
                     return;
                 }
                 KeyCode::Char('s')
@@ -104,14 +112,10 @@ impl App {
                         && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
                     self.select_all_editor();
+                    self.copy_editor_selection();
                     return;
                 }
                 _ => {
-                    if self.has_pending_ai_edit() {
-                        self.last_action =
-                            String::from("Apply or reject the pending AI edits first.");
-                        return;
-                    }
                     self.handle_ai_input_key(key_event);
                     return;
                 }
@@ -123,7 +127,15 @@ impl App {
                 if key_event.kind == KeyEventKind::Press
                     && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                self.exit_editor();
+                if !self.copy_editor_selection() {
+                    self.exit_editor();
+                }
+            }
+            KeyCode::Char('v')
+                if key_event.kind == KeyEventKind::Press
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.paste_editor_clipboard();
             }
             KeyCode::Char('s')
                 if key_event.kind == KeyEventKind::Press
@@ -136,6 +148,7 @@ impl App {
                     && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.select_all_editor();
+                self.copy_editor_selection();
             }
             KeyCode::Esc if key_event.kind == KeyEventKind::Press => self.exit_editor(),
             KeyCode::Tab if key_event.kind == KeyEventKind::Press => {
@@ -171,20 +184,16 @@ impl App {
                     && key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.select_all_editor();
+                self.copy_editor_selection();
             }
             KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
-                self.save_undo_state();
-                self.clear_editor_selection();
+                if !self.editor_selection.active {
+                    self.save_undo_state();
+                }
                 self.insert_editor_character('\n');
             }
-            KeyCode::Backspace if key_event.kind == KeyEventKind::Press => {
-                self.clear_editor_selection();
-                self.editor_backspace()
-            }
-            KeyCode::Delete if key_event.kind == KeyEventKind::Press => {
-                self.clear_editor_selection();
-                self.editor_delete()
-            }
+            KeyCode::Backspace if key_event.kind == KeyEventKind::Press => self.editor_backspace(),
+            KeyCode::Delete if key_event.kind == KeyEventKind::Press => self.editor_delete(),
             KeyCode::Left
                 if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
             {
@@ -409,7 +418,7 @@ impl App {
                 }
             }
             KeyCode::Down => {
-                if self.settings_selected < 8 {
+                if self.settings_selected < 9 {
                     self.settings_selected += 1;
                 }
             }
@@ -463,16 +472,19 @@ impl App {
                         self.toggle_agent_mode();
                     }
                     3 => {
-                        self.cycle_note_save_target();
+                        self.cycle_agent_context_scope();
                     }
                     4 => {
-                        self.toggle_editor_images();
+                        self.cycle_note_save_target();
                     }
                     5 => {
+                        self.toggle_editor_images();
+                    }
+                    6 => {
                         // Pair Obsidian vault
                         self.open_vault_picker();
                     }
-                    6 => {
+                    7 => {
                         // Sign out / Logout
                         self.openrouter_api_key = None;
                         self.strix_access_token = None;
@@ -507,7 +519,7 @@ impl App {
                         self.panel_lines.clear();
                         self.last_action = String::from("Signed out.");
                     }
-                    7 => {
+                    8 => {
                         // Reset & Clear Cache
                         self.reset_and_clear_all();
                         self.panel_mode = PanelMode::Commands;
@@ -515,7 +527,7 @@ impl App {
                         self.panel_lines.clear();
                         self.last_action = String::from("Reset complete. All data cleared.");
                     }
-                    8 => {
+                    9 => {
                         // Close settings
                         self.panel_mode = PanelMode::Commands;
                         self.panel_title = String::from("Commands");

@@ -1317,6 +1317,7 @@ impl App {
             raw_content: content.to_string(),
             updated_at: self.uptime(),
             folder_id: self.current_folder_id,
+            strix_sync_pending: false,
         };
 
         self.create_auto_temporal_fork("Before note create");
@@ -1346,7 +1347,14 @@ impl App {
         }
 
         if note.remote_id.is_some() && self.is_strix_connected() {
-            self.delete_strix_note(&note)?;
+            // Best-effort: the Strix native API does not expose DELETE yet, so
+            // a remote failure must not block deleting the local copy.
+            if let Err(error) = self.delete_strix_note(&note) {
+                self.add_strix_log(format!(
+                    "Remote delete failed (note stays on Strix): {}",
+                    error
+                ));
+            }
         }
 
         self.notes.remove(index);
@@ -1362,7 +1370,9 @@ impl App {
             .note_list_indices
             .iter()
             .filter_map(|&note_index| {
-                if note_index == index {
+                if note_index == usize::MAX {
+                    Some(usize::MAX)
+                } else if note_index == index {
                     None
                 } else if note_index > index {
                     Some(note_index - 1)
@@ -1397,7 +1407,9 @@ impl App {
         self.chat_messages.push(ChatMessage {
             role: role.into(),
             content: content.into(),
-            timestamp: self.uptime(),
+            timestamp: Self::clock_time_label(),
+            thought_seconds: None,
+            turn_seconds: None,
         });
 
         if self.chat_messages.len() > MAX_CHAT_MESSAGES {
@@ -1416,8 +1428,22 @@ impl App {
         self.chat_scroll_offset = self.chat_scroll_offset.saturating_sub(lines);
     }
 
+    pub(super) fn clock_time_label() -> String {
+        let formatted = chrono::Local::now().format("%I:%M %p").to_string();
+        formatted
+            .strip_prefix('0')
+            .map(str::to_string)
+            .unwrap_or(formatted)
+    }
+
     pub(super) fn add_strix_log(&mut self, message: impl Into<String>) {
-        let timestamp = self.uptime();
+        self.add_system_log(message);
+    }
+
+    /// Shared provider/system log (shown as "Activity Log" in the login
+    /// panel). Both Strix and OpenRouter events land here.
+    pub(super) fn add_system_log(&mut self, message: impl Into<String>) {
+        let timestamp = Self::clock_time_label();
         let message = message.into();
         self.strix_logs.push(format!("[{}] {}", timestamp, message));
         // Keep only last 50 log entries

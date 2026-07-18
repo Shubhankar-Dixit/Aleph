@@ -15,9 +15,10 @@ use self::panels::{
     render_commands_panel, render_note_editor_panel, render_note_list_panel,
     render_obsidian_vault_picker_panel, render_path_list_panel, render_room_list_panel,
 };
-use crate::app::{AiProvider, App, PanelMode};
+use crate::app::{AiProvider, App, EditorSaveStatus, PanelMode};
 pub(crate) use chat_settings::settings_items_area;
 use chat_settings::{render_full_chat, render_obsidian_sync_confirm_panel, render_settings_panel};
+pub(crate) use editor::editor_position_at;
 use editor::render_full_editor;
 use markdown::{
     render_markdown_line, render_markdown_line_with_cursor, render_markdown_line_with_selection,

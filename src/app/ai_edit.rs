@@ -36,6 +36,11 @@ impl App {
         let title_context = draft_create_title
             .as_deref()
             .map(|title| format!("New note title: {}\n\n", title))
+            .or_else(|| {
+                self.editor_note_index
+                    .and_then(|index| self.notes.get(index))
+                    .map(|note| format!("Note title: {}\n\n", note.title))
+            })
             .unwrap_or_default();
         let user_msg = format!(
             "{}Current note content:\n---\n{}\n---\n\nInstruction: {}",
@@ -94,17 +99,37 @@ impl App {
                     raw_content: String::new(),
                     updated_at: String::new(),
                     folder_id: None,
+                    strix_sync_pending: false,
                 }];
+                let fallback_api_key = openrouter_api_key;
                 thread::spawn(move || {
-                    if let Err(error) = Self::send_strix_chat(
+                    let strix_result = Self::send_strix_chat(
                         &base_url,
                         &access_token,
                         &strix_instruction,
                         "",
                         &notes,
                         sender.clone(),
-                    ) {
-                        let _ = sender.send(ChatStreamUpdate::Error(error));
+                    );
+                    if let Err(error) = strix_result {
+                        if let Some(api_key) = fallback_api_key {
+                            let _ = sender.send(ChatStreamUpdate::Notice(format!(
+                                "Strix edit failed ({}); falling back to OpenRouter",
+                                error
+                            )));
+                            if let Err(fallback_error) = Self::send_openrouter_chat_streaming(
+                                &api_key,
+                                &conversation,
+                                sender.clone(),
+                            ) {
+                                let _ = sender.send(ChatStreamUpdate::Error(format!(
+                                    "Strix edit failed ({}); OpenRouter fallback also failed: {}",
+                                    error, fallback_error
+                                )));
+                            }
+                        } else {
+                            let _ = sender.send(ChatStreamUpdate::Error(error));
+                        }
                     }
                 });
             }
@@ -133,6 +158,10 @@ impl App {
                     self.thinking = true;
                     self.thinking_status = String::from("Aleph is editing...");
                 }
+                Ok(ChatStreamUpdate::Notice(notice)) => {
+                    self.add_system_log(notice.clone());
+                    self.add_activity(notice);
+                }
                 Ok(ChatStreamUpdate::Done) => {
                     self.ghost_streaming = false;
                     self.thinking = false;
@@ -141,7 +170,7 @@ impl App {
                     self.ghost_stream_rx = None;
 
                     if let Some(ref result) = self.ghost_result {
-                        let proposed = result.trim().to_string();
+                        let proposed = Self::clean_ai_note_output(result);
                         if proposed.is_empty() {
                             self.ghost_result =
                                 Some(String::from("AI returned an empty proposal."));
@@ -149,7 +178,12 @@ impl App {
                         } else if proposed == self.editor_buffer {
                             self.ghost_result = Some(String::from("No changes proposed."));
                             self.last_action = String::from("AI note edit found no changes.");
-                        } else if let Some(title) = self.ai_draft_create_title.clone() {
+                        } else if self.editor_note_index.is_none() {
+                            let title = self
+                                .ai_draft_create_title
+                                .clone()
+                                .or_else(|| Self::infer_title_from_proposed_note(&proposed))
+                                .unwrap_or_else(|| String::from("Untitled note"));
                             let diff_lines = Self::build_line_diff("", &proposed);
                             self.pending_ai_edit = Some(AiEditProposal {
                                 note_index: None,
@@ -214,7 +248,8 @@ impl App {
             let title = proposal
                 .title
                 .clone()
-                .unwrap_or_else(|| String::from("AI draft"));
+                .or_else(|| Self::infer_title_from_proposed_note(&proposal.proposed))
+                .unwrap_or_else(|| String::from("Untitled note"));
             match self.create_note_from_content(&title, &proposal.proposed) {
                 Ok(index) => {
                     self.selected_note = index;
@@ -240,7 +275,7 @@ impl App {
         self.editor_buffer = proposal.proposed;
         self.editor_cursor = self.editor_buffer.len();
         self.ghost_result = None;
-        self.save_editor_with_temporal_fork(None);
+        self.save_editor_contents();
         self.last_action = String::from("Applied AI note edits.");
         self.close_ai_overlay();
     }
@@ -253,6 +288,61 @@ impl App {
         self.thinking = false;
         self.thinking_ticks_remaining = 0;
         self.last_action = String::from("Rejected AI note edits.");
+    }
+
+    /// Models frequently ignore the "no code fences, no preamble" instruction.
+    /// Strip a wrapping ``` fence and a leading "Here is..." style announcement
+    /// so raw prose never lands in the note.
+    pub(super) fn clean_ai_note_output(raw: &str) -> String {
+        let mut text = raw.trim();
+
+        if text.starts_with("```") && text.ends_with("```") && text.len() > 6 {
+            let inner = &text[..text.len() - 3];
+            if let Some(newline) = inner.find('\n') {
+                text = inner[newline + 1..].trim_matches('\n');
+            }
+        }
+
+        let mut lines = text.lines();
+        if let Some(first) = lines.next() {
+            let lower = first.trim().to_lowercase();
+            let is_preamble = first.trim().ends_with(':')
+                && [
+                    "here is",
+                    "here's",
+                    "here are",
+                    "sure",
+                    "certainly",
+                    "okay",
+                    "below is",
+                    "updated note",
+                    "the updated",
+                ]
+                .iter()
+                .any(|prefix| lower.starts_with(prefix));
+            if is_preamble {
+                let rest = lines.collect::<Vec<_>>().join("\n");
+                let rest = rest.trim();
+                if !rest.is_empty() {
+                    return rest.to_string();
+                }
+            }
+        }
+
+        text.trim().to_string()
+    }
+
+    pub(super) fn infer_title_from_proposed_note(content: &str) -> Option<String> {
+        for line in content.lines().map(str::trim) {
+            let candidate = line
+                .trim_start_matches('#')
+                .trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+            if candidate.is_empty() {
+                continue;
+            }
+            return Some(candidate.chars().take(80).collect());
+        }
+        None
     }
 
     pub(super) fn build_line_diff(original: &str, proposed: &str) -> Vec<String> {

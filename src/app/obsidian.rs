@@ -206,6 +206,7 @@ impl App {
             raw_content: content,
             updated_at,
             folder_id,
+            strix_sync_pending: false,
         });
         self.selected_note = self.notes.len() - 1;
     }
@@ -723,6 +724,47 @@ impl App {
         )
     }
 
+    pub(super) fn parse_agent_context_scope(value: &str) -> Option<AgentContextScope> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "current-folder" | "current folder" | "folder" | "cwd" => {
+                Some(AgentContextScope::CurrentFolder)
+            }
+            "active-room" | "active room" | "room" => Some(AgentContextScope::ActiveRoom),
+            "global" | "all" => Some(AgentContextScope::Global),
+            _ => None,
+        }
+    }
+
+    pub(super) fn agent_context_scope_config_value(scope: AgentContextScope) -> &'static str {
+        match scope {
+            AgentContextScope::CurrentFolder => "current-folder",
+            AgentContextScope::ActiveRoom => "active-room",
+            AgentContextScope::Global => "global",
+        }
+    }
+
+    pub(super) fn agent_context_scope_name(scope: AgentContextScope) -> &'static str {
+        match scope {
+            AgentContextScope::CurrentFolder => "Current folder",
+            AgentContextScope::ActiveRoom => "Active room",
+            AgentContextScope::Global => "Global",
+        }
+    }
+
+    pub(super) fn load_agent_context_scope() -> Option<AgentContextScope> {
+        fs::read_to_string(Self::agent_context_scope_path())
+            .ok()
+            .and_then(|value| Self::parse_agent_context_scope(&value))
+    }
+
+    pub(super) fn store_agent_context_scope(&self) -> Result<(), String> {
+        Self::write_config_value(
+            Self::agent_context_scope_path(),
+            Self::agent_context_scope_config_value(self.agent_context_scope),
+            "agent context scope setting",
+        )
+    }
+
     pub(super) fn load_editor_images_enabled() -> Option<bool> {
         match fs::read_to_string(Self::editor_images_path())
             .ok()?
@@ -796,6 +838,10 @@ impl App {
 
     pub(super) fn agent_mode_path() -> PathBuf {
         Self::aleph_config_dir().join(AGENT_MODE_CONFIG)
+    }
+
+    pub(super) fn agent_context_scope_path() -> PathBuf {
+        Self::aleph_config_dir().join(AGENT_CONTEXT_SCOPE_CONFIG)
     }
 
     pub(super) fn editor_images_path() -> PathBuf {
